@@ -54,7 +54,7 @@ enum class SpeechModel(
     KOKORO(
         directoryName = "kokoro-int8-multi-lang-v1_0",
         title = "Kokoro v1.0",
-        sizeLabel = "≈ 150 МБ",
+        sizeLabel = "≈ 130 МБ",
         source = ModelSource.Archive(
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-multi-lang-v1_0.tar.bz2",
         ),
@@ -69,6 +69,9 @@ enum class SpeechModel(
         ),
         requiredFiles = listOf("model.onnx", "voices.bin", "tokens.txt", "espeak-ng-data/phontab"),
     );
+
+    /** Unquantized weights; the other variant of the same voice is the compact INT8 build. */
+    val isFullPrecision: Boolean get() = this == SUPERTONIC_FULL || this == KOKORO_FULL
 
     /** The Kokoro archives also carry Chinese dictionaries that an English voice never reads. */
     internal fun keepArchiveEntry(path: String): Boolean = when (this) {

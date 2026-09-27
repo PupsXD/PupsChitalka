@@ -113,8 +113,9 @@ fun VoiceSettingsSheet(
                     ModelCard(
                         title = "Kokoro v1.0",
                         badge = "Лучший английский",
-                        description = "82M параметров, естественная интонация. Работает на устройстве; на Galaxy S24 Ultra быстрее реального времени.",
-                        models = listOf(SpeechModel.KOKORO, SpeechModel.KOKORO_FULL),
+                        description = "82M параметров, естественная интонация, работает на устройстве. Полная версия звучит чище " +
+                            "и в замерах синтезирует в 2,5 раза быстрее компактной; компактная занимает меньше места.",
+                        models = listOf(SpeechModel.KOKORO_FULL, SpeechModel.KOKORO),
                         presets = VoiceCatalog.kokoro,
                         language = language,
                         selected = selected,
@@ -182,7 +183,7 @@ fun VoiceSettingsSheet(
             item {
                 ToggleRow(
                     title = "Полноточные модели",
-                    subtitle = "Использовать веса без квантования, если они скачаны: чуть чище звук, дольше подготовка",
+                    subtitle = "Если скачаны обе версии модели, читать полноточной: звук чище, памяти нужно больше",
                     checked = state.preferFullModels,
                     onChange = actions::setPreferFullModels,
                 )
@@ -278,9 +279,10 @@ private fun ModelCard(
     SheetCard {
         CardTitle(title, badge)
         Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        val base = models.first()
         val installed = models.any { it in state.installedModels }
-        models.forEach { model -> ModelStatusRow(model, isBase = model == base, state = state, actions = actions) }
+        models.forEach { model ->
+            ModelStatusRow(model, suggested = model == models.first() && !installed, state = state, actions = actions)
+        }
         if (installed) {
             presets.forEach { preset ->
                 VoiceRow(
@@ -301,13 +303,13 @@ private fun ModelCard(
 }
 
 @Composable
-private fun ModelStatusRow(model: SpeechModel, isBase: Boolean, state: VoiceSettingsUi, actions: VoiceSettingsActions) {
+private fun ModelStatusRow(model: SpeechModel, suggested: Boolean, state: VoiceSettingsUi, actions: VoiceSettingsActions) {
     val install = state.installStates[model]
     val installed = model in state.installedModels
     val busy = install?.stage in setOf(
         ModelInstallState.Stage.QUEUED, ModelInstallState.Stage.DOWNLOADING, ModelInstallState.Stage.EXTRACTING,
     )
-    val label = if (isBase) "Модель · ${model.sizeLabel}" else "Полная точность · ${model.sizeLabel}"
+    val label = "${if (model.isFullPrecision) "Полная точность" else "Компактная INT8"} · ${model.sizeLabel}"
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -318,7 +320,7 @@ private fun ModelStatusRow(model: SpeechModel, isBase: Boolean, state: VoiceSett
                     busy && install?.stage == ModelInstallState.Stage.QUEUED -> "В очереди"
                     busy -> "Загрузка…"
                     install?.stage == ModelInstallState.Stage.FAILED -> install.message ?: "Ошибка загрузки"
-                    else -> if (isBase) "Не скачана" else "Необязательно"
+                    else -> if (suggested) "Не скачана" else "Необязательно"
                 }
                 Text(
                     status,
@@ -332,7 +334,7 @@ private fun ModelStatusRow(model: SpeechModel, isBase: Boolean, state: VoiceSett
                 installed -> IconButton(onClick = { actions.delete(model) }) {
                     Icon(Icons.Filled.Delete, contentDescription = "Удалить модель", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                isBase -> Button(onClick = { actions.download(model) }) {
+                suggested -> Button(onClick = { actions.download(model) }) {
                     Icon(Icons.Filled.Download, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
                     Text("Скачать")
