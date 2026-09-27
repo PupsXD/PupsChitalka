@@ -22,11 +22,17 @@ data class SpeechSegment(
     val text: String,
     val language: String,
     val pause: SegmentPause,
+    val role: SpeechRole = SpeechRole.NARRATOR,
 )
+
+/** Who says a segment: the narrator, or a character whose gender may be known from the attribution. */
+enum class SpeechRole { NARRATOR, SPEECH, MALE, FEMALE }
 
 /** What follows a segment; the player turns it into silence scaled by speed and user preference. */
 enum class SegmentPause(val baseMs: Int) {
     CLAUSE(90),
+    /** Between a character's line and the author's words inside one paragraph. */
+    TURN(150),
     SENTENCE(320),
     PARAGRAPH(620),
     TITLE(900),
@@ -135,13 +141,15 @@ fun dominantLanguage(paragraphs: List<String>, fallback: String = "ru"): String 
 
 /**
  * Splits a chapter into narration segments. The chapter title is spoken first unless the text
- * already starts with it.
+ * already starts with it. With [splitDialogue], characters' lines become their own segments with a
+ * [SpeechRole], so dialogue voices can read them.
  */
 fun chapterSegments(
     chapterIndex: Int,
     title: String?,
     paragraphs: List<String>,
     maxChars: Int = 260,
+    splitDialogue: Boolean = false,
 ): List<SpeechSegment> {
     val chapterLanguage = dominantLanguage(paragraphs)
     val result = mutableListOf<SpeechSegment>()
@@ -158,26 +166,46 @@ fun chapterSegments(
             pause = SegmentPause.TITLE,
         )
     }
+    val speakers = SpeakerTracker()
     paragraphs.forEachIndexed { paragraphIndex, paragraph ->
         if (paragraph.isBlank()) return@forEachIndexed
         val paragraphLanguage = detectSpeechLanguage(paragraph, chapterLanguage)
-        val chunks = splitForSpeech(paragraph, paragraphLanguage, maxChars)
-        chunks.forEachIndexed { index, chunk ->
-            val last = index == chunks.lastIndex
-            val ending = chunk.text.trimEnd().lastOrNull()
-            result += SpeechSegment(
-                chapter = chapterIndex,
-                paragraph = paragraphIndex,
-                start = chunk.start,
-                end = chunk.end,
-                text = chunk.text,
-                language = detectSpeechLanguage(chunk.text, paragraphLanguage),
-                pause = when {
-                    last -> SegmentPause.PARAGRAPH
-                    ending != null && ending in sentenceEnd -> SegmentPause.SENTENCE
-                    else -> SegmentPause.CLAUSE
-                },
-            )
+        val parts = if (splitDialogue) dialogueParts(paragraph, paragraphLanguage) else null
+        val roles = parts?.let { speakers.rolesFor(paragraph, it, paragraphLanguage) }
+            ?: run {
+                speakers.narration(paragraph)
+                null
+            }
+        val spans = parts ?: listOf(VoicePart(0, paragraph.length, speech = false))
+        spans.forEachIndexed { partIndex, part ->
+            val role = roles?.getOrNull(partIndex) ?: SpeechRole.NARRATOR
+            val chunks = splitForSpeech(paragraph.substring(part.start, part.end), paragraphLanguage, maxChars)
+                .map { SpeechChunk(it.text, it.start + part.start, it.end + part.start) }
+            val lastPart = partIndex == spans.lastIndex
+            // «— Ты куда? — спросил отец»: the attribution follows the line at once.
+            val attributionNext = spans.getOrNull(partIndex + 1)?.let { next ->
+                part.speech && !next.speech && paragraph[next.start].isLowerCase()
+            } == true
+            chunks.forEachIndexed { index, chunk ->
+                val last = index == chunks.lastIndex
+                val ending = chunk.text.trimEnd().lastOrNull()
+                result += SpeechSegment(
+                    chapter = chapterIndex,
+                    paragraph = paragraphIndex,
+                    start = chunk.start,
+                    end = chunk.end,
+                    text = chunk.text,
+                    language = detectSpeechLanguage(chunk.text, paragraphLanguage),
+                    pause = when {
+                        last && lastPart -> SegmentPause.PARAGRAPH
+                        last && attributionNext -> SegmentPause.TURN
+                        ending != null && ending in sentenceEnd -> SegmentPause.SENTENCE
+                        last -> SegmentPause.TURN
+                        else -> SegmentPause.CLAUSE
+                    },
+                    role = role,
+                )
+            }
         }
     }
     if (result.isNotEmpty()) {

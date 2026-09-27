@@ -25,6 +25,7 @@ import android.os.SystemClock
 import android.util.Log
 import com.ozvuchka.app.R
 import com.ozvuchka.app.data.Book
+import com.ozvuchka.app.data.Chapter
 import com.ozvuchka.app.data.LibraryStore
 import com.ozvuchka.app.data.chapterProgressOf
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -70,6 +71,10 @@ object NarrationController {
         val offset: Int,
         val preview: SpeechSegment? = null,
         val previewVoice: VoiceChoice? = null,
+        /** A short multi-paragraph sample, read with the saved settings (dialogue voices). */
+        val previewParagraphs: List<String>? = null,
+        /** Pronunciations for a preview; a book uses its saved ones. */
+        val pronunciations: PronunciationDictionary? = null,
     )
 
     private val mutableState = MutableStateFlow(NarrationState())
@@ -87,9 +92,34 @@ object NarrationController {
     }
 
     /** Plays a short sample with [voice] without touching reading positions. */
-    fun preview(context: Context, voice: VoiceChoice, language: String, text: String): Boolean {
+    fun preview(
+        context: Context,
+        voice: VoiceChoice,
+        language: String,
+        text: String,
+        pronunciations: PronunciationDictionary? = null,
+    ): Boolean {
         val segment = SpeechSegment(-1, -2, 0, text.length, text, language, SegmentPause.SENTENCE)
-        pending.set(PlayRequest(null, 0, 0, 0, preview = segment, previewVoice = voice))
+        pending.set(PlayRequest(null, 0, 0, 0, preview = segment, previewVoice = voice, pronunciations = pronunciations))
+        return start(context, NarrationService.ACTION_PLAY)
+    }
+
+    /** Plays a short dialogue with the saved narrator and character voices. */
+    fun previewDialogue(context: Context, language: String): Boolean {
+        val paragraphs = if (language == "en") {
+            listOf(
+                "“Are you coming back?” she whispered.",
+                "“Of course,” he said without turning around. “It will all be over by morning.”",
+                "She watched him go for a long time.",
+            )
+        } else {
+            listOf(
+                "— Ты вернёшься? — спросила она почти шёпотом.",
+                "— Конечно, — ответил он, не оборачиваясь. — К утру всё закончится.",
+                "Она долго смотрела ему вслед.",
+            )
+        }
+        pending.set(PlayRequest(null, 0, 0, 0, previewParagraphs = paragraphs))
         return start(context, NarrationService.ACTION_PLAY)
     }
 
@@ -157,6 +187,7 @@ class NarrationService : Service(), NarrationPlayer.Listener {
 
     private var book: Book? = null
     private var source: BookSegmentSource? = null
+    private var pronunciations = PronunciationDictionary.EMPTY
     private var previewSource: SegmentSource? = null
     private var settings: SpeechSettings? = null
     private var state = NarrationState()
@@ -282,19 +313,34 @@ class NarrationService : Service(), NarrationPlayer.Listener {
         if (player.isActive && book != null) saveNow()
         val loaded = SpeechSettings.load(this)
         val preview = request.preview
+        val sample = request.previewParagraphs
         if (preview != null) {
             book = null
             source = null
             val voice = request.previewVoice ?: loaded.voiceFor(preview.language)
-            settings = if (preview.language == "en") loaded.copy(englishVoice = voice) else loaded.copy(russianVoice = voice)
+            // A single voice is being auditioned: no character voices in the way.
+            settings = if (preview.language == "en") {
+                loaded.copy(englishVoice = voice, englishDialogue = DialogueVoices())
+            } else {
+                loaded.copy(russianVoice = voice, russianDialogue = DialogueVoices())
+            }
+            pronunciations = request.pronunciations ?: PronunciationDictionary.EMPTY
             previewSource = SingleSegmentSource(preview)
             state = NarrationState(phase = NarrationPhase.PREPARING, bookTitle = "Пример голоса", isPreview = true)
+        } else if (sample != null) {
+            book = null
+            source = null
+            settings = loaded
+            pronunciations = PronunciationDictionary.EMPTY
+            previewSource = BookSegmentSource(listOf(Chapter("", sample)), 0, splitDialogue = true)
+            state = NarrationState(phase = NarrationPhase.PREPARING, bookTitle = "Пример диалога", isPreview = true)
         } else {
             val target = request.book ?: return
             book = target
             previewSource = null
             settings = loaded
-            val bookSource = BookSegmentSource(target.chapters, request.chapter)
+            pronunciations = PronunciationStore.load(this, target.id)
+            val bookSource = BookSegmentSource(target.chapters, request.chapter, splitDialogue = loaded.splitsDialogue)
             source = bookSource
             lastIndex = bookSource.indexOf(request.chapter, request.paragraph, request.offset)
             val chapter = target.chapters.getOrNull(request.chapter)
@@ -312,15 +358,16 @@ class NarrationService : Service(), NarrationPlayer.Listener {
         publish(state)
         updateSession()
         val activeSettings = settings ?: return
-        val voiceCheck = activeSettings.voiceFor(preview?.language ?: dominantBookLanguage())
+        val previewLanguage = preview?.language ?: sample?.let { dominantLanguage(it) }
+        val voiceCheck = activeSettings.voiceFor(previewLanguage ?: dominantBookLanguage())
         if (!hub.isAvailable(voiceCheck, activeSettings) && !hub.isAvailable(VoiceChoice(VoiceEngine.SUPERTONIC), activeSettings)) {
             finish(save = false, error = "Сначала скачайте голос в настройках озвучки")
             return
         }
-        if (preview != null) {
-            player.play(previewSource!!, 0, activeSettings)
+        if (preview != null || sample != null) {
+            player.play(previewSource!!, 0, activeSettings, pronunciations = pronunciations)
         } else {
-            player.play(source!!, lastIndex, activeSettings)
+            player.play(source!!, lastIndex, activeSettings, pronunciations = pronunciations)
         }
     }
 
@@ -373,22 +420,33 @@ class NarrationService : Service(), NarrationPlayer.Listener {
         handler.removeCallbacks(idleStop)
         requestFocus()
         lastIndex = target
-        player.play(currentSource, target, activeSettings, stopAtChapterEnd = state.sleepAtChapterEnd)
+        player.play(currentSource, target, activeSettings, stopAtChapterEnd = state.sleepAtChapterEnd, pronunciations = pronunciations)
         publish(state.copy(phase = NarrationPhase.PREPARING))
         updateSession()
     }
 
     private fun restartWithNewSettings() {
         val loaded = SpeechSettings.load(this)
-        val currentSource = source
+        book?.let { pronunciations = PronunciationStore.load(this, it.id) }
+        var currentSource = source
         if (currentSource == null || !player.isActive) {
             settings = loaded
             return
         }
         settings = loaded
         val wasPaused = player.isPaused
-        val index = player.currentIndex ?: lastIndex
-        player.play(currentSource, index, loaded, stopAtChapterEnd = state.sleepAtChapterEnd)
+        var index = player.currentIndex ?: lastIndex
+        val target = book
+        if (target != null && currentSource.splitDialogue != loaded.splitsDialogue) {
+            // Dialogue voices were switched on or off: cut the text again, keeping the place.
+            val here = currentSource.get(index)
+            val chapter = here?.chapter ?: state.chapterIndex ?: 0
+            val rebuilt = BookSegmentSource(target.chapters, chapter, splitDialogue = loaded.splitsDialogue)
+            index = if (here == null) 0 else rebuilt.indexOf(here.chapter, here.paragraph, here.start)
+            source = rebuilt
+            currentSource = rebuilt
+        }
+        player.play(currentSource, index, loaded, stopAtChapterEnd = state.sleepAtChapterEnd, pronunciations = pronunciations)
         if (wasPaused) {
             player.pause()
         } else {

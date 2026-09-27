@@ -45,6 +45,7 @@ import com.ozvuchka.app.data.chapterProgressOf
 import com.ozvuchka.app.importer.FileBookImporter
 import com.ozvuchka.app.importer.WebChapter
 import com.ozvuchka.app.importer.WebChapterImporter
+import com.ozvuchka.app.speech.DialogueVoices
 import com.ozvuchka.app.speech.ModelInstallState
 import com.ozvuchka.app.speech.NarrationController
 import com.ozvuchka.app.speech.NarrationPhase
@@ -212,6 +213,9 @@ class MainActivity : ComponentActivity() {
                                     engineVoices = engineVoices,
                                     loadingEngines = loadingEngines,
                                     previewVoice = previewVoice.takeIf { narration.isPreview && narration.active },
+                                    russianDialogue = settings.russianDialogue,
+                                    englishDialogue = settings.englishDialogue,
+                                    dialoguePreviewing = narration.isPreview && narration.active && previewVoice == null,
                                 ),
                                 initialLanguage = voicesLanguage,
                                 actions = voiceActions,
@@ -618,6 +622,14 @@ class MainActivity : ComponentActivity() {
         }
 
         override fun loadEngineVoices(enginePackage: String) = this@MainActivity.loadEngineVoices(enginePackage)
+
+        override fun setDialogue(language: String, dialogue: DialogueVoices) =
+            updateSpeech { if (language == "en") it.copy(englishDialogue = dialogue) else it.copy(russianDialogue = dialogue) }
+
+        override fun previewDialogue(language: String) {
+            previewVoice = null
+            NarrationController.previewDialogue(this@MainActivity, language)
+        }
 
         override fun refreshSystemVoices() {
             loadSelectedEngineVoices(reload = true)

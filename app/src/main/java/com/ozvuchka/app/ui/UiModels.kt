@@ -1,5 +1,6 @@
 package com.ozvuchka.app.ui
 
+import com.ozvuchka.app.speech.DialogueVoices
 import com.ozvuchka.app.speech.ModelInstallState
 import com.ozvuchka.app.speech.SpeechModel
 import com.ozvuchka.app.speech.SystemEngineInfo
@@ -129,6 +130,10 @@ data class VoiceSettingsUi(
     val loadingEngines: Set<String> = emptySet(),
     /** The voice whose sample is playing now. */
     val previewVoice: VoiceChoice? = null,
+    val russianDialogue: DialogueVoices = DialogueVoices(),
+    val englishDialogue: DialogueVoices = DialogueVoices(),
+    /** The sample dialogue is playing. */
+    val dialoguePreviewing: Boolean = false,
 ) {
     val ruVoiceInstalled: Boolean get() = systemEngines.any { it.packageName == VoiceCatalog.RUVOICE_PACKAGE }
 }
@@ -150,4 +155,6 @@ interface VoiceSettingsActions {
     fun openEngineApp(enginePackage: String)
     fun loadEngineVoices(enginePackage: String)
     fun refreshSystemVoices()
+    fun setDialogue(language: String, dialogue: DialogueVoices)
+    fun previewDialogue(language: String)
 }

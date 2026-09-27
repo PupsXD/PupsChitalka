@@ -88,6 +88,28 @@ object VoiceCatalog {
         }
 }
 
+/** How characters' lines are voiced in one language. */
+enum class DialogueMode { OFF, SINGLE, BY_GENDER }
+
+data class DialogueVoices(
+    val mode: DialogueMode = DialogueMode.OFF,
+    /** Every character's line, in [DialogueMode.SINGLE]. */
+    val single: VoiceChoice? = null,
+    val male: VoiceChoice? = null,
+    val female: VoiceChoice? = null,
+) {
+    /** A line whose speaker is unknown stays with the narrator rather than risk the wrong gender. */
+    fun voiceFor(role: SpeechRole, narrator: VoiceChoice): VoiceChoice = when (mode) {
+        DialogueMode.OFF -> narrator
+        DialogueMode.SINGLE -> if (role == SpeechRole.NARRATOR) narrator else single ?: narrator
+        DialogueMode.BY_GENDER -> when (role) {
+            SpeechRole.MALE -> male ?: narrator
+            SpeechRole.FEMALE -> female ?: narrator
+            else -> narrator
+        }
+    }
+}
+
 /** Narration preferences shared by the reader UI and the playback service. */
 data class SpeechSettings(
     val russianVoice: VoiceChoice,
@@ -96,8 +118,19 @@ data class SpeechSettings(
     val pauseScale: Float,
     val supertonicSteps: Int,
     val preferFullModels: Boolean,
+    val russianDialogue: DialogueVoices = DialogueVoices(),
+    val englishDialogue: DialogueVoices = DialogueVoices(),
 ) {
     fun voiceFor(language: String): VoiceChoice = if (language == "en") englishVoice else russianVoice
+
+    fun dialogueFor(language: String): DialogueVoices = if (language == "en") englishDialogue else russianDialogue
+
+    /** The voice for a segment: the narrator, or a character voice when dialogue voices are on. */
+    fun voiceFor(language: String, role: SpeechRole): VoiceChoice = dialogueFor(language).voiceFor(role, voiceFor(language))
+
+    /** Characters' lines are cut into their own segments only when some language voices them apart. */
+    val splitsDialogue: Boolean
+        get() = russianDialogue.mode != DialogueMode.OFF || englishDialogue.mode != DialogueMode.OFF
 
     companion object {
         private const val PREFS = "reader"
@@ -123,7 +156,24 @@ data class SpeechSettings(
                 pauseScale = prefs.getFloat("pauseScale", 1f).coerceIn(0.4f, 2f),
                 supertonicSteps = prefs.getInt("supertonicSteps", 10).coerceIn(4, 32),
                 preferFullModels = prefs.getBoolean("preferFullVoice", true),
+                russianDialogue = loadDialogue(prefs, "Ru"),
+                englishDialogue = loadDialogue(prefs, "En"),
             )
+        }
+
+        private fun loadDialogue(prefs: android.content.SharedPreferences, suffix: String) = DialogueVoices(
+            mode = runCatching { DialogueMode.valueOf(prefs.getString("dialogueMode$suffix", null) ?: "OFF") }
+                .getOrDefault(DialogueMode.OFF),
+            single = VoiceChoice.decode(prefs.getString("dialogueVoice$suffix", null)),
+            male = VoiceChoice.decode(prefs.getString("dialogueMale$suffix", null)),
+            female = VoiceChoice.decode(prefs.getString("dialogueFemale$suffix", null)),
+        )
+
+        private fun android.content.SharedPreferences.Editor.putDialogue(suffix: String, dialogue: DialogueVoices) = apply {
+            putString("dialogueMode$suffix", dialogue.mode.name)
+            putString("dialogueVoice$suffix", dialogue.single?.encode())
+            putString("dialogueMale$suffix", dialogue.male?.encode())
+            putString("dialogueFemale$suffix", dialogue.female?.encode())
         }
 
         fun save(context: Context, settings: SpeechSettings) {
@@ -134,6 +184,8 @@ data class SpeechSettings(
                 .putFloat("pauseScale", settings.pauseScale)
                 .putInt("supertonicSteps", settings.supertonicSteps)
                 .putBoolean("preferFullVoice", settings.preferFullModels)
+                .putDialogue("Ru", settings.russianDialogue)
+                .putDialogue("En", settings.englishDialogue)
                 .apply()
         }
     }

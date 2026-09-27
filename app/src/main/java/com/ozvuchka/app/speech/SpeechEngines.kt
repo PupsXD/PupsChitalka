@@ -404,6 +404,21 @@ object SystemVoices {
         else -> label?.takeIf { it.isNotBlank() } ?: packageName
     }
 
+    /** Gender of well-known voices, for choosing character voices; null when the name does not say. */
+    fun gender(voice: SystemVoiceInfo): SpeechRole? {
+        val name = voice.name.lowercase()
+        return when {
+            voice.enginePackage == VoiceCatalog.RUVOICE_PACKAGE -> when (name.substringBefore('-')) {
+                "aidar", "eugene" -> SpeechRole.MALE
+                "baya", "kseniya", "xenia" -> SpeechRole.FEMALE
+                else -> null
+            }
+            Regex("smtm\\d+$").containsMatchIn(name) -> SpeechRole.MALE
+            Regex("smtf\\d+$").containsMatchIn(name) -> SpeechRole.FEMALE
+            else -> null
+        }
+    }
+
     /** Human-friendly names for common engine voice identifiers. */
     fun describe(voice: SystemVoiceInfo): String {
         val name = voice.name
