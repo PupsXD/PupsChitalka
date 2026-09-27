@@ -2,6 +2,8 @@ package com.ozvuchka.app.speech
 
 import android.content.Context
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
@@ -16,21 +18,31 @@ import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 class VoiceUnavailableException(message: String) : IllegalStateException(message)
 
 /**
- * Owns every synthesizer used during narration: in-process sherpa-onnx models (loaded once and
- * kept while the service lives) and connections to Android TTS engines such as RuVoice.
- * [synthesize] blocks and must be called from a background thread.
+ * Owns every synthesizer used during narration: in-process sherpa-onnx models and connections to
+ * Android TTS engines such as RuVoice. One instance lives per process, so a model loaded when a
+ * book is opened is ready when «Слушать» is pressed; models are released after a few idle
+ * minutes. [synthesize] blocks and must be called from a background thread.
  */
-internal class SynthesisHub(context: Context) : AutoCloseable {
+internal class SynthesisHub private constructor(context: Context) {
     private val app = context.applicationContext
     private val models = HashMap<SpeechModel, OfflineTts>()
     private val systemClients = ConcurrentHashMap<String, SystemTtsClient>()
     private val modelLock = Any()
-    @Volatile private var closed = false
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val warmUpWorker = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "ozvuchka-voice-warmup").apply {
+            isDaemon = true
+            priority = Thread.NORM_PRIORITY - 1
+        }
+    }
+    @Volatile private var inUse = false
+    private val idleRelease = Runnable { if (!inUse) releaseAll() }
 
     /** Cores 0–3 on the Galaxy S24 Ultra are the Cortex-X4 and three A720: the fast cluster. */
     private val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 8).let { if (it >= 8) 4 else (it / 2).coerceAtLeast(2) }
@@ -71,20 +83,48 @@ internal class SynthesisHub(context: Context) : AutoCloseable {
                 generate(model, spoken, config)
             }
             VoiceEngine.SYSTEM -> {
-                check(!closed) { "озвучка остановлена" }
                 val client = systemClients.getOrPut(voice.enginePackage) { SystemTtsClient(app, voice.enginePackage) }
                 client.synthesize(text, voice.voiceName, language, speed)
             }
         }
     }
 
-    /** Loads a model ahead of the first sentence so playback starts without a pause. */
-    fun warmUp(voice: VoiceChoice, settings: SpeechSettings) {
-        when (voice.engine) {
-            VoiceEngine.SUPERTONIC -> supertonicModel(settings)?.let { runCatching { load(it) } }
-            VoiceEngine.KOKORO -> kokoroModel(settings)?.let { runCatching { load(it) } }
-            VoiceEngine.SYSTEM -> systemClients.getOrPut(voice.enginePackage) { SystemTtsClient(app, voice.enginePackage) }
+    /** Loads the voice in the background, so the first sentence starts without a model load. */
+    fun warmUpAsync(voice: VoiceChoice, settings: SpeechSettings) {
+        warmUpWorker.execute {
+            runCatching {
+                when (voice.engine) {
+                    VoiceEngine.SUPERTONIC -> supertonicModel(settings)?.let { load(it) }
+                    VoiceEngine.KOKORO -> kokoroModel(settings)?.let { load(it) }
+                    VoiceEngine.SYSTEM -> if (SystemVoices.isEngineInstalled(app, voice.enginePackage)) {
+                        systemClients.getOrPut(voice.enginePackage) { SystemTtsClient(app, voice.enginePackage) }
+                    }
+                }
+            }
         }
+        if (!inUse) scheduleRelease()
+    }
+
+    /** Narration service is running: keep models loaded. */
+    fun hold() {
+        inUse = true
+        mainHandler.removeCallbacks(idleRelease)
+    }
+
+    /** Narration ended; keep the voice warm for a few minutes in case playback resumes. */
+    fun unhold() {
+        inUse = false
+        scheduleRelease()
+    }
+
+    /** Frees native memory now unless narration is running; used when the system is low on memory. */
+    fun releaseIfIdle() {
+        if (!inUse) releaseAll()
+    }
+
+    private fun scheduleRelease() {
+        mainHandler.removeCallbacks(idleRelease)
+        mainHandler.postDelayed(idleRelease, IDLE_RELEASE_MS)
     }
 
     private fun supertonicModel(settings: SpeechSettings): SpeechModel? = when {
@@ -109,7 +149,6 @@ internal class SynthesisHub(context: Context) : AutoCloseable {
     }
 
     private fun load(model: SpeechModel): OfflineTts = synchronized(modelLock) {
-        check(!closed) { "озвучка остановлена" }
         models[model]?.let { return it }
         // Keep at most one variant of each family in memory.
         val sibling = when (model) {
@@ -163,14 +202,21 @@ internal class SynthesisHub(context: Context) : AutoCloseable {
         OfflineTts(config = config).also { models[model] = it }
     }
 
-    override fun close() {
-        closed = true
+    private fun releaseAll() {
         synchronized(modelLock) {
             models.values.forEach { tts -> synchronized(tts) { tts.release() } }
             models.clear()
         }
         systemClients.values.forEach { it.shutdown() }
         systemClients.clear()
+    }
+
+    companion object {
+        private const val IDLE_RELEASE_MS = 5 * 60_000L
+        @Volatile private var instance: SynthesisHub? = null
+
+        fun shared(context: Context): SynthesisHub =
+            instance ?: synchronized(this) { instance ?: SynthesisHub(context).also { instance = it } }
     }
 }
 

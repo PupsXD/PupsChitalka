@@ -11,7 +11,14 @@ import com.ozvuchka.app.speech.RussianNumbers.Gender
 object SpeechNormalizer {
     fun normalize(text: String, language: String, forSupertonic: Boolean = false): String {
         val cleaned = cleanup(text)
-        val spoken = if (language == "ru") russian(cleaned, forSupertonic) else english(cleaned)
+        var spoken = if (language == "ru") russian(cleaned) else english(cleaned)
+        if (forSupertonic) {
+            // Supertonic has no pause token for a spaced dash; a comma gives the same breath.
+            spoken = spoken.replace(Regex("^\\s*[—–-]\\s*"), "")
+                .replace(Regex("\\s+[—–]\\s+"), ", ")
+                .replace(Regex("[«»„“”]"), "")
+                .replace(Regex(",\\s*,"), ",")
+        }
         return spoken.replace(Regex("[ \\t\\u00A0]{2,}"), " ").trim()
     }
 
@@ -94,7 +101,7 @@ object SpeechNormalizer {
         "июля", "августа", "сентября", "октября", "ноября", "декабря",
     )
 
-    private fun russian(input: String, forSupertonic: Boolean): String {
+    private fun russian(input: String): String {
         var text = input
         text = text.replace(Regex("№\\s*(?=\\d)"), "номер ")
         text = text.replace(Regex("(?<=\\d)[\\u00A0](?=\\d{3}(?!\\d))"), "")
@@ -256,13 +263,6 @@ object SpeechNormalizer {
             sign + RussianNumbers.cardinal(value, genderFromNoun(value, noun)) + space + noun
         }
 
-        if (forSupertonic) {
-            // Supertonic has no pause token for a spaced dash; a comma gives the same breath.
-            text = text.replace(Regex("^\\s*[—–-]\\s*"), "")
-                .replace(Regex("\\s+[—–]\\s+"), ", ")
-                .replace(Regex("[«»„“”]"), "")
-                .replace(Regex(",\\s*,"), ",")
-        }
         return text
     }
 

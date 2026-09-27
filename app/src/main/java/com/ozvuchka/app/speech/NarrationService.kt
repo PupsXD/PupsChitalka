@@ -197,7 +197,8 @@ class NarrationService : Service(), NarrationPlayer.Listener {
 
     override fun onCreate() {
         super.onCreate()
-        hub = SynthesisHub(this)
+        hub = SynthesisHub.shared(this)
+        hub.hold()
         player = NarrationPlayer(hub, this)
         audioManager = getSystemService(AudioManager::class.java)
         notificationManager = getSystemService(NotificationManager::class.java)
@@ -223,10 +224,17 @@ class NarrationService : Service(), NarrationPlayer.Listener {
         when (intent?.action) {
             ACTION_PLAY -> {
                 val request = NarrationController.take()
-                if (request == null) {
-                    if (!player.isActive) stopSelf(startId)
-                } else {
-                    startRequest(request)
+                when {
+                    request != null -> startRequest(request)
+                    !player.isActive -> {
+                        // Started with startForegroundService(): Android requires startForeground()
+                        // even when there turns out to be nothing to play.
+                        if (ensureForeground()) {
+                            stopForeground(STOP_FOREGROUND_REMOVE)
+                            foreground = false
+                        }
+                        stopSelf(startId)
+                    }
                 }
             }
             ACTION_PAUSE -> if (player.isActive) pausePlayback() else stopSelf(startId)
@@ -251,7 +259,8 @@ class NarrationService : Service(), NarrationPlayer.Listener {
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
         player.stop()
-        hub.close()
+        // Keep the voice warm for a few minutes: pressing play again starts at once.
+        hub.unhold()
         abandonFocus()
         unregisterNoisy()
         mediaSession.isActive = false
@@ -263,6 +272,7 @@ class NarrationService : Service(), NarrationPlayer.Listener {
     // ---------------------------------------------------------------- commands
 
     private fun startRequest(request: NarrationController.PlayRequest) {
+        hub.hold()
         handler.removeCallbacks(idleStop)
         cancelSleep(publishState = false)
         // A new book, chapter or preview replaces the session: keep where the old one was.

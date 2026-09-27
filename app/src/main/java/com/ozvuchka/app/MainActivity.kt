@@ -52,6 +52,7 @@ import com.ozvuchka.app.speech.NarrationState
 import com.ozvuchka.app.speech.SpeechModel
 import com.ozvuchka.app.speech.SpeechModels
 import com.ozvuchka.app.speech.SpeechSettings
+import com.ozvuchka.app.speech.SynthesisHub
 import com.ozvuchka.app.speech.SystemVoiceInfo
 import com.ozvuchka.app.speech.SystemVoices
 import com.ozvuchka.app.speech.VoiceCatalog
@@ -535,6 +536,7 @@ class MainActivity : ComponentActivity() {
         override fun selectVoice(language: String, voice: VoiceChoice) {
             if (language != "en") preferences.edit().putBoolean("voiceRuChosen", true).apply()
             updateSpeech { if (language == "en") it.copy(englishVoice = voice) else it.copy(russianVoice = voice) }
+            speech?.let { settings -> if (isUsable(voice)) SynthesisHub.shared(this@MainActivity).warmUpAsync(voice, settings) }
         }
 
         override fun preview(language: String, voice: VoiceChoice) {
@@ -615,6 +617,20 @@ class MainActivity : ComponentActivity() {
         currentBook = opened
         replaceBook(opened)
         library.updatePosition(opened.id, opened.currentChapter, opened.chapterProgress, opened.lastOpenedAt)
+        warmUpVoice(opened)
+    }
+
+    /** Loads the book's voice in the background, so «Слушать» starts without a model load. */
+    private fun warmUpVoice(book: Book) {
+        val settings = speech ?: return
+        val language = dominantLanguage(book.chapters.getOrNull(book.currentChapter)?.paragraphs.orEmpty())
+        val voice = settings.voiceFor(language)
+        if (isUsable(voice)) SynthesisHub.shared(this).warmUpAsync(voice, settings)
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= TRIM_MEMORY_BACKGROUND) SynthesisHub.shared(this).releaseIfIdle()
     }
 
     private fun listenFromLibrary(id: String) {

@@ -5,6 +5,30 @@ long-form speech, finish cleanly, run entirely on-device after model download, a
 generate audio quickly enough to keep reading without long pauses. These are separate
 acceptance criteria: a pleasant eight-second sample alone does not qualify a model.
 
+## Current choice (September 2026)
+
+The measurements below rule out autoregressive LLM voices (Qwen3-TTS, CosyVoice, F5 with
+many flow steps) for continuous reading on the phone's CPU. The reader therefore routes each
+sentence to the best fast voice for its language and removes the pauses between sentences
+with look-ahead synthesis instead of waiting for a faster big model.
+
+| Language | Voice | Why | Status |
+| --- | --- | --- | --- |
+| Russian | Silero v5 (`v5_5_ru`) through the [RuVoice](https://github.com/kost-t-human/ruvoice-tts) system TTS engine | Non-autoregressive Russian model with neural stress and homograph resolution plus a large normalizer (numbers with cases, dates, abbreviations). Its author reports RTF 0.21 on a Galaxy A32 and about 0.05 on Snapdragon 4 Gen 2. | Integrated through Android `TextToSpeech.synthesizeToFile`; needs a listening comparison with the Qwen samples and an RTF check on the S24 Ultra |
+| English | Kokoro v1.0 (sherpa-onnx, INT8 or FP32) | The best-rated small English model; a third-party Android project reports RTF ≈ 0.67 with 4 threads on a Snapdragon 865/870 phone, so the much faster S24 Ultra should stay ahead of playback. | Integrated as an in-app download; RTF on the S24 Ultra to be measured |
+| Fallback / other | Supertonic 3 (INT8 or full) | Very fast, 31 languages, already installed by existing users | Integrated; now 4 threads and configurable flow steps |
+| Any | Installed system engines (Google, Samsung) | No download, many voices | Integrated; network voices are marked |
+
+What still has to be verified on the phone, since the cloud session that implemented this
+could not run the APK:
+
+1. Listen to RuVoice (`aidar`, `baya`, `kseniya`, `xenia`, `eugene` and the `cis` pack) on
+   the passage used for Qwen and on a dialogue-heavy chapter.
+2. Time to first sound and whether the look-ahead buffer stays full for each voice
+   (the reader shows «Готовлю голос…» whenever playback waits for synthesis).
+3. Kokoro INT8 against FP32: whether the FP32 quality gain is audible and whether FP32 keeps
+   up at 1.5× speed.
+
 ## Measured baseline on this phone
 
 | Engine | Observation | Status |
