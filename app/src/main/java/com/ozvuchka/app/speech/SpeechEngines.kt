@@ -1,0 +1,361 @@
+package com.ozvuchka.app.speech
+
+import android.content.Context
+import android.os.Bundle
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import android.speech.tts.Voice
+import com.k2fsa.sherpa.onnx.GenerationConfig
+import com.k2fsa.sherpa.onnx.OfflineTts
+import com.k2fsa.sherpa.onnx.OfflineTtsConfig
+import com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig
+import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
+import com.k2fsa.sherpa.onnx.OfflineTtsSupertonicModelConfig
+import java.io.File
+import java.util.Locale
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+
+class VoiceUnavailableException(message: String) : IllegalStateException(message)
+
+/**
+ * Owns every synthesizer used during narration: in-process sherpa-onnx models (loaded once and
+ * kept while the service lives) and connections to Android TTS engines such as RuVoice.
+ * [synthesize] blocks and must be called from a background thread.
+ */
+internal class SynthesisHub(context: Context) : AutoCloseable {
+    private val app = context.applicationContext
+    private val models = HashMap<SpeechModel, OfflineTts>()
+    private val systemClients = ConcurrentHashMap<String, SystemTtsClient>()
+    private val modelLock = Any()
+    @Volatile private var closed = false
+
+    /** Cores 0–3 on the Galaxy S24 Ultra are the Cortex-X4 and three A720: the fast cluster. */
+    private val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 8).let { if (it >= 8) 4 else (it / 2).coerceAtLeast(2) }
+
+    fun isAvailable(voice: VoiceChoice, settings: SpeechSettings): Boolean = when (voice.engine) {
+        VoiceEngine.SUPERTONIC -> supertonicModel(settings) != null
+        VoiceEngine.KOKORO -> kokoroModel(settings) != null
+        VoiceEngine.SYSTEM -> SystemVoices.isEngineInstalled(app, voice.enginePackage)
+    }
+
+    fun synthesize(voice: VoiceChoice, text: String, language: String, settings: SpeechSettings): SynthesizedAudio {
+        val speed = settings.speed
+        return when (voice.engine) {
+            VoiceEngine.SUPERTONIC -> {
+                val model = supertonicModel(settings)
+                    ?: throw VoiceUnavailableException("Голос Supertonic не загружен")
+                val spoken = SpeechNormalizer.normalize(text, language, forSupertonic = true)
+                if (spoken.isBlank()) return SynthesizedAudio(FloatArray(0), 44_100)
+                val config = GenerationConfig(
+                    sid = voice.speaker.coerceIn(0, 9),
+                    // Supertone's own default pace is 1.05; the reader's 1.0 means that pace.
+                    speed = speed * 1.05f,
+                    numSteps = settings.supertonicSteps,
+                    extra = mapOf("lang" to if (language == "en") "en" else "ru", "silence_duration" to "0.15"),
+                )
+                generate(model, spoken, config)
+            }
+            VoiceEngine.KOKORO -> {
+                val model = kokoroModel(settings)
+                    ?: throw VoiceUnavailableException("Голос Kokoro не загружен")
+                val spoken = SpeechNormalizer.normalize(text, "en")
+                if (spoken.isBlank()) return SynthesizedAudio(FloatArray(0), 24_000)
+                val config = GenerationConfig(
+                    sid = voice.speaker,
+                    speed = speed,
+                    extra = mapOf("lang" to VoiceCatalog.kokoroLanguage(voice.speaker)),
+                )
+                generate(model, spoken, config)
+            }
+            VoiceEngine.SYSTEM -> {
+                check(!closed) { "озвучка остановлена" }
+                val client = systemClients.getOrPut(voice.enginePackage) { SystemTtsClient(app, voice.enginePackage) }
+                client.synthesize(text, voice.voiceName, language, speed)
+            }
+        }
+    }
+
+    /** Loads a model ahead of the first sentence so playback starts without a pause. */
+    fun warmUp(voice: VoiceChoice, settings: SpeechSettings) {
+        when (voice.engine) {
+            VoiceEngine.SUPERTONIC -> supertonicModel(settings)?.let { runCatching { load(it) } }
+            VoiceEngine.KOKORO -> kokoroModel(settings)?.let { runCatching { load(it) } }
+            VoiceEngine.SYSTEM -> systemClients.getOrPut(voice.enginePackage) { SystemTtsClient(app, voice.enginePackage) }
+        }
+    }
+
+    private fun supertonicModel(settings: SpeechSettings): SpeechModel? = when {
+        settings.preferFullModels && SpeechModels.isInstalled(app, SpeechModel.SUPERTONIC_FULL) -> SpeechModel.SUPERTONIC_FULL
+        SpeechModels.isInstalled(app, SpeechModel.SUPERTONIC) -> SpeechModel.SUPERTONIC
+        SpeechModels.isInstalled(app, SpeechModel.SUPERTONIC_FULL) -> SpeechModel.SUPERTONIC_FULL
+        else -> null
+    }
+
+    private fun kokoroModel(settings: SpeechSettings): SpeechModel? = when {
+        settings.preferFullModels && SpeechModels.isInstalled(app, SpeechModel.KOKORO_FULL) -> SpeechModel.KOKORO_FULL
+        SpeechModels.isInstalled(app, SpeechModel.KOKORO) -> SpeechModel.KOKORO
+        SpeechModels.isInstalled(app, SpeechModel.KOKORO_FULL) -> SpeechModel.KOKORO_FULL
+        else -> null
+    }
+
+    private fun generate(model: SpeechModel, text: String, config: GenerationConfig): SynthesizedAudio {
+        val tts = load(model)
+        // One native call at a time per model; a cancelled session may still finish its sentence.
+        val audio = synchronized(tts) { tts.generateWithConfig(text, config) }
+        return SynthesizedAudio(audio.samples, audio.sampleRate.takeIf { it > 0 } ?: tts.sampleRate())
+    }
+
+    private fun load(model: SpeechModel): OfflineTts = synchronized(modelLock) {
+        check(!closed) { "озвучка остановлена" }
+        models[model]?.let { return it }
+        // Keep at most one variant of each family in memory.
+        val sibling = when (model) {
+            SpeechModel.SUPERTONIC -> SpeechModel.SUPERTONIC_FULL
+            SpeechModel.SUPERTONIC_FULL -> SpeechModel.SUPERTONIC
+            SpeechModel.KOKORO -> SpeechModel.KOKORO_FULL
+            SpeechModel.KOKORO_FULL -> SpeechModel.KOKORO
+        }
+        models.remove(sibling)?.let { old -> synchronized(old) { old.release() } }
+        val directory = SpeechModels.directory(app, model)
+        val config = when (model) {
+            SpeechModel.SUPERTONIC, SpeechModel.SUPERTONIC_FULL -> {
+                val suffix = if (model == SpeechModel.SUPERTONIC_FULL) ".onnx" else ".int8.onnx"
+                OfflineTtsConfig(
+                    model = OfflineTtsModelConfig(
+                        supertonic = OfflineTtsSupertonicModelConfig(
+                            durationPredictor = File(directory, "duration_predictor$suffix").absolutePath,
+                            textEncoder = File(directory, "text_encoder$suffix").absolutePath,
+                            vectorEstimator = File(directory, "vector_estimator$suffix").absolutePath,
+                            vocoder = File(directory, "vocoder$suffix").absolutePath,
+                            ttsJson = File(directory, "tts.json").absolutePath,
+                            unicodeIndexer = File(directory, "unicode_indexer.bin").absolutePath,
+                            voiceStyle = File(directory, "voice.bin").absolutePath,
+                        ),
+                        numThreads = threads,
+                        provider = "cpu",
+                    ),
+                    maxNumSentences = 1,
+                )
+            }
+            SpeechModel.KOKORO, SpeechModel.KOKORO_FULL -> {
+                val modelFile = if (model == SpeechModel.KOKORO_FULL) "model.onnx" else "model.int8.onnx"
+                OfflineTtsConfig(
+                    model = OfflineTtsModelConfig(
+                        kokoro = OfflineTtsKokoroModelConfig(
+                            model = File(directory, modelFile).absolutePath,
+                            voices = File(directory, "voices.bin").absolutePath,
+                            tokens = File(directory, "tokens.txt").absolutePath,
+                            dataDir = File(directory, "espeak-ng-data").absolutePath,
+                            // A multilingual Kokoro model needs either a lexicon or a language;
+                            // without both the native layer terminates the process.
+                            lang = "en-us",
+                        ),
+                        numThreads = threads,
+                        provider = "cpu",
+                    ),
+                    maxNumSentences = 1,
+                )
+            }
+        }
+        OfflineTts(config = config).also { models[model] = it }
+    }
+
+    override fun close() {
+        closed = true
+        synchronized(modelLock) {
+            models.values.forEach { tts -> synchronized(tts) { tts.release() } }
+            models.clear()
+        }
+        systemClients.values.forEach { it.shutdown() }
+        systemClients.clear()
+    }
+}
+
+/**
+ * Uses an installed Android TTS engine (RuVoice/Silero, Google, Samsung…) as a synthesizer:
+ * each sentence is rendered to a WAV file, so it joins the same gapless playback pipeline,
+ * highlighting and pause handling as the built-in voices.
+ */
+internal class SystemTtsClient(context: Context, val enginePackage: String) {
+    private val app = context.applicationContext
+    private val ready = CountDownLatch(1)
+    @Volatile private var initStatus = TextToSpeech.ERROR
+    private val waiting = ConcurrentHashMap<String, CountDownLatch>()
+    private val failures = ConcurrentHashMap<String, Int>()
+    private val tts: TextToSpeech
+    private var appliedVoice: String? = null
+    private var appliedLanguage: String? = null
+    private var appliedRate = -1f
+    private val directory = File(app.cacheDir, "system-tts").apply { mkdirs() }
+
+    init {
+        tts = TextToSpeech(app, { status ->
+            initStatus = status
+            ready.countDown()
+        }, enginePackage)
+        tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) = Unit
+            override fun onDone(utteranceId: String?) {
+                utteranceId?.let { waiting[it]?.countDown() }
+            }
+            @Deprecated("Deprecated in Java")
+            override fun onError(utteranceId: String?) {
+                utteranceId?.let {
+                    failures[it] = TextToSpeech.ERROR
+                    waiting[it]?.countDown()
+                }
+            }
+            override fun onError(utteranceId: String?, errorCode: Int) {
+                utteranceId?.let {
+                    failures[it] = errorCode
+                    waiting[it]?.countDown()
+                }
+            }
+        })
+    }
+
+    @Synchronized
+    fun synthesize(text: String, voiceName: String, language: String, speed: Float): SynthesizedAudio {
+        if (!ready.await(15, TimeUnit.SECONDS) || initStatus != TextToSpeech.SUCCESS) {
+            throw VoiceUnavailableException("Движок синтеза $enginePackage не отвечает")
+        }
+        applyVoice(voiceName, language)
+        if (appliedRate != speed) {
+            tts.setSpeechRate(speed)
+            appliedRate = speed
+        }
+        val id = UUID.randomUUID().toString()
+        val file = File(directory, "$id.wav")
+        val latch = CountDownLatch(1)
+        waiting[id] = latch
+        try {
+            val params = Bundle().apply { putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, id) }
+            val result = tts.synthesizeToFile(text, params, file, id)
+            if (result != TextToSpeech.SUCCESS) throw IllegalStateException("движок отклонил запрос")
+            val timeoutMs = 20_000L + text.length * 150L
+            if (!latch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
+                tts.stop()
+                throw IllegalStateException("движок не успел озвучить фразу")
+            }
+            failures.remove(id)?.let { code -> throw IllegalStateException("ошибка движка $code") }
+            return WavReader.read(file)
+        } finally {
+            waiting.remove(id)
+            file.delete()
+        }
+    }
+
+    private fun applyVoice(voiceName: String, language: String) {
+        if (voiceName.isNotEmpty() && voiceName == appliedVoice) return
+        if (voiceName.isEmpty() && appliedVoice == null && appliedLanguage == language) return
+        val voice = if (voiceName.isNotEmpty()) runCatching { tts.voices }.getOrNull()?.firstOrNull { it.name == voiceName } else null
+        if (voice != null) {
+            tts.voice = voice
+            appliedVoice = voiceName
+        } else {
+            tts.language = Locale.forLanguageTag(if (language == "en") "en-US" else "ru-RU")
+            appliedVoice = null
+        }
+        appliedLanguage = language
+    }
+
+    fun shutdown() {
+        waiting.values.forEach { it.countDown() }
+        runCatching { tts.stop() }
+        runCatching { tts.shutdown() }
+    }
+}
+
+/** Voice of an installed system engine, as shown in the picker. */
+data class SystemVoiceInfo(
+    val enginePackage: String,
+    val engineLabel: String,
+    val name: String,
+    val language: String,
+    val needsNetwork: Boolean,
+    val notInstalled: Boolean,
+    val quality: Int,
+)
+
+data class SystemEngineInfo(val packageName: String, val label: String)
+
+/** Discovery of installed TTS engines and their Russian and English voices. */
+object SystemVoices {
+    fun isEngineInstalled(context: Context, packageName: String): Boolean =
+        engines(context).any { it.packageName == packageName }
+
+    fun engines(context: Context): List<SystemEngineInfo> {
+        val intent = android.content.Intent(TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE)
+        val pm = context.packageManager
+        return pm.queryIntentServices(intent, 0).mapNotNull { info ->
+            val service = info.serviceInfo ?: return@mapNotNull null
+            SystemEngineInfo(service.packageName, info.loadLabel(pm).toString())
+        }.distinctBy { it.packageName }
+            .filter { it.packageName != context.packageName }
+    }
+
+    /**
+     * Connects to one engine and lists its Russian and English voices. Must be called off the
+     * main thread; the engine is bound only for the duration of the call.
+     */
+    fun voices(context: Context, engine: SystemEngineInfo): List<SystemVoiceInfo> {
+        val app = context.applicationContext
+        val latch = CountDownLatch(1)
+        var status = TextToSpeech.ERROR
+        val tts = TextToSpeech(app, { code ->
+            status = code
+            latch.countDown()
+        }, engine.packageName)
+        return try {
+            if (!latch.await(10, TimeUnit.SECONDS) || status != TextToSpeech.SUCCESS) return emptyList()
+            val voices: Set<Voice> = runCatching { tts.voices }.getOrNull().orEmpty()
+            voices.filter { it.locale.language == "ru" || it.locale.language == "en" }
+                .map { voice ->
+                    SystemVoiceInfo(
+                        enginePackage = engine.packageName,
+                        engineLabel = engine.label,
+                        name = voice.name,
+                        language = voice.locale.language,
+                        needsNetwork = voice.isNetworkConnectionRequired,
+                        notInstalled = voice.features?.contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED) == true,
+                        quality = voice.quality,
+                    )
+                }
+                .sortedWith(
+                    compareBy<SystemVoiceInfo> { it.language != "ru" }
+                        .thenBy { it.needsNetwork }
+                        .thenBy { it.notInstalled }
+                        .thenByDescending { it.quality }
+                        .thenBy { it.name },
+                )
+        } finally {
+            runCatching { tts.shutdown() }
+        }
+    }
+
+    /** Human-friendly names for common engine voice identifiers. */
+    fun describe(voice: SystemVoiceInfo): String {
+        val name = voice.name
+        val google = Regex("^([a-z]{2,3})-([a-z]{2})-x-([a-z0-9]+)-(local|network)$").find(name)
+        val samsung = Regex("SMT([fm])(\\d+)$").find(name)
+        val base = when {
+            voice.enginePackage == VoiceCatalog.RUVOICE_PACKAGE -> {
+                val parts = name.split('-')
+                val speaker = parts.first().replaceFirstChar { it.uppercase() }
+                val pack = parts.drop(1).filter { it != "ru" }.joinToString(" ")
+                if (pack.isEmpty()) speaker else "$speaker · $pack"
+            }
+            google != null -> "${google.groupValues[1]}-${google.groupValues[2].uppercase()} · голос ${google.groupValues[3]}"
+            samsung != null -> (if (samsung.groupValues[1] == "f") "Женский " else "Мужской ") + (samsung.groupValues[2].toInt() + 1)
+            else -> name
+        }
+        val tags = buildList {
+            if (voice.needsNetwork) add("нужен интернет")
+            if (voice.notInstalled) add("не скачан")
+        }
+        return if (tags.isEmpty()) base else "$base · ${tags.joinToString()}"
+    }
+}

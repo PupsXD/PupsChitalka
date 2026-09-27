@@ -1,6 +1,7 @@
 package com.ozvuchka.app.data
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.util.AtomicFile
 import org.json.JSONArray
 import org.json.JSONObject
@@ -10,15 +11,22 @@ import java.io.File
 class LibraryStore(context: Context) {
     private val directory = File(context.filesDir, "library").apply { mkdirs() }
 
+    /**
+     * Reading positions change on every page turn and every narrated sentence. They live in a
+     * small preferences file, so a position update never rewrites a multi-megabyte book file.
+     */
+    private val positions: SharedPreferences =
+        context.applicationContext.getSharedPreferences("reading_positions", Context.MODE_PRIVATE)
+
     @Synchronized
     fun all(): List<Book> = directory.listFiles { file -> file.extension == "json" }
-        ?.mapNotNull { file -> runCatching { decode(JSONObject(file.readText(Charsets.UTF_8))) }.getOrNull() }
-        ?.sortedByDescending(Book::addedAt)
+        ?.mapNotNull { file -> runCatching { withPosition(decode(JSONObject(file.readText(Charsets.UTF_8)))) }.getOrNull() }
+        ?.sortedByDescending { maxOf(it.lastOpenedAt, it.addedAt) }
         ?: emptyList()
 
     @Synchronized
     fun get(id: String): Book? = fileFor(id).takeIf(File::exists)?.let {
-        runCatching { decode(JSONObject(it.readText(Charsets.UTF_8))) }.getOrNull()
+        runCatching { withPosition(decode(JSONObject(it.readText(Charsets.UTF_8)))) }.getOrNull()
     }
 
     @Synchronized
@@ -33,17 +41,13 @@ class LibraryStore(context: Context) {
             target.failWrite(stream)
             throw error
         }
+        writePosition(book.id, book.currentChapter, book.chapterProgress, book.lastOpenedAt)
     }
 
-    @Synchronized
-    fun updatePosition(id: String, chapterIndex: Int, chapterProgress: Float): Book? {
-        val existing = get(id) ?: return null
-        val updated = existing.copy(
-            currentChapter = chapterIndex.coerceIn(existing.chapters.indices),
-            chapterProgress = chapterProgress.coerceIn(0f, 1f),
-        )
-        save(updated)
-        return updated
+    /** Cheap and safe to call often, from any thread. */
+    fun updatePosition(id: String, chapterIndex: Int, chapterProgress: Float, openedAt: Long? = null) {
+        val previousOpened = positions.getString(id, null)?.split('|')?.getOrNull(2)?.toLongOrNull() ?: 0L
+        writePosition(id, chapterIndex.coerceAtLeast(0), chapterProgress.coerceIn(0f, 1f), openedAt ?: previousOpened)
     }
 
     @Synchronized
@@ -51,7 +55,24 @@ class LibraryStore(context: Context) {
         val file = fileFor(id)
         if (!file.exists()) return false
         AtomicFile(file).delete()
+        positions.edit().remove(id).apply()
         return !file.exists()
+    }
+
+    private fun writePosition(id: String, chapter: Int, progress: Float, openedAt: Long) {
+        positions.edit().putString(id, "$chapter|$progress|$openedAt").apply()
+    }
+
+    private fun withPosition(book: Book): Book {
+        val stored = positions.getString(book.id, null)?.split('|') ?: return book
+        val chapter = stored.getOrNull(0)?.toIntOrNull() ?: return book
+        val progress = stored.getOrNull(1)?.toFloatOrNull() ?: return book
+        val openedAt = stored.getOrNull(2)?.toLongOrNull() ?: book.lastOpenedAt
+        return book.copy(
+            currentChapter = chapter.coerceIn(book.chapters.indices),
+            chapterProgress = progress.coerceIn(0f, 1f),
+            lastOpenedAt = maxOf(openedAt, book.lastOpenedAt),
+        )
     }
 
     private fun fileFor(id: String): File {
@@ -68,6 +89,7 @@ class LibraryStore(context: Context) {
         put("currentChapter", book.currentChapter)
         put("chapterProgress", book.chapterProgress.toDouble())
         put("addedAt", book.addedAt)
+        put("lastOpenedAt", book.lastOpenedAt)
         put("warnings", JSONArray(book.warnings))
         put("chapters", JSONArray().apply {
             book.chapters.forEach { chapter ->
@@ -106,6 +128,7 @@ class LibraryStore(context: Context) {
             chapterProgress = json.optDouble("chapterProgress", 0.0).toFloat(),
             addedAt = json.optLong("addedAt"),
             warnings = if (warnings == null) emptyList() else (0 until warnings.length()).map(warnings::getString),
+            lastOpenedAt = json.optLong("lastOpenedAt"),
         )
     }
 }

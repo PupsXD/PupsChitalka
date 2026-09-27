@@ -1,79 +1,107 @@
 package com.ozvuchka.app
 
+import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import android.view.KeyEvent
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.lifecycleScope
-import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.lifecycleScope
 import com.ozvuchka.app.conversion.BookExporter
 import com.ozvuchka.app.data.Book
 import com.ozvuchka.app.data.Chapter
 import com.ozvuchka.app.data.LibraryStore
+import com.ozvuchka.app.data.chapterProgressOf
 import com.ozvuchka.app.importer.FileBookImporter
 import com.ozvuchka.app.importer.WebChapter
 import com.ozvuchka.app.importer.WebChapterImporter
-import com.ozvuchka.app.speech.NeuralSpeechEngine
+import com.ozvuchka.app.speech.ModelInstallState
 import com.ozvuchka.app.speech.NarrationController
-import com.ozvuchka.app.speech.NarrationChapter
-import com.ozvuchka.app.speech.SpeechPhase
-import com.ozvuchka.app.speech.SpeechStatus
+import com.ozvuchka.app.speech.NarrationPhase
+import com.ozvuchka.app.speech.NarrationState
+import com.ozvuchka.app.speech.SpeechModel
+import com.ozvuchka.app.speech.SpeechModels
+import com.ozvuchka.app.speech.SpeechSettings
+import com.ozvuchka.app.speech.SystemVoiceInfo
+import com.ozvuchka.app.speech.SystemVoices
+import com.ozvuchka.app.speech.VoiceCatalog
+import com.ozvuchka.app.speech.VoiceChoice
+import com.ozvuchka.app.speech.VoiceEngine
+import com.ozvuchka.app.speech.dominantLanguage
 import com.ozvuchka.app.ui.LibraryBookUi
 import com.ozvuchka.app.ui.LibraryScreen
 import com.ozvuchka.app.ui.OzvuchkaTheme
+import com.ozvuchka.app.ui.ReaderActions
+import com.ozvuchka.app.ui.ReaderMargin
+import com.ozvuchka.app.ui.ReaderNarrationUi
 import com.ozvuchka.app.ui.ReaderScreen
 import com.ozvuchka.app.ui.ReaderTheme
+import com.ozvuchka.app.ui.ReaderTypography
 import com.ozvuchka.app.ui.ReaderUiState
+import com.ozvuchka.app.ui.VoiceSettingsActions
+import com.ozvuchka.app.ui.VoiceSettingsSheet
+import com.ozvuchka.app.ui.VoiceSettingsUi
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
 
 class MainActivity : ComponentActivity() {
     private lateinit var library: LibraryStore
-    private lateinit var speech: NeuralSpeechEngine
     private val books = mutableStateListOf<Book>()
     private var currentBook by mutableStateOf<Book?>(null)
     private var importing by mutableStateOf(false)
     private var importProgressText by mutableStateOf("Подготавливаем книгу…")
     private var notice by mutableStateOf<String?>(null)
-    private var speechStatus by mutableStateOf(SpeechStatus(SpeechPhase.MODEL_MISSING))
-    private var isPlaying by mutableStateOf(false)
-    private var narrationState by mutableStateOf(NarrationController.state.value)
+    private var narration by mutableStateOf(NarrationController.state.value)
     private var readerChromeVisible by mutableStateOf(true)
-    private var pendingSave: Job? = null
 
     private val preferences by lazy { getSharedPreferences("reader", MODE_PRIVATE) }
-    private var fontSizeSp by mutableStateOf(19f)
-    private var useSerif by mutableStateOf(true)
-    private var speechSpeed by mutableStateOf(1f)
-    private var voiceId by mutableStateOf(0)
-    private var preferFullVoice by mutableStateOf(true)
+    private var typography by mutableStateOf(ReaderTypography())
     private var readerTheme by mutableStateOf(ReaderTheme.SEPIA)
+    private var volumeKeysTurnPages by mutableStateOf(true)
+    private var keepScreenOn by mutableStateOf(true)
+    private var speech by mutableStateOf<SpeechSettings?>(null)
+    private var modelStates by mutableStateOf<Map<SpeechModel, ModelInstallState>>(emptyMap())
+    private var installedModels by mutableStateOf<Set<SpeechModel>>(emptySet())
+    private var installedEngines by mutableStateOf<Set<String>>(emptySet())
+    private var systemVoices by mutableStateOf<List<SystemVoiceInfo>>(emptyList())
+    private var systemVoicesLoading by mutableStateOf(false)
+    private var showVoices by mutableStateOf(false)
+    private var voicesLanguage by mutableStateOf("ru")
+    private var previewVoice by mutableStateOf<VoiceChoice?>(null)
+    private val pageTurns = MutableSharedFlow<Int>(extraBufferCapacity = 4)
 
     private val openDocument = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) importFile(uri)
@@ -86,214 +114,113 @@ class MainActivity : ComponentActivity() {
     ) { uri -> if (uri != null) exportTo(uri, "fb2") }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         library = LibraryStore(this)
-        speech = NeuralSpeechEngine(this) { preferFullVoice }
-        speechStatus = speech.status
-        speech.onStatus = { status ->
-            speechStatus = status
-            if (status.phase == SpeechPhase.ERROR) notice = status.message
-        }
-        isPlaying = NarrationController.state.value.active &&
-            NarrationController.state.value.speech.phase != SpeechPhase.PAUSED
+        loadPreferences()
+        speech = SpeechSettings.load(this)
+        refreshInstalledModels()
+
         lifecycleScope.launch {
-            NarrationController.state.collect { state ->
-                narrationState = state
-                isPlaying = state.active && state.speech.phase != SpeechPhase.PAUSED
-                if (state.speech.phase == SpeechPhase.ERROR) notice = state.speech.message
-                val visible = currentBook
-                if (visible != null && state.active && state.bookId == visible.id &&
-                    state.chapterIndex == visible.currentChapter && state.paragraphIndex != null &&
-                    state.textLength > 0 && state.speech.phase in setOf(SpeechPhase.SPEAKING, SpeechPhase.PAUSED)
-                ) {
-                    val paragraphs = visible.chapters[visible.currentChapter].paragraphs
-                    val paragraph = state.paragraphIndex.coerceIn(0, paragraphs.lastIndex.coerceAtLeast(0))
-                    val length = paragraphs.getOrNull(paragraph)?.length?.coerceAtLeast(1) ?: 1
-                    val progress = ((paragraph + state.textOffset.toFloat() / length) /
-                        paragraphs.size.coerceAtLeast(1)).coerceIn(0f, 1f)
-                    if (kotlin.math.abs(progress - visible.chapterProgress) > 0.0001f) {
-                        val updated = visible.copy(chapterProgress = progress)
-                        currentBook = updated
-                        replaceBook(updated)
-                    }
+            NarrationController.state.collect(::onNarrationState)
+        }
+        lifecycleScope.launch {
+            SpeechModels.states.collect { states ->
+                val finished = states.filter { (model, state) ->
+                    state.stage == ModelInstallState.Stage.DONE && modelStates[model]?.stage != ModelInstallState.Stage.DONE
                 }
-                if (visible != null && state.bookId == visible.id &&
-                    (state.chapterIndex != visible.currentChapter || !state.active)
-                ) {
-                    pendingSave?.cancel()
-                    val saved = withContext(Dispatchers.IO) { library.get(visible.id) }
-                    if (saved != null) {
-                        replaceBook(saved)
-                        currentBook = saved
-                    }
+                states.values.firstOrNull { state ->
+                    state.stage == ModelInstallState.Stage.FAILED && modelStates[state.model]?.stage != ModelInstallState.Stage.FAILED
+                }?.let { notice = it.message }
+                modelStates = states
+                if (finished.isNotEmpty()) {
+                    refreshInstalledModels()
+                    finished.keys.forEach(::onModelInstalled)
                 }
             }
         }
-        fontSizeSp = preferences.getFloat("fontSizeSp", 19f)
-        useSerif = preferences.getBoolean("useSerif", true)
-        speechSpeed = preferences.getFloat("speechSpeed", 1f)
-        voiceId = preferences.getInt("voiceId", 0).coerceIn(0, 9)
-        preferFullVoice = preferences.getBoolean("preferFullVoice", true)
-        readerTheme = runCatching {
-            ReaderTheme.valueOf(preferences.getString("theme", "SEPIA") ?: "SEPIA")
-        }.getOrDefault(ReaderTheme.SEPIA)
-
         lifecycleScope.launch {
             books.addAll(withContext(Dispatchers.IO) { library.all() })
         }
 
         setContent {
-            val snackbars = androidx.compose.runtime.remember { SnackbarHostState() }
-            val systemBarsVisible = currentBook == null || readerChromeVisible
+            val snackbars = remember { SnackbarHostState() }
+            val systemDark = isSystemInDarkTheme()
+            val book = currentBook
+            val dark = if (book != null) readerTheme.isDark else systemDark || readerTheme.isDark
             LaunchedEffect(notice) {
                 notice?.let { message ->
                     notice = null
                     snackbars.showSnackbar(message)
                 }
             }
-            OzvuchkaTheme(darkTheme = readerTheme == ReaderTheme.DARK) {
+            OzvuchkaTheme(darkTheme = dark) {
                 SideEffect {
-                    val dark = readerTheme == ReaderTheme.DARK
-                    val barColor = when {
-                        dark -> 0xFF171620.toInt()
-                        currentBook != null && readerTheme == ReaderTheme.SEPIA -> 0xFFF5EFE3.toInt()
-                        else -> 0xFFF8F7F5.toInt()
-                    }
-                    window.statusBarColor = barColor
-                    window.navigationBarColor = barColor
                     WindowInsetsControllerCompat(window, window.decorView).apply {
                         isAppearanceLightStatusBars = !dark
                         isAppearanceLightNavigationBars = !dark
                         systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                        if (systemBarsVisible) {
+                        if (book == null || readerChromeVisible) {
                             show(WindowInsetsCompat.Type.systemBars())
                         } else {
                             hide(WindowInsetsCompat.Type.systemBars())
                         }
                     }
+                    if (book != null && keepScreenOn) {
+                        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    } else {
+                        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    }
                 }
                 Box(Modifier.fillMaxSize()) {
-                    val book = currentBook
                     if (book == null) {
                         LibraryScreen(
-                            books = books.map { item ->
-                                LibraryBookUi(
-                                    id = item.id,
-                                    title = item.title,
-                                    author = item.author.ifBlank { "Неизвестный автор" },
-                                    format = item.format.uppercase(),
-                                    progress = ((item.currentChapter + item.chapterProgress) / item.chapters.size)
-                                        .coerceIn(0f, 1f),
-                                )
-                            },
-                            onOpenBook = { id -> currentBook = books.firstOrNull { it.id == id } },
+                            books = books.map(::libraryItem),
+                            narratingBookId = narration.bookId.takeIf { narration.active && !narration.isPreview },
+                            narrationPlaying = narration.isPlaying,
+                            onOpenBook = ::openBook,
+                            onListen = ::listenFromLibrary,
                             onImportFile = { openDocument.launch(arrayOf("*/*")) },
                             onImportUrl = ::importUrl,
                             onDeleteBook = ::deleteBook,
+                            onOpenVoices = { openVoices("ru") },
                         )
                     } else {
                         BackHandler { closeReader() }
-                        val chapterIndex = book.currentChapter.coerceIn(book.chapters.indices)
-                        val chapter = book.chapters[chapterIndex]
-                        val voiceStatusText = speechStatus.message ?: when (speechStatus.phase) {
-                            SpeechPhase.DOWNLOADING -> "Загрузка голоса"
-                            SpeechPhase.EXTRACTING -> "Установка голоса"
-                            SpeechPhase.LOADING -> "Подготовка голоса"
-                            SpeechPhase.SPEAKING -> "Воспроизведение"
-                            SpeechPhase.PAUSED -> "Пауза"
-                            SpeechPhase.ERROR -> "Ошибка озвучки"
-                            SpeechPhase.MODEL_MISSING -> "Нейроголос ещё не загружен"
-                            SpeechPhase.READY -> null
-                        }
                         ReaderScreen(
-                            state = ReaderUiState(
-                                bookId = book.id,
-                                title = book.title,
-                                author = book.author,
-                                chapterTitle = chapter.title,
-                                chapterIndex = chapterIndex,
-                                chapterCount = book.chapters.size,
-                                paragraphs = chapter.paragraphs,
-                                overallProgress = ((chapterIndex + book.chapterProgress) / book.chapters.size).coerceIn(0f, 1f),
-                                chapterProgress = book.chapterProgress,
-                                isPlaying = isPlaying,
-                                speechSpeed = speechSpeed,
-                                voiceId = voiceId,
-                                fontSizeSp = fontSizeSp,
-                                useSerif = useSerif,
-                                theme = readerTheme,
-                                isVoiceReady = speech.isModelInstalled(),
-                                isFullVoiceReady = speech.isFullModelInstalled(),
-                                preferFullVoice = preferFullVoice,
-                                voiceStatus = voiceStatusText,
-                                voiceDownloadProgress = if (
-                                    speechStatus.phase == SpeechPhase.DOWNLOADING ||
-                                    speechStatus.phase == SpeechPhase.EXTRACTING
-                                ) {
-                                    if (speechStatus.total > 0L) (
-                                        speechStatus.completed.toFloat() / speechStatus.total
-                                    ).coerceIn(0f, 1f) else 0f
-                                } else null,
-                                hasNextWebChapter = chapterIndex == book.chapters.lastIndex && chapter.nextUrl != null,
-                                narrationParagraphIndex = if (
-                                    narrationState.active && narrationState.bookId == book.id &&
-                                    narrationState.chapterIndex == chapterIndex &&
-                                    narrationState.textLength > 0 && narrationState.speech.phase in
-                                    setOf(SpeechPhase.SPEAKING, SpeechPhase.PAUSED)
-                                ) narrationState.paragraphIndex else null,
-                                narrationTextOffset = narrationState.textOffset,
-                                narrationTextLength = narrationState.textLength,
-                            ),
-                            onBack = ::closeReader,
-                            onChapterChange = ::changeChapter,
-                            onReadingProgressChange = ::changeReadingProgress,
-                            onChromeVisibilityChange = { readerChromeVisible = it },
-                            onPlayPause = ::toggleSpeech,
-                            onSpeechSpeedChange = { speed ->
-                                speechSpeed = speed
-                                preferences.edit().putFloat("speechSpeed", speed).apply()
-                            },
-                            onVoiceChange = { id ->
-                                voiceId = id.coerceIn(0, 9)
-                                preferences.edit().putInt("voiceId", voiceId).apply()
-                            },
-                            onPreviewVoice = {
-                                NarrationController.stop(this@MainActivity)
-                                speech.speak(
-                                    "Это пример голоса для чтения вашей книги. Проверьте, нравится ли вам его тембр и интонация.",
-                                    language = "ru",
-                                    voiceId = voiceId,
-                                    speed = speechSpeed,
-                                )
-                            },
-                            onFontSizeChange = { size ->
-                                fontSizeSp = size
-                                preferences.edit().putFloat("fontSizeSp", size).apply()
-                            },
-                            onSerifChange = { serif ->
-                                useSerif = serif
-                                preferences.edit().putBoolean("useSerif", serif).apply()
-                            },
-                            onThemeChange = { theme ->
-                                readerTheme = theme
-                                preferences.edit().putString("theme", theme.name).apply()
-                            },
-                            onDownloadVoice = { speech.installModel() },
-                            onDownloadFullVoice = { speech.installFullModel() },
-                            onCancelVoiceDownload = { speech.cancelInstall() },
-                            onQualityChange = { full ->
-                                preferFullVoice = full
-                                preferences.edit().putBoolean("preferFullVoice", full).apply()
-                            },
-                            onExport = ::requestExport,
-                            onImportNextChapter = ::importNextChapter,
+                            state = readerState(book),
+                            actions = readerActions,
+                            pageTurns = pageTurns,
                         )
                     }
+                    if (showVoices) {
+                        speech?.let { settings ->
+                            VoiceSettingsSheet(
+                                state = VoiceSettingsUi(
+                                    russianVoice = settings.russianVoice,
+                                    englishVoice = settings.englishVoice,
+                                    speed = settings.speed,
+                                    pauseScale = settings.pauseScale,
+                                    supertonicSteps = settings.supertonicSteps,
+                                    preferFullModels = settings.preferFullModels,
+                                    installedModels = installedModels,
+                                    installStates = modelStates,
+                                    systemVoices = systemVoices,
+                                    systemVoicesLoading = systemVoicesLoading,
+                                    ruVoiceInstalled = VoiceCatalog.RUVOICE_PACKAGE in installedEngines,
+                                    previewVoice = previewVoice.takeIf { narration.isPreview && narration.active },
+                                ),
+                                initialLanguage = voicesLanguage,
+                                actions = voiceActions,
+                                onDismiss = { showVoices = false },
+                            )
+                        }
+                    }
                     if (importing) {
-                        androidx.compose.material3.Surface(
+                        Surface(
                             modifier = Modifier.align(Alignment.Center),
                             color = MaterialTheme.colorScheme.surface,
-                            shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
+                            shape = RoundedCornerShape(20.dp),
                             shadowElevation = 12.dp,
                         ) {
                             Column(
@@ -305,11 +232,16 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     }
-                    SnackbarHost(snackbars, modifier = Modifier.align(Alignment.BottomCenter))
+                    SnackbarHost(snackbars, modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding())
                 }
             }
         }
         receiveIncomingIntent(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        refreshEngines()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -318,11 +250,382 @@ class MainActivity : ComponentActivity() {
         receiveIncomingIntent(intent)
     }
 
-    override fun onDestroy() {
-        pendingSave?.cancel()
-        currentBook?.let { book -> library.save(book) }
-        speech.close()
-        super.onDestroy()
+    override fun onPause() {
+        currentBook?.let { saveReadingPosition(it) }
+        super.onPause()
+    }
+
+    /** Volume keys turn pages while reading silently; during narration they keep adjusting volume. */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val direction = when (event.keyCode) {
+            KeyEvent.KEYCODE_VOLUME_DOWN -> 1
+            KeyEvent.KEYCODE_VOLUME_UP -> -1
+            else -> 0
+        }
+        val narratingHere = narration.active && narration.bookId == currentBook?.id
+        if (direction != 0 && currentBook != null && volumeKeysTurnPages && !narratingHere && !showVoices) {
+            if (event.action == KeyEvent.ACTION_DOWN) pageTurns.tryEmit(direction)
+            return true
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    // ---------------------------------------------------------------- state
+
+    private fun loadPreferences() {
+        typography = ReaderTypography(
+            fontSizeSp = preferences.getFloat("fontSizeSp", 19f),
+            useSerif = preferences.getBoolean("useSerif", true),
+            lineSpacing = preferences.getFloat("lineSpacing", 1.55f),
+            justify = preferences.getBoolean("justify", true),
+            paragraphIndent = preferences.getBoolean("paragraphIndent", true),
+            margin = runCatching { ReaderMargin.valueOf(preferences.getString("margin", null) ?: "NORMAL") }
+                .getOrDefault(ReaderMargin.NORMAL),
+        )
+        readerTheme = runCatching {
+            ReaderTheme.valueOf(preferences.getString("theme", "SEPIA") ?: "SEPIA")
+        }.getOrDefault(ReaderTheme.SEPIA)
+        volumeKeysTurnPages = preferences.getBoolean("volumeKeysTurnPages", true)
+        keepScreenOn = preferences.getBoolean("keepScreenOn", true)
+    }
+
+    private fun saveTypography(value: ReaderTypography) {
+        typography = value
+        preferences.edit()
+            .putFloat("fontSizeSp", value.fontSizeSp)
+            .putBoolean("useSerif", value.useSerif)
+            .putFloat("lineSpacing", value.lineSpacing)
+            .putBoolean("justify", value.justify)
+            .putBoolean("paragraphIndent", value.paragraphIndent)
+            .putString("margin", value.margin.name)
+            .apply()
+    }
+
+    private fun updateSpeech(change: (SpeechSettings) -> SpeechSettings) {
+        val current = speech ?: SpeechSettings.load(this)
+        val next = change(current)
+        speech = next
+        SpeechSettings.save(this, next)
+        NarrationController.settingsChanged(this)
+    }
+
+    private fun refreshInstalledModels() {
+        installedModels = SpeechModel.entries.filter { SpeechModels.isInstalled(this, it) }.toSet()
+    }
+
+    private fun refreshEngines() {
+        lifecycleScope.launch {
+            val engines = withContext(Dispatchers.IO) { SystemVoices.engines(this@MainActivity).map { it.packageName }.toSet() }
+            val ruVoiceAppeared = VoiceCatalog.RUVOICE_PACKAGE in engines && VoiceCatalog.RUVOICE_PACKAGE !in installedEngines
+            installedEngines = engines
+            // The first time RuVoice is found, Russian books switch to Silero unless a voice was chosen by hand.
+            if (ruVoiceAppeared && !preferences.getBoolean("voiceRuChosen", false)) {
+                updateSpeech { it.copy(russianVoice = VoiceChoice(VoiceEngine.SYSTEM, enginePackage = VoiceCatalog.RUVOICE_PACKAGE)) }
+                notice = "Найден RuVoice: русский текст читает Silero v5"
+            }
+            if (showVoices) loadSystemVoices()
+        }
+    }
+
+    private fun onModelInstalled(model: SpeechModel) {
+        val settings = speech ?: return
+        when (model) {
+            SpeechModel.KOKORO, SpeechModel.KOKORO_FULL -> if (settings.englishVoice.engine == VoiceEngine.SUPERTONIC) {
+                updateSpeech { it.copy(englishVoice = VoiceChoice(VoiceEngine.KOKORO, 3)) }
+            }
+            else -> Unit
+        }
+        notice = "${model.title}: голос установлен"
+    }
+
+    private fun onNarrationState(state: NarrationState) {
+        val previous = narration
+        narration = state
+        if (!state.isPreview || !state.active) {
+            if (!state.active) previewVoice = null
+        }
+        if (state.message != null && state.messageId != previous.messageId) notice = state.message
+        val visible = currentBook ?: return
+        if (state.isPreview || state.bookId != visible.id || state.chapterIndex == null) return
+        if (!state.active) {
+            // The service saved the final position; pick it up so the reader opens there next time.
+            if (previous.active && previous.bookId == visible.id) {
+                lifecycleScope.launch {
+                    val saved = withContext(Dispatchers.IO) { library.get(visible.id) } ?: return@launch
+                    if (currentBook?.id == saved.id) {
+                        currentBook = currentBook?.copy(currentChapter = saved.currentChapter, chapterProgress = saved.chapterProgress)
+                        currentBook?.let(::replaceBook)
+                    }
+                }
+            }
+            return
+        }
+        val chapter = visible.chapters.getOrNull(state.chapterIndex) ?: return
+        val paragraph = state.paragraphIndex ?: return
+        val progress = if (paragraph < 0) 0f else chapterProgressOf(chapter.paragraphs, paragraph, state.textOffset)
+        if (state.chapterIndex != visible.currentChapter || kotlin.math.abs(progress - visible.chapterProgress) > 0.0001f) {
+            val updated = visible.copy(currentChapter = state.chapterIndex, chapterProgress = progress)
+            currentBook = updated
+            replaceBook(updated)
+        }
+    }
+
+    private fun libraryItem(book: Book) = LibraryBookUi(
+        id = book.id,
+        title = book.title,
+        author = book.author.ifBlank { "Неизвестный автор" },
+        format = book.format.uppercase(),
+        progress = book.overallProgress,
+        chapterTitle = book.chapters.getOrNull(book.currentChapter)?.title.orEmpty(),
+        lastOpenedAt = book.lastOpenedAt,
+    )
+
+    private fun readerState(book: Book): ReaderUiState {
+        val chapterIndex = book.currentChapter.coerceIn(book.chapters.indices)
+        val chapter = book.chapters[chapterIndex]
+        val language = dominantLanguage(chapter.paragraphs)
+        val settings = speech
+        val sameBook = narration.active && !narration.isPreview && narration.bookId == book.id
+        val voice = settings?.voiceFor(language)
+        return ReaderUiState(
+            bookId = book.id,
+            title = book.title,
+            author = book.author,
+            chapterTitle = chapter.title,
+            chapterIndex = chapterIndex,
+            chapterCount = book.chapters.size,
+            chapterTitles = book.chapters.map { it.title },
+            paragraphs = chapter.paragraphs,
+            language = language,
+            overallProgress = book.overallProgress,
+            chapterProgress = book.chapterProgress,
+            typography = typography,
+            theme = readerTheme,
+            narration = ReaderNarrationUi(
+                active = sameBook,
+                playing = sameBook && narration.isPlaying,
+                preparing = sameBook && narration.phase == NarrationPhase.PREPARING,
+                paragraphIndex = if (sameBook && narration.chapterIndex == chapterIndex) narration.paragraphIndex else null,
+                textOffset = narration.textOffset,
+                textLength = narration.textLength,
+                speed = settings?.speed ?: 1f,
+                sleepEndsAt = narration.sleepEndsAt.takeIf { sameBook },
+                sleepAtChapterEnd = sameBook && narration.sleepAtChapterEnd,
+                voiceReady = voice != null && (isUsable(voice) || isUsable(VoiceChoice(VoiceEngine.SUPERTONIC))),
+                voiceLabel = voice?.let(::voiceLabel).orEmpty(),
+            ),
+            hasNextWebChapter = chapterIndex == book.chapters.lastIndex && chapter.nextUrl != null,
+            volumeKeysTurnPages = volumeKeysTurnPages,
+            keepScreenOn = keepScreenOn,
+        )
+    }
+
+    private fun isUsable(voice: VoiceChoice): Boolean = when (voice.engine) {
+        VoiceEngine.SUPERTONIC -> SpeechModel.SUPERTONIC in installedModels || SpeechModel.SUPERTONIC_FULL in installedModels
+        VoiceEngine.KOKORO -> SpeechModel.KOKORO in installedModels || SpeechModel.KOKORO_FULL in installedModels
+        VoiceEngine.SYSTEM -> voice.enginePackage in installedEngines
+    }
+
+    private fun voiceLabel(voice: VoiceChoice): String = VoiceCatalog.presetTitle(voice) ?: when {
+        voice.enginePackage == VoiceCatalog.RUVOICE_PACKAGE -> "Silero v5 · ${voice.voiceName.substringBefore('-').ifBlank { "по умолчанию" }}"
+        else -> voice.voiceName.ifBlank { voice.enginePackage }
+    }
+
+    // ---------------------------------------------------------------- reader actions
+
+    private val readerActions = object : ReaderActions {
+        override fun back() = closeReader()
+
+        override fun changeChapter(index: Int) {
+            val book = currentBook ?: return
+            if (index !in book.chapters.indices) return
+            val updated = book.copy(currentChapter = index, chapterProgress = 0f)
+            currentBook = updated
+            replaceBook(updated)
+            library.updatePosition(book.id, index, 0f)
+            // Listening continues from the chapter the reader jumped to.
+            if (narration.active && narration.bookId == book.id && !narration.isPreview) {
+                NarrationController.playBook(this@MainActivity, updated, index, 0, 0)
+            }
+        }
+
+        override fun readingProgressChanged(overall: Float) {
+            val book = currentBook ?: return
+            if (narration.active && narration.bookId == book.id && narration.chapterIndex == book.currentChapter) return
+            val within = (overall * book.chapters.size - book.currentChapter).coerceIn(0f, 1f)
+            if (kotlin.math.abs(within - book.chapterProgress) < 0.0001f) return
+            val updated = book.copy(chapterProgress = within)
+            currentBook = updated
+            replaceBook(updated)
+            library.updatePosition(book.id, book.currentChapter, within)
+        }
+
+        override fun chromeVisibilityChanged(visible: Boolean) {
+            readerChromeVisible = visible
+        }
+
+        override fun playPause() {
+            val book = currentBook ?: return
+            if (narration.active && !narration.isPreview && narration.bookId == book.id) {
+                NarrationController.toggle(this@MainActivity)
+                return
+            }
+            val (paragraph, offset) = book.position()
+            startNarration(book, book.currentChapter, paragraph, offset)
+        }
+
+        override fun readFrom(paragraph: Int, offset: Int) {
+            val book = currentBook ?: return
+            startNarration(book, book.currentChapter, paragraph, offset)
+        }
+
+        override fun nextSentence() = NarrationController.next(this@MainActivity)
+        override fun previousSentence() = NarrationController.previous(this@MainActivity)
+        override fun stopNarration() = NarrationController.stop(this@MainActivity)
+        override fun setSpeed(speed: Float) = updateSpeech { it.copy(speed = speed) }
+        override fun setSleepTimer(minutes: Int) = NarrationController.setSleepTimer(this@MainActivity, minutes)
+
+        override fun openVoices() {
+            val book = currentBook
+            val language = book?.chapters?.getOrNull(book.currentChapter)?.paragraphs?.let { dominantLanguage(it) } ?: "ru"
+            openVoices(language)
+        }
+
+        override fun typographyChanged(typography: ReaderTypography) = saveTypography(typography)
+
+        override fun themeChanged(theme: ReaderTheme) {
+            readerTheme = theme
+            preferences.edit().putString("theme", theme.name).apply()
+        }
+
+        override fun volumeKeysChanged(enabled: Boolean) {
+            volumeKeysTurnPages = enabled
+            preferences.edit().putBoolean("volumeKeysTurnPages", enabled).apply()
+        }
+
+        override fun keepScreenOnChanged(enabled: Boolean) {
+            keepScreenOn = enabled
+            preferences.edit().putBoolean("keepScreenOn", enabled).apply()
+        }
+
+        override fun export(format: String) = requestExport(format)
+        override fun importNextChapter() = this@MainActivity.importNextChapter()
+    }
+
+    private fun startNarration(book: Book, chapter: Int, paragraph: Int, offset: Int) {
+        val settings = speech ?: SpeechSettings.load(this)
+        val language = dominantLanguage(book.chapters.getOrNull(chapter)?.paragraphs.orEmpty())
+        if (!isUsable(settings.voiceFor(language)) && !isUsable(VoiceChoice(VoiceEngine.SUPERTONIC))) {
+            notice = "Сначала выберите и скачайте голос"
+            openVoices(language)
+            return
+        }
+        NarrationController.playBook(this, book, chapter, paragraph, offset)
+    }
+
+    private fun openVoices(language: String) {
+        voicesLanguage = language
+        showVoices = true
+        loadSystemVoices()
+    }
+
+    // ---------------------------------------------------------------- voice actions
+
+    private val voiceActions = object : VoiceSettingsActions {
+        override fun selectVoice(language: String, voice: VoiceChoice) {
+            if (language != "en") preferences.edit().putBoolean("voiceRuChosen", true).apply()
+            updateSpeech { if (language == "en") it.copy(englishVoice = voice) else it.copy(russianVoice = voice) }
+        }
+
+        override fun preview(language: String, voice: VoiceChoice) {
+            previewVoice = voice
+            val sample = if (language == "en") {
+                "The old house stood at the end of the lane, and every window was dark. Are you coming back? she whispered."
+            } else {
+                "Он остановился у окна. За стеклом медленно падал снег. — Ты вернёшься? — спросила она почти шёпотом."
+            }
+            NarrationController.preview(this@MainActivity, voice, language, sample)
+        }
+
+        override fun stopPreview() {
+            if (narration.isPreview && narration.active) NarrationController.stop(this@MainActivity)
+            previewVoice = null
+        }
+
+        override fun download(model: SpeechModel) = SpeechModels.install(this@MainActivity, model)
+        override fun cancelDownload(model: SpeechModel) = SpeechModels.cancel(model)
+
+        override fun delete(model: SpeechModel) {
+            if (narration.active) NarrationController.stop(this@MainActivity)
+            lifecycleScope.launch {
+                withContext(Dispatchers.IO) { SpeechModels.delete(this@MainActivity, model) }
+                refreshInstalledModels()
+                notice = "${model.title}: модель удалена"
+            }
+        }
+
+        override fun setSpeed(speed: Float) = updateSpeech { it.copy(speed = speed) }
+        override fun setPauseScale(scale: Float) = updateSpeech { it.copy(pauseScale = scale) }
+        override fun setSupertonicSteps(steps: Int) = updateSpeech { it.copy(supertonicSteps = steps) }
+        override fun setPreferFullModels(enabled: Boolean) = updateSpeech { it.copy(preferFullModels = enabled) }
+
+        override fun openRuVoicePage() = openUrl(VoiceCatalog.RUVOICE_RELEASES)
+
+        override fun openSystemTtsSettings() {
+            try {
+                startActivity(Intent("com.android.settings.TTS_SETTINGS"))
+            } catch (_: ActivityNotFoundException) {
+                startActivity(Intent(android.provider.Settings.ACTION_SETTINGS))
+            }
+        }
+
+        override fun refreshSystemVoices() = loadSystemVoices()
+    }
+
+    private fun loadSystemVoices() {
+        if (systemVoicesLoading) return
+        systemVoicesLoading = true
+        lifecycleScope.launch {
+            try {
+                val (engines, voices) = withContext(Dispatchers.IO) {
+                    val engines = SystemVoices.engines(this@MainActivity)
+                    engines to engines.flatMap { engine -> runCatching { SystemVoices.voices(this@MainActivity, engine) }.getOrDefault(emptyList()) }
+                }
+                installedEngines = engines.map { it.packageName }.toSet()
+                systemVoices = voices
+            } finally {
+                systemVoicesLoading = false
+            }
+        }
+    }
+
+    private fun openUrl(url: String) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        } catch (_: ActivityNotFoundException) {
+            notice = "Не найден браузер для ссылки $url"
+        }
+    }
+
+    // ---------------------------------------------------------------- library
+
+    private fun openBook(id: String) {
+        val book = books.firstOrNull { it.id == id } ?: return
+        val opened = book.copy(lastOpenedAt = System.currentTimeMillis())
+        currentBook = opened
+        replaceBook(opened)
+        library.updatePosition(opened.id, opened.currentChapter, opened.chapterProgress, opened.lastOpenedAt)
+    }
+
+    private fun listenFromLibrary(id: String) {
+        if (narration.active && narration.bookId == id && !narration.isPreview) {
+            NarrationController.toggle(this)
+            return
+        }
+        openBook(id)
+        val book = currentBook ?: return
+        val (paragraph, offset) = book.position()
+        startNarration(book, book.currentChapter, paragraph, offset)
     }
 
     private fun receiveIncomingIntent(intent: Intent?) {
@@ -333,7 +636,7 @@ class MainActivity : ComponentActivity() {
             }
             Intent.ACTION_SEND -> {
                 @Suppress("DEPRECATION")
-                val sharedFile = intent.getParcelableExtra<android.net.Uri>(Intent.EXTRA_STREAM)
+                val sharedFile = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
                 if (sharedFile != null) {
                     importFile(sharedFile)
                     return
@@ -346,7 +649,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun importFile(uri: android.net.Uri) {
+    private fun importFile(uri: Uri) {
         if (importing) return
         importing = true
         importProgressText = "Читаем файл…"
@@ -354,7 +657,7 @@ class MainActivity : ComponentActivity() {
             try {
                 val book = FileBookImporter.importBook(this@MainActivity, uri) { message ->
                     runOnUiThread { importProgressText = message }
-                }
+                }.copy(lastOpenedAt = System.currentTimeMillis())
                 withContext(Dispatchers.IO) { library.save(book) }
                 books.add(0, book)
                 currentBook = book
@@ -379,7 +682,7 @@ class MainActivity : ComponentActivity() {
                     book.chapters.any { it.sourceUrl == chapter.sourceUrl }
                 }
                 if (existing != null) {
-                    currentBook = existing
+                    openBook(existing.id)
                 } else {
                     val titleParts = chapter.title.split(" | ", limit = 2)
                     val bookTitle = titleParts.getOrNull(1)?.trim().orEmpty().ifBlank { chapter.title }
@@ -388,6 +691,7 @@ class MainActivity : ComponentActivity() {
                         format = "web",
                         source = chapter.sourceUrl,
                         chapters = listOf(chapter.toBookChapter()),
+                        lastOpenedAt = System.currentTimeMillis(),
                     )
                     withContext(Dispatchers.IO) { library.save(book) }
                     books.add(0, book)
@@ -442,37 +746,8 @@ class MainActivity : ComponentActivity() {
         return Chapter(chapterTitle, paragraphs, sourceUrl, nextUrl)
     }
 
-    private fun changeChapter(index: Int) {
-        val book = currentBook ?: return
-        if (index !in book.chapters.indices) return
-        NarrationController.stop(this)
-        isPlaying = false
-        val updated = book.copy(currentChapter = index, chapterProgress = 0f)
-        currentBook = updated
-        replaceBook(updated)
-        pendingSave?.cancel()
-        library.save(updated)
-    }
-
-    private fun changeReadingProgress(overall: Float) {
-        val book = currentBook ?: return
-        if (narrationState.active && narrationState.bookId == book.id &&
-            narrationState.chapterIndex == book.currentChapter
-        ) return
-        val within = (overall * book.chapters.size - book.currentChapter).coerceIn(0f, 1f)
-        if (kotlin.math.abs(within - book.chapterProgress) < 0.0001f) return
-        val updated = book.copy(chapterProgress = within)
-        currentBook = updated
-        replaceBook(updated)
-        saveSoon(updated)
-    }
-
-    private fun saveSoon(book: Book, immediate: Boolean = false) {
-        pendingSave?.cancel()
-        pendingSave = lifecycleScope.launch {
-            if (!immediate) delay(900)
-            withContext(Dispatchers.IO) { library.save(book) }
-        }
+    private fun saveReadingPosition(book: Book) {
+        library.updatePosition(book.id, book.currentChapter, book.chapterProgress)
     }
 
     private fun replaceBook(book: Book) {
@@ -481,61 +756,20 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun closeReader() {
-        pendingSave?.cancel()
-        currentBook?.let { library.save(it) }
+        currentBook?.let { book ->
+            saveReadingPosition(book)
+            // Keep the library order: the book just read goes first.
+            val index = books.indexOfFirst { it.id == book.id }
+            if (index > 0) {
+                books.removeAt(index)
+                books.add(0, book)
+            }
+        }
         currentBook = null
     }
 
-    private fun toggleSpeech() {
-        val narration = NarrationController.state.value
-        if (narration.active) {
-            if (narration.speech.phase == SpeechPhase.PAUSED) NarrationController.resume(this)
-            else NarrationController.pause(this)
-            return
-        }
-        val book = currentBook ?: return
-        if (!speech.isModelInstalled()) {
-            notice = "Загрузите нейроголос в настройках читалки"
-            return
-        }
-        pendingSave?.cancel()
-        val startIndex = book.currentChapter.coerceIn(book.chapters.indices)
-        val narrationChapters = book.chapters.drop(startIndex).mapIndexed { offset, chapter ->
-            val location = if (offset == 0) {
-                book.chapterProgress * chapter.paragraphs.size
-            } else 0f
-            val paragraphIndex = location.toInt().coerceIn(0, chapter.paragraphs.size)
-            val textOffset = chapter.paragraphs.getOrNull(paragraphIndex)?.let { paragraph ->
-                ((location - paragraphIndex) * paragraph.length).toInt().coerceIn(0, paragraph.length)
-            } ?: 0
-            val paragraphs = chapter.paragraphs.drop(paragraphIndex).toMutableList()
-            if (paragraphs.isNotEmpty()) paragraphs[0] = paragraphs[0].drop(textOffset)
-            val text = paragraphs.joinToString("\n\n")
-            NarrationChapter(
-                title = "${book.title} — ${chapter.title}",
-                text = text,
-                language = if (text.any { it in '\u0400'..'\u04ff' }) "ru" else "en",
-                bookId = book.id,
-                chapterIndex = startIndex + offset,
-                paragraphs = paragraphs,
-                startParagraphIndex = paragraphIndex,
-                startTextOffset = textOffset,
-                totalParagraphs = chapter.paragraphs.size,
-            )
-        }
-        if (narrationChapters.all { it.text.isBlank() }) {
-            notice = "В этой главе нет текста для озвучки"
-            return
-        }
-        NarrationController.playChapters(
-            context = this,
-            chapters = narrationChapters,
-            speed = speechSpeed,
-            voiceId = voiceId,
-        )
-    }
-
     private fun deleteBook(id: String) {
+        if (narration.bookId == id && narration.active) NarrationController.stop(this)
         lifecycleScope.launch {
             try {
                 val removed = withContext(Dispatchers.IO) { library.delete(id) }
@@ -560,7 +794,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun exportTo(uri: android.net.Uri, format: String) {
+    private fun exportTo(uri: Uri, format: String) {
         val book = currentBook ?: return
         lifecycleScope.launch {
             try {

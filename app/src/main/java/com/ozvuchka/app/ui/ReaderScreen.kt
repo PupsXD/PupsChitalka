@@ -1,17 +1,26 @@
 package com.ozvuchka.app.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -19,69 +28,109 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.systemBarsIgnoringVisibility
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.automirrored.filled.NavigateBefore
+import androidx.compose.material.icons.automirrored.filled.NavigateNext
+import androidx.compose.material.icons.filled.Bedtime
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.RecordVoiceOver
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.flow.Flow
 import java.util.Locale
-import kotlin.math.roundToInt
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
-private fun speechSpeedLabel(speed: Float): String =
+internal fun speechSpeedLabel(speed: Float): String =
     String.format(Locale.US, "%.2f", speed).trimEnd('0').trimEnd('.') + "×"
 
-private data class ReadingColors(
+internal val speedPresets = listOf(0.8f, 0.9f, 1f, 1.1f, 1.2f, 1.35f, 1.5f, 1.75f, 2f)
+
+internal data class ReadingColors(
     val background: Color,
     val surface: Color,
     val text: Color,
     val muted: Color,
     val accent: Color,
     val line: Color,
+    val highlight: Color,
 )
 
-private fun ReaderTheme.colors(): ReadingColors = when (this) {
+internal fun ReaderTheme.colors(): ReadingColors = when (this) {
     ReaderTheme.LIGHT -> ReadingColors(
         background = Color(0xFFFCFBF8),
         surface = Color(0xFFFFFFFF),
@@ -89,14 +138,7 @@ private fun ReaderTheme.colors(): ReadingColors = when (this) {
         muted = Color(0xFF77717C),
         accent = Color(0xFF51449A),
         line = Color(0xFFE9E5EC),
-    )
-    ReaderTheme.DARK -> ReadingColors(
-        background = Color(0xFF171821),
-        surface = Color(0xFF22232E),
-        text = Color(0xFFF2F0F3),
-        muted = Color(0xFFB5AFBC),
-        accent = Color(0xFFCCBFFF),
-        line = Color(0xFF393845),
+        highlight = Color(0x3351449A),
     )
     ReaderTheme.SEPIA -> ReadingColors(
         background = Color(0xFFF5EFE3),
@@ -105,175 +147,245 @@ private fun ReaderTheme.colors(): ReadingColors = when (this) {
         muted = Color(0xFF84786C),
         accent = Color(0xFF785447),
         line = Color(0xFFE5D9C8),
+        highlight = Color(0x33A0663F),
+    )
+    ReaderTheme.DARK -> ReadingColors(
+        background = Color(0xFF171821),
+        surface = Color(0xFF22232E),
+        text = Color(0xFFE9E6EC),
+        muted = Color(0xFFA9A3B1),
+        accent = Color(0xFFCCBFFF),
+        line = Color(0xFF393845),
+        highlight = Color(0x40CCBFFF),
+    )
+    ReaderTheme.BLACK -> ReadingColors(
+        background = Color(0xFF000000),
+        surface = Color(0xFF121214),
+        text = Color(0xFFD6D3DA),
+        muted = Color(0xFF8C8794),
+        accent = Color(0xFFB9A7FF),
+        line = Color(0xFF26262B),
+        highlight = Color(0x4DB9A7FF),
     )
 }
 
-/** onReadingProgressChange reports progress across the whole book, from 0f to 1f. */
-@OptIn(ExperimentalMaterial3Api::class)
+private class BlockGeometry {
+    var coordinates: LayoutCoordinates? = null
+    var layout: TextLayoutResult? = null
+}
+
+/** Layout facts read only inside gesture handlers, so they are plain fields, not Compose state. */
+private class PageGeometry {
+    var container: LayoutCoordinates? = null
+    val blocks = HashMap<Int, BlockGeometry>()
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun ReaderScreen(
     state: ReaderUiState,
-    onBack: () -> Unit,
-    onChapterChange: (Int) -> Unit,
-    onReadingProgressChange: (Float) -> Unit,
-    onChromeVisibilityChange: (Boolean) -> Unit,
-    onPlayPause: () -> Unit,
-    onSpeechSpeedChange: (Float) -> Unit,
-    onVoiceChange: (Int) -> Unit,
-    onPreviewVoice: () -> Unit,
-    onFontSizeChange: (Float) -> Unit,
-    onSerifChange: (Boolean) -> Unit,
-    onThemeChange: (ReaderTheme) -> Unit,
-    onDownloadVoice: () -> Unit,
-    onDownloadFullVoice: () -> Unit,
-    onCancelVoiceDownload: () -> Unit,
-    onQualityChange: (Boolean) -> Unit,
-    onExport: (String) -> Unit,
-    onImportNextChapter: () -> Unit,
+    actions: ReaderActions,
+    pageTurns: Flow<Int>,
     modifier: Modifier = Modifier,
 ) {
     val colors = state.theme.colors()
-    val progressCallback by rememberUpdatedState(onReadingProgressChange)
-    var showSettings by rememberSaveable { mutableStateOf(false) }
+    val currentActions by rememberUpdatedState(actions)
     var chromeVisible by rememberSaveable { mutableStateOf(true) }
-    val chromeCallback by rememberUpdatedState(onChromeVisibilityChange)
-    LaunchedEffect(chromeVisible) { chromeCallback(chromeVisible) }
-    DisposableEffect(Unit) { onDispose { chromeCallback(true) } }
-    var pageAnchor by remember(state.bookId, state.chapterIndex) { mutableStateOf(state.chapterProgress) }
+    LaunchedEffect(chromeVisible) { currentActions.chromeVisibilityChanged(chromeVisible) }
+    DisposableEffect(Unit) { onDispose { currentActions.chromeVisibilityChanged(true) } }
+    var showSettings by rememberSaveable { mutableStateOf(false) }
+    var showContents by rememberSaveable { mutableStateOf(false) }
+    var pageAnchor by remember(state.bookId, state.chapterIndex) { mutableFloatStateOf(state.chapterProgress) }
+    var pageIndex by remember { mutableIntStateOf(0) }
+    var pageCount by remember { mutableIntStateOf(1) }
+    var charactersLeft by remember { mutableIntStateOf(0) }
+    var requestedPage by remember { mutableStateOf<Int?>(null) }
     val measurer = rememberTextMeasurer()
     val density = LocalDensity.current
-    var pageIndex by remember { mutableStateOf(0) }
-    var pageCount by remember { mutableStateOf(1) }
-    var requestedPage by remember { mutableStateOf<Int?>(null) }
+    val layoutDirection = LocalLayoutDirection.current
+    val haptics = LocalHapticFeedback.current
+    val safeInsets = WindowInsets.systemBarsIgnoringVisibility.union(WindowInsets.displayCutout).asPaddingValues()
+    val margin = state.typography.margin.horizontalDp.dp
+    val footerHeight = 22.dp
 
-    Scaffold(
-        modifier = modifier,
-        containerColor = colors.background,
-        topBar = {
-            if (chromeVisible) ReaderTopBar(
-                state, colors, onBack = onBack, onSettings = { showSettings = true },
-                onHideControls = { chromeVisible = false },
+    Box(modifier.fillMaxSize().background(colors.background)) {
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val horizontalInset = safeInsets.calculateLeftPadding(layoutDirection) + safeInsets.calculateRightPadding(layoutDirection)
+            val widthPx = with(density) { (maxWidth - horizontalInset - margin * 2).roundToPx() }
+            val heightPx = with(density) {
+                (maxHeight - safeInsets.calculateTopPadding() - safeInsets.calculateBottomPadding() -
+                    PageVerticalPadding * 2 - footerHeight).roundToPx()
+            }
+            val label = chapterLabel(state.chapterIndex, state.chapterCount)
+            val pages = remember(state.bookId, state.chapterIndex, state.paragraphs, state.typography, state.language, widthPx, heightPx) {
+                paginateChapter(
+                    state.paragraphs, state.chapterTitle, label, state.typography, state.language,
+                    widthPx, heightPx, density, measurer,
+                )
+            }
+            key(state.bookId, state.chapterIndex, state.typography, widthPx, heightPx) {
+                val initialPage = pages.indexOfLast { it.startsAt <= pageAnchor + 0.0001f }.coerceAtLeast(0)
+                val pager = rememberPagerState(initialPage = initialPage) { pages.size }
+                val dragged by pager.interactionSource.collectIsDraggedAsState()
+                var browsingUntil by remember { mutableLongStateOf(0L) }
+                LaunchedEffect(dragged) { if (dragged) browsingUntil = System.currentTimeMillis() + 8_000 }
+                LaunchedEffect(pages.size) { pageCount = pages.size }
+                LaunchedEffect(pager.currentPage, pages) {
+                    pageIndex = pager.currentPage
+                    val start = pages[pager.currentPage].startsAt
+                    pageAnchor = start
+                    charactersLeft = pages.drop(pager.currentPage).sumOf { it.characters }
+                    currentActions.readingProgressChanged((state.chapterIndex + start) / state.chapterCount.coerceAtLeast(1))
+                }
+                LaunchedEffect(requestedPage) {
+                    requestedPage?.let { target ->
+                        if (target in pages.indices) pager.animateScrollToPage(target)
+                        requestedPage = null
+                    }
+                }
+                LaunchedEffect(pageTurns) {
+                    pageTurns.collect { direction ->
+                        val target = (pager.currentPage + direction).coerceIn(0, pages.lastIndex)
+                        if (target != pager.currentPage) pager.animateScrollToPage(target)
+                        else if (direction > 0 && state.chapterIndex + 1 < state.chapterCount) currentActions.changeChapter(state.chapterIndex + 1)
+                    }
+                }
+                // Follow narration, unless the reader is leafing through pages right now.
+                LaunchedEffect(state.narration.paragraphIndex, state.narration.textOffset, pages) {
+                    val paragraph = state.narration.paragraphIndex ?: return@LaunchedEffect
+                    if (System.currentTimeMillis() < browsingUntil) return@LaunchedEffect
+                    val target = if (paragraph < 0) 0 else {
+                        val length = state.paragraphs.getOrNull(paragraph)?.length?.coerceAtLeast(1) ?: 1
+                        val position = (paragraph + state.narration.textOffset.toFloat() / length) /
+                            state.paragraphs.size.coerceAtLeast(1)
+                        pages.indexOfLast { it.startsAt <= position + 0.0001f }.coerceAtLeast(0)
+                    }
+                    if (target != pager.currentPage) pager.animateScrollToPage(target)
+                }
+                HorizontalPager(state = pager, modifier = Modifier.fillMaxSize(), beyondViewportPageCount = 1) { index ->
+                    val page = pages[index]
+                    val turn = (pager.currentPage - index) + pager.currentPageOffsetFraction
+                    val geometry = remember(page) { PageGeometry() }
+                    Box(
+                        modifier = Modifier.fillMaxSize()
+                            .graphicsLayer {
+                                rotationY = -turn * 12f
+                                transformOrigin = TransformOrigin(if (turn >= 0f) 0f else 1f, 0.5f)
+                                cameraDistance = 24f * density.density
+                                alpha = 1f - abs(turn).coerceIn(0f, 1f) * 0.08f
+                            }
+                            .background(colors.background)
+                            .onGloballyPositioned { geometry.container = it }
+                            .pointerInput(index, pages) {
+                                detectTapGestures(
+                                    onTap = { offset ->
+                                        val zone = offset.x / size.width
+                                        when {
+                                            zone < 0.28f && index > 0 -> requestedPage = index - 1
+                                            zone > 0.72f && index < pages.lastIndex -> requestedPage = index + 1
+                                            zone > 0.72f && state.chapterIndex + 1 < state.chapterCount -> currentActions.changeChapter(state.chapterIndex + 1)
+                                            else -> {
+                                                pageAnchor = page.startsAt
+                                                chromeVisible = !chromeVisible
+                                            }
+                                        }
+                                    },
+                                    onLongPress = { offset ->
+                                        val container = geometry.container ?: return@detectTapGestures
+                                        val hit = page.blocks.withIndex().firstNotNullOfOrNull { (blockIndex, block) ->
+                                            val info = geometry.blocks[blockIndex] ?: return@firstNotNullOfOrNull null
+                                            val coordinates = info.coordinates?.takeIf { it.isAttached } ?: return@firstNotNullOfOrNull null
+                                            val local = coordinates.localPositionOf(container, offset)
+                                            val inside = local.y >= 0 && local.y <= coordinates.size.height &&
+                                                local.x >= -24 && local.x <= coordinates.size.width + 24
+                                            if (!inside) return@firstNotNullOfOrNull null
+                                            val character = info.layout?.getOffsetForPosition(Offset(local.x.coerceAtLeast(0f), local.y)) ?: 0
+                                            block.paragraphIndex to block.startOffset + character.coerceIn(0, block.visibleLength)
+                                        }
+                                        if (hit != null) {
+                                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            currentActions.readFrom(hit.first, hit.second)
+                                        }
+                                    },
+                                )
+                            }
+                            .padding(safeInsets)
+                            .padding(horizontal = margin, vertical = PageVerticalPadding),
+                    ) {
+                        Column(Modifier.fillMaxSize()) {
+                            Column(Modifier.weight(1f).fillMaxWidth()) {
+                                if (page.hasHeading) {
+                                    ChapterHeading(state, colors, label, highlighted = state.narration.paragraphIndex == -1)
+                                }
+                                page.blocks.forEachIndexed { blockIndex, block ->
+                                    if (block.gapPx > 0) Spacer(Modifier.height(with(density) { block.gapPx.toDp() }))
+                                    PageBlock(
+                                        block = block,
+                                        state = state,
+                                        colors = colors,
+                                        onLayout = { coordinates, layout ->
+                                            val info = geometry.blocks.getOrPut(blockIndex) { BlockGeometry() }
+                                            if (coordinates != null) info.coordinates = coordinates
+                                            if (layout != null) info.layout = layout
+                                        },
+                                    )
+                                }
+                                if (state.paragraphs.isEmpty()) {
+                                    Text("В этой главе пока нет доступного текста.", color = colors.muted)
+                                }
+                            }
+                            Box(Modifier.fillMaxWidth().height(footerHeight), contentAlignment = Alignment.BottomCenter) {
+                                Text(
+                                    "${index + 1} / ${pages.size}",
+                                    color = colors.muted.copy(alpha = 0.8f),
+                                    fontSize = 11.sp,
+                                    letterSpacing = 1.sp,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        AnimatedVisibility(
+            visible = chromeVisible,
+            modifier = Modifier.align(Alignment.TopCenter),
+            enter = slideInVertically { -it } + fadeIn(),
+            exit = slideOutVertically { -it } + fadeOut(),
+        ) {
+            ReaderTopBar(
+                state = state,
+                colors = colors,
+                onBack = actions::back,
+                onContents = { showContents = true },
+                onSettings = { showSettings = true },
             )
-        },
-        bottomBar = {
-            if (chromeVisible) ReaderBottomBar(
+        }
+        AnimatedVisibility(
+            visible = chromeVisible,
+            modifier = Modifier.align(Alignment.BottomCenter),
+            enter = slideInVertically { it } + fadeIn(),
+            exit = slideOutVertically { it } + fadeOut(),
+        ) {
+            ReaderBottomPanel(
                 state = state,
                 colors = colors,
                 pageIndex = pageIndex,
                 pageCount = pageCount,
+                charactersLeft = charactersLeft,
                 onPageChange = { requestedPage = it },
-                onChapterChange = onChapterChange,
-                onPlayPause = onPlayPause,
-                onSpeechSpeedChange = onSpeechSpeedChange,
-                onDownloadVoice = onDownloadVoice,
-                onCancelVoiceDownload = onCancelVoiceDownload,
-                onImportNextChapter = onImportNextChapter,
+                onContents = { showContents = true },
+                actions = actions,
             )
-        },
-    ) { padding ->
-        BoxWithConstraints(Modifier.fillMaxSize().padding(padding)) {
-                val widthPx = with(density) { (maxWidth - 52.dp).roundToPx() }
-                val heightPx = with(density) { maxHeight.roundToPx() }
-                val pages = remember(
-                    state.bookId, state.chapterIndex, state.paragraphs,
-                    state.fontSizeSp, state.useSerif, widthPx, heightPx,
-                ) {
-                    paginateChapter(
-                        state.paragraphs, state.chapterTitle, state.fontSizeSp,
-                        state.useSerif, widthPx, heightPx, density, measurer,
-                    )
-                }
-                key(state.bookId, state.chapterIndex, state.fontSizeSp, state.useSerif, widthPx, heightPx) {
-                    val initialPage = pages.indexOfLast { it.startsAt <= pageAnchor + 0.0001f }
-                        .coerceAtLeast(0)
-                    val pager = rememberPagerState(initialPage = initialPage) { pages.size }
-                    LaunchedEffect(pages.size) { pageCount = pages.size }
-                    LaunchedEffect(pager.currentPage, pages) {
-                        pageIndex = pager.currentPage
-                        val start = pages[pager.currentPage].startsAt
-                        pageAnchor = start
-                        val overall = (state.chapterIndex + start) / state.chapterCount.coerceAtLeast(1)
-                        progressCallback(overall)
-                    }
-                    LaunchedEffect(requestedPage) {
-                        requestedPage?.let { target ->
-                            if (target in pages.indices) pager.animateScrollToPage(target)
-                            requestedPage = null
-                        }
-                    }
-                    LaunchedEffect(state.narrationParagraphIndex, state.narrationTextOffset, pages) {
-                        val paragraph = state.narrationParagraphIndex ?: return@LaunchedEffect
-                        val length = state.paragraphs.getOrNull(paragraph)?.length?.coerceAtLeast(1) ?: 1
-                        val position = (paragraph + state.narrationTextOffset.toFloat() / length) /
-                            state.paragraphs.size.coerceAtLeast(1)
-                        val target = pages.indexOfLast { it.startsAt <= position + 0.0001f }.coerceAtLeast(0)
-                        if (target != pager.currentPage) pager.animateScrollToPage(target)
-                    }
-                    HorizontalPager(state = pager, modifier = Modifier.fillMaxSize()) { index ->
-                        val page = pages[index]
-                        val turn = (pager.currentPage - index) + pager.currentPageOffsetFraction
-                        Column(
-                            modifier = Modifier.fillMaxSize().graphicsLayer {
-                                rotationY = -turn * 15f
-                                transformOrigin = TransformOrigin(if (turn >= 0f) 0f else 1f, 0.5f)
-                                cameraDistance = 24f * density.density
-                                alpha = 1f - abs(turn).coerceIn(0f, 1f) * 0.08f
-                            }.pointerInput(index, chromeVisible) {
-                                detectTapGestures(onTap = {
-                                    pageAnchor = page.startsAt
-                                    chromeVisible = !chromeVisible
-                                })
-                            }.padding(
-                                start = 26.dp, end = 26.dp, top = 27.dp, bottom = 27.dp,
-                            ),
-                            verticalArrangement = Arrangement.spacedBy(20.dp),
-                        ) {
-                            if (page.hasHeading) {
-                                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                                    Text(
-                                        "ГЛАВА ${state.chapterIndex + 1}  /  ${state.chapterCount}",
-                                        color = colors.accent,
-                                        style = readerLabelStyle,
-                                    )
-                                    Text(
-                                        state.chapterTitle,
-                                        color = colors.text,
-                                        style = readerTitleStyle(state.fontSizeSp),
-                                    )
-                                    Box(Modifier.size(width = 42.dp, height = 2.dp).background(colors.accent))
-                                }
-                            }
-                            page.blocks.forEach { block ->
-                                val highlightStart = if (state.narrationParagraphIndex == block.paragraphIndex) {
-                                    (state.narrationTextOffset - block.startOffset).coerceIn(0, block.text.length)
-                                } else 0
-                                val highlightEnd = if (state.narrationParagraphIndex == block.paragraphIndex) {
-                                    (state.narrationTextOffset + state.narrationTextLength - block.startOffset)
-                                        .coerceIn(0, block.text.length)
-                                } else 0
-                                val marked = buildAnnotatedString {
-                                    append(block.text)
-                                    if (highlightEnd > highlightStart) {
-                                        addStyle(
-                                            SpanStyle(background = colors.accent.copy(alpha = 0.24f)),
-                                            highlightStart, highlightEnd,
-                                        )
-                                    }
-                                }
-                                Text(
-                                    marked,
-                                    modifier = Modifier.fillMaxWidth(),
-                                    color = if (block.text == "✦  ✦  ✦") colors.muted else colors.text,
-                                    style = readerBodyStyle(state.fontSizeSp, state.useSerif),
-                                    textAlign = if (block.text == "✦  ✦  ✦") TextAlign.Center else TextAlign.Start,
-                                )
-                            }
-                            if (state.paragraphs.isEmpty()) {
-                                Text("В этой главе пока нет доступного текста.", color = colors.muted)
-                            }
-                        }
-                    }
-                }
+        }
+        AnimatedVisibility(
+            visible = !chromeVisible && state.narration.active,
+            modifier = Modifier.align(Alignment.BottomEnd).navigationBarsPadding().padding(end = 14.dp, bottom = 10.dp),
+            enter = fadeIn(),
+            exit = fadeOut(),
+        ) {
+            MiniNarrationButton(state.narration, colors, onClick = actions::playPause)
         }
     }
 
@@ -281,18 +393,90 @@ fun ReaderScreen(
         ReaderSettingsSheet(
             state = state,
             onDismiss = { showSettings = false },
-            onFontSizeChange = onFontSizeChange,
-            onSerifChange = onSerifChange,
-            onThemeChange = onThemeChange,
-            onSpeechSpeedChange = onSpeechSpeedChange,
-            onVoiceChange = onVoiceChange,
-            onPreviewVoice = onPreviewVoice,
-            onDownloadVoice = onDownloadVoice,
-            onDownloadFullVoice = onDownloadFullVoice,
-            onCancelVoiceDownload = onCancelVoiceDownload,
-            onQualityChange = onQualityChange,
-            onExport = onExport,
+            actions = actions,
         )
+    }
+    if (showContents) {
+        ContentsSheet(
+            state = state,
+            onDismiss = { showContents = false },
+            onSelect = { chapter ->
+                showContents = false
+                actions.changeChapter(chapter)
+            },
+        )
+    }
+}
+
+private val PageVerticalPadding = 18.dp
+
+@Composable
+private fun ChapterHeading(state: ReaderUiState, colors: ReadingColors, label: String, highlighted: Boolean) {
+    Column {
+        Text(label, color = colors.accent, style = readerLabelStyle)
+        Spacer(Modifier.height(ReaderRhythm.headingGap))
+        Text(
+            state.chapterTitle,
+            color = colors.text,
+            style = readerTitleStyle(state.typography.fontSizeSp),
+            modifier = if (highlighted) Modifier.background(colors.highlight, RoundedCornerShape(6.dp)) else Modifier,
+        )
+        Spacer(Modifier.height(ReaderRhythm.headingGap))
+        Box(Modifier.size(width = 42.dp, height = ReaderRhythm.dividerHeight).background(colors.accent))
+        Spacer(Modifier.height(ReaderRhythm.afterHeading))
+    }
+}
+
+@Composable
+private fun PageBlock(
+    block: ReaderBlock,
+    state: ReaderUiState,
+    colors: ReadingColors,
+    onLayout: (LayoutCoordinates?, TextLayoutResult?) -> Unit,
+) {
+    val sceneBreak = block.text == SCENE_BREAK
+    val narration = state.narration
+    val highlightStart = if (narration.paragraphIndex == block.paragraphIndex) {
+        (narration.textOffset - block.startOffset).coerceIn(0, block.visibleLength)
+    } else 0
+    val highlightEnd = if (narration.paragraphIndex == block.paragraphIndex) {
+        (narration.textOffset + narration.textLength - block.startOffset).coerceIn(0, block.visibleLength)
+    } else 0
+    val marked = buildAnnotatedString {
+        append(block.text)
+        if (highlightEnd > highlightStart) {
+            addStyle(SpanStyle(background = colors.highlight), highlightStart, highlightEnd)
+        }
+    }
+    Text(
+        marked,
+        modifier = Modifier.fillMaxWidth().onGloballyPositioned { onLayout(it, null) },
+        color = if (sceneBreak) colors.muted else colors.text,
+        style = readerBodyStyle(state.typography, state.language, block.paragraphStart, centered = sceneBreak),
+        maxLines = block.maxLines,
+        overflow = TextOverflow.Clip,
+        onTextLayout = { onLayout(null, it) },
+    )
+}
+
+@Composable
+private fun MiniNarrationButton(narration: ReaderNarrationUi, colors: ReadingColors, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier.size(48.dp).clip(CircleShape)
+            .background(colors.surface.copy(alpha = 0.92f))
+            .border(1.dp, colors.line, CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (narration.preparing) {
+            CircularProgressIndicator(Modifier.size(22.dp), color = colors.accent, strokeWidth = 2.dp)
+        } else {
+            Icon(
+                if (narration.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                contentDescription = if (narration.playing) "Пауза" else "Продолжить",
+                tint = colors.accent,
+            )
+        }
     }
 }
 
@@ -301,171 +485,312 @@ private fun ReaderTopBar(
     state: ReaderUiState,
     colors: ReadingColors,
     onBack: () -> Unit,
+    onContents: () -> Unit,
     onSettings: () -> Unit,
-    onHideControls: () -> Unit,
 ) {
-    Column(modifier = Modifier.fillMaxWidth().background(colors.surface).statusBarsPadding()) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 10.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            TextButton(
-                onClick = onBack,
-                colors = ButtonDefaults.textButtonColors(contentColor = colors.accent),
+    Surface(color = colors.surface, shadowElevation = 3.dp) {
+        Column(Modifier.fillMaxWidth().statusBarsPadding()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("←", fontSize = 28.sp)
+                IconButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "К библиотеке", tint = colors.accent)
+                }
+                Column(Modifier.weight(1f).padding(horizontal = 4.dp)) {
+                    Text(
+                        state.title,
+                        color = colors.text,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        state.chapterTitle,
+                        color = colors.muted,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                IconButton(onClick = onContents) {
+                    Icon(Icons.AutoMirrored.Filled.List, contentDescription = "Оглавление", tint = colors.accent)
+                }
+                IconButton(onClick = onSettings) {
+                    Icon(Icons.Filled.TextFields, contentDescription = "Оформление", tint = colors.accent)
+                }
             }
-            Column(modifier = Modifier.weight(1f).padding(horizontal = 4.dp)) {
-                Text(
-                    state.title,
-                    color = colors.text,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    state.chapterTitle,
-                    color = colors.muted,
-                    style = MaterialTheme.typography.bodySmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            TextButton(
-                onClick = onHideControls,
-                colors = ButtonDefaults.textButtonColors(contentColor = colors.accent),
-            ) { Text("Скрыть", fontSize = 12.sp) }
-            TextButton(
-                onClick = onSettings,
-                colors = ButtonDefaults.textButtonColors(contentColor = colors.accent),
-            ) {
-                Text("Аа", fontFamily = FontFamily.Serif, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
-            }
+            LinearProgressIndicator(
+                progress = { state.overallProgress.coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth().height(2.dp),
+                color = colors.accent,
+                trackColor = colors.line,
+            )
         }
-        LinearProgressIndicator(
-            progress = state.overallProgress.coerceIn(0f, 1f),
-            modifier = Modifier.fillMaxWidth().height(3.dp),
-            color = colors.accent,
-            trackColor = colors.line,
-        )
     }
 }
 
 @Composable
-private fun ReaderBottomBar(
+private fun ReaderBottomPanel(
     state: ReaderUiState,
     colors: ReadingColors,
     pageIndex: Int,
     pageCount: Int,
+    charactersLeft: Int,
     onPageChange: (Int) -> Unit,
-    onChapterChange: (Int) -> Unit,
-    onPlayPause: () -> Unit,
-    onSpeechSpeedChange: (Float) -> Unit,
-    onDownloadVoice: () -> Unit,
-    onCancelVoiceDownload: () -> Unit,
-    onImportNextChapter: () -> Unit,
+    onContents: () -> Unit,
+    actions: ReaderActions,
 ) {
-    Column(modifier = Modifier.fillMaxWidth().background(colors.surface).navigationBarsPadding()) {
-        Box(Modifier.fillMaxWidth().height(1.dp).background(colors.line))
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 2.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            TextButton(
-                onClick = { onPageChange(pageIndex - 1) },
-                enabled = pageIndex > 0,
-                colors = ButtonDefaults.textButtonColors(contentColor = colors.accent),
-            ) { Text("‹", fontSize = 30.sp) }
-            Spacer(Modifier.weight(1f))
-            Text(
-                "СТРАНИЦА ${pageIndex + 1} / $pageCount",
-                color = colors.muted,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
-                letterSpacing = 1.5.sp,
-            )
-            Spacer(Modifier.weight(1f))
-            TextButton(
-                onClick = { onPageChange(pageIndex + 1) },
-                enabled = pageIndex + 1 < pageCount,
-                colors = ButtonDefaults.textButtonColors(contentColor = colors.accent),
-            ) { Text("›", fontSize = 30.sp) }
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            TextButton(
-                onClick = { onChapterChange(state.chapterIndex - 1) },
-                enabled = state.chapterIndex > 0,
-                colors = ButtonDefaults.textButtonColors(contentColor = colors.accent),
-            ) { Text("← Глава") }
-            Spacer(Modifier.weight(1f))
-            Text(
-                "${(state.overallProgress.coerceIn(0f, 1f) * 100).roundToInt()}%",
-                color = colors.muted,
-                style = MaterialTheme.typography.labelMedium,
-            )
-            Spacer(Modifier.weight(1f))
-            TextButton(
-                onClick = {
-                    if (state.chapterIndex + 1 < state.chapterCount) onChapterChange(state.chapterIndex + 1)
-                    else onImportNextChapter()
-                },
-                enabled = state.chapterIndex + 1 < state.chapterCount || state.hasNextWebChapter,
-                colors = ButtonDefaults.textButtonColors(contentColor = colors.accent),
-            ) { Text("Глава →") }
-        }
-        if (state.isVoiceReady) {
+    Surface(color = colors.surface, shadowElevation = 8.dp, shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp)) {
+        Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(top = 10.dp, bottom = 6.dp)) {
             Row(
-                modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 13.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Button(
-                    onClick = onPlayPause,
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(containerColor = colors.accent, contentColor = colors.surface),
-                    shape = RoundedCornerShape(16.dp),
-                    contentPadding = PaddingValues(vertical = 13.dp),
-                ) {
-                    Text(if (state.isPlaying) "❚❚  Пауза" else "▶  Слушать", fontSize = 16.sp)
+                Text(
+                    "Стр. ${pageIndex + 1} из $pageCount",
+                    color = colors.text,
+                    style = MaterialTheme.typography.labelLarge,
+                )
+                Spacer(Modifier.weight(1f))
+                val minutes = if (state.narration.active) {
+                    charactersLeft / (850f * state.narration.speed)
+                } else {
+                    charactersLeft / 1_100f
                 }
-                OutlinedButton(
-                    onClick = {
-                        val next = when {
-                            state.speechSpeed < 1f -> 1f
-                            state.speechSpeed < 1.25f -> 1.25f
-                            state.speechSpeed < 1.5f -> 1.5f
-                            else -> 0.8f
-                        }
-                        onSpeechSpeedChange(next)
+                Text(
+                    remainingLabel(minutes, listening = state.narration.active),
+                    color = colors.muted,
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
+            if (pageCount > 1) {
+                var dragging by remember { mutableStateOf<Float?>(null) }
+                Slider(
+                    value = dragging ?: pageIndex.toFloat(),
+                    onValueChange = { dragging = it },
+                    onValueChangeFinished = {
+                        dragging?.let { onPageChange(it.roundToInt()) }
+                        dragging = null
                     },
-                    shape = RoundedCornerShape(16.dp),
+                    valueRange = 0f..(pageCount - 1).toFloat(),
+                    modifier = Modifier.padding(horizontal = 12.dp).height(34.dp),
+                    colors = SliderDefaults.colors(
+                        thumbColor = colors.accent,
+                        activeTrackColor = colors.accent,
+                        inactiveTrackColor = colors.line,
+                    ),
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(
+                    onClick = { actions.changeChapter(state.chapterIndex - 1) },
+                    enabled = state.chapterIndex > 0,
+                    colors = ButtonDefaults.textButtonColors(contentColor = colors.accent),
                 ) {
-                    Text(speechSpeedLabel(state.speechSpeed))
+                    Icon(Icons.AutoMirrored.Filled.NavigateBefore, contentDescription = null)
+                    Text("Глава")
+                }
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onContents, colors = ButtonDefaults.textButtonColors(contentColor = colors.muted)) {
+                    Text("${state.chapterIndex + 1} / ${state.chapterCount}  ·  ${(state.overallProgress * 100).roundToInt()}%")
+                }
+                Spacer(Modifier.weight(1f))
+                TextButton(
+                    onClick = {
+                        if (state.chapterIndex + 1 < state.chapterCount) actions.changeChapter(state.chapterIndex + 1)
+                        else actions.importNextChapter()
+                    },
+                    enabled = state.chapterIndex + 1 < state.chapterCount || state.hasNextWebChapter,
+                    colors = ButtonDefaults.textButtonColors(contentColor = colors.accent),
+                ) {
+                    Text(if (state.chapterIndex + 1 < state.chapterCount) "Глава" else "Загрузить")
+                    Icon(
+                        if (state.chapterIndex + 1 < state.chapterCount) Icons.AutoMirrored.Filled.NavigateNext else Icons.Filled.Download,
+                        contentDescription = null,
+                    )
                 }
             }
-        } else {
-            Column(modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 13.dp)) {
+            HorizontalDivider(color = colors.line, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+            NarrationControls(state, colors, actions)
+        }
+    }
+}
+
+private fun remainingLabel(minutes: Float, listening: Boolean): String {
+    val suffix = if (listening) "слушать" else "читать"
+    return when {
+        minutes < 1f -> "меньше минуты"
+        minutes < 60f -> "≈ ${minutes.roundToInt()} мин $suffix"
+        else -> "≈ ${(minutes / 60).toInt()} ч ${(minutes % 60).roundToInt()} мин $suffix"
+    }
+}
+
+@Composable
+private fun NarrationControls(state: ReaderUiState, colors: ReadingColors, actions: ReaderActions) {
+    val narration = state.narration
+    if (!narration.voiceReady) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Озвучка на устройстве", color = colors.text, fontWeight = FontWeight.SemiBold)
                 Text(
-                    state.voiceStatus ?: "Скачайте голос для озвучки на устройстве",
+                    "Выберите и скачайте голос — дальше без интернета",
                     color = colors.muted,
                     style = MaterialTheme.typography.bodySmall,
                 )
-                state.voiceDownloadProgress?.let { progress ->
-                    Spacer(Modifier.height(7.dp))
-                    LinearProgressIndicator(
-                        progress = progress.coerceIn(0f, 1f),
-                        modifier = Modifier.fillMaxWidth(),
+            }
+            FilledTonalButton(onClick = actions::openVoices) {
+                Icon(Icons.Filled.RecordVoiceOver, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Голоса")
+            }
+        }
+        return
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = actions::previousSentence, enabled = narration.active) {
+            Icon(Icons.Filled.SkipPrevious, contentDescription = "Предыдущая фраза", tint = if (narration.active) colors.text else colors.line)
+        }
+        Box(
+            modifier = Modifier.size(58.dp).clip(CircleShape).background(colors.accent).clickable(onClick = actions::playPause),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (narration.preparing) {
+                CircularProgressIndicator(Modifier.size(26.dp), color = colors.surface, strokeWidth = 2.5.dp)
+            } else {
+                Icon(
+                    if (narration.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                    contentDescription = if (narration.playing) "Пауза" else "Слушать",
+                    tint = colors.surface,
+                    modifier = Modifier.size(30.dp),
+                )
+            }
+        }
+        IconButton(onClick = actions::nextSentence, enabled = narration.active) {
+            Icon(Icons.Filled.SkipNext, contentDescription = "Следующая фраза", tint = if (narration.active) colors.text else colors.line)
+        }
+        Spacer(Modifier.weight(1f))
+        var speedMenu by remember { mutableStateOf(false) }
+        Box {
+            TextButton(onClick = { speedMenu = true }, colors = ButtonDefaults.textButtonColors(contentColor = colors.accent)) {
+                Text(speechSpeedLabel(narration.speed), fontWeight = FontWeight.SemiBold)
+            }
+            DropdownMenu(expanded = speedMenu, onDismissRequest = { speedMenu = false }) {
+                speedPresets.forEach { speed ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                speechSpeedLabel(speed),
+                                fontWeight = if (abs(speed - narration.speed) < 0.01f) FontWeight.Bold else FontWeight.Normal,
+                            )
+                        },
+                        onClick = {
+                            speedMenu = false
+                            actions.setSpeed(speed)
+                        },
                     )
                 }
-                Spacer(Modifier.height(8.dp))
-                OutlinedButton(
-                    onClick = if (state.voiceDownloadProgress == null) onDownloadVoice else onCancelVoiceDownload,
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text(if (state.voiceDownloadProgress == null) "Загрузить голос" else "Отменить загрузку") }
+            }
+        }
+        var sleepMenu by remember { mutableStateOf(false) }
+        val sleepActive = narration.sleepEndsAt != null || narration.sleepAtChapterEnd
+        Box {
+            IconButton(onClick = { sleepMenu = true }, enabled = narration.active) {
+                Icon(
+                    Icons.Filled.Bedtime,
+                    contentDescription = "Таймер сна",
+                    tint = when {
+                        sleepActive -> colors.accent
+                        narration.active -> colors.text
+                        else -> colors.line
+                    },
+                )
+            }
+            DropdownMenu(expanded = sleepMenu, onDismissRequest = { sleepMenu = false }) {
+                narration.sleepEndsAt?.let { endsAt ->
+                    val left = ((endsAt - System.currentTimeMillis()) / 60_000f).roundToInt().coerceAtLeast(0)
+                    DropdownMenuItem(text = { Text("Осталось ≈ $left мин", color = colors.muted) }, onClick = {}, enabled = false)
+                }
+                listOf(10, 20, 30, 45, 60).forEach { minutes ->
+                    DropdownMenuItem(text = { Text("Через $minutes мин") }, onClick = {
+                        sleepMenu = false
+                        actions.setSleepTimer(minutes)
+                    })
+                }
+                DropdownMenuItem(
+                    text = { Text(if (narration.sleepAtChapterEnd) "В конце главы ✓" else "В конце главы") },
+                    onClick = {
+                        sleepMenu = false
+                        actions.setSleepTimer(-1)
+                    },
+                )
+                if (sleepActive) {
+                    DropdownMenuItem(text = { Text("Выключить таймер") }, onClick = {
+                        sleepMenu = false
+                        actions.setSleepTimer(0)
+                    })
+                }
+            }
+        }
+        IconButton(onClick = actions::openVoices) {
+            Icon(Icons.Filled.RecordVoiceOver, contentDescription = "Голоса: ${narration.voiceLabel}", tint = colors.text)
+        }
+        if (narration.active) {
+            IconButton(onClick = actions::stopNarration) {
+                Icon(Icons.Filled.Stop, contentDescription = "Остановить озвучку", tint = colors.muted)
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ContentsSheet(state: ReaderUiState, onDismiss: () -> Unit, onSelect: (Int) -> Unit) {
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+        Text(
+            "Оглавление",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(start = 24.dp, end = 24.dp, bottom = 8.dp),
+        )
+        val listState = rememberLazyListState(initialFirstVisibleItemIndex = (state.chapterIndex - 2).coerceAtLeast(0))
+        LazyColumn(state = listState, contentPadding = PaddingValues(bottom = 32.dp)) {
+            itemsIndexed(state.chapterTitles) { index, title ->
+                val current = index == state.chapterIndex
+                Row(
+                    modifier = Modifier.fillMaxWidth()
+                        .clickable { onSelect(index) }
+                        .background(if (current) MaterialTheme.colorScheme.primary.copy(alpha = 0.1f) else Color.Transparent)
+                        .padding(horizontal = 24.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "${index + 1}",
+                        modifier = Modifier.width(42.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.labelLarge,
+                    )
+                    Text(
+                        title.ifBlank { "Глава ${index + 1}" },
+                        modifier = Modifier.weight(1f),
+                        fontWeight = if (current) FontWeight.SemiBold else FontWeight.Normal,
+                        color = if (current) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (index < state.chapterIndex) {
+                        Text("✓", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
             }
         }
     }
@@ -476,162 +801,105 @@ private fun ReaderBottomBar(
 private fun ReaderSettingsSheet(
     state: ReaderUiState,
     onDismiss: () -> Unit,
-    onFontSizeChange: (Float) -> Unit,
-    onSerifChange: (Boolean) -> Unit,
-    onThemeChange: (ReaderTheme) -> Unit,
-    onSpeechSpeedChange: (Float) -> Unit,
-    onVoiceChange: (Int) -> Unit,
-    onPreviewVoice: () -> Unit,
-    onDownloadVoice: () -> Unit,
-    onDownloadFullVoice: () -> Unit,
-    onCancelVoiceDownload: () -> Unit,
-    onQualityChange: (Boolean) -> Unit,
-    onExport: (String) -> Unit,
+    actions: ReaderActions,
 ) {
+    val typography = state.typography
     ModalBottomSheet(onDismissRequest = onDismiss) {
         LazyColumn(
             modifier = Modifier.fillMaxWidth(),
             contentPadding = PaddingValues(start = 24.dp, end = 24.dp, bottom = 36.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             item {
-                Text("Настройки чтения", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+                Text("Оформление", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
             }
             item {
-                SettingsLabel("Размер текста")
+                SettingsLabel("Тема")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ThemeChoice("Светлая", ReaderTheme.LIGHT, state.theme, actions::themeChanged, Modifier.weight(1f))
+                    ThemeChoice("Сепия", ReaderTheme.SEPIA, state.theme, actions::themeChanged, Modifier.weight(1f))
+                    ThemeChoice("Тёмная", ReaderTheme.DARK, state.theme, actions::themeChanged, Modifier.weight(1f))
+                    ThemeChoice("Чёрная", ReaderTheme.BLACK, state.theme, actions::themeChanged, Modifier.weight(1f))
+                }
+            }
+            item {
+                SettingsLabel("Размер текста · ${typography.fontSizeSp.roundToInt()}")
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("А", fontSize = 16.sp)
+                    Text("А", fontSize = 15.sp)
                     Slider(
-                        value = state.fontSizeSp.coerceIn(14f, 32f),
-                        onValueChange = onFontSizeChange,
+                        value = typography.fontSizeSp.coerceIn(14f, 32f),
+                        onValueChange = { actions.typographyChanged(typography.copy(fontSizeSp = it.roundToInt().toFloat())) },
                         modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
                         valueRange = 14f..32f,
+                        steps = 17,
                     )
-                    Text("А", fontSize = 29.sp)
+                    Text("А", fontSize = 27.sp)
                 }
-                Text("${state.fontSizeSp.roundToInt()} пт", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             item {
                 SettingsLabel("Шрифт")
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     FilterChip(
-                        selected = state.useSerif,
-                        onClick = { onSerifChange(true) },
+                        selected = typography.useSerif,
+                        onClick = { actions.typographyChanged(typography.copy(useSerif = true)) },
                         label = { Text("С засечками", fontFamily = FontFamily.Serif) },
                     )
                     FilterChip(
-                        selected = !state.useSerif,
-                        onClick = { onSerifChange(false) },
+                        selected = !typography.useSerif,
+                        onClick = { actions.typographyChanged(typography.copy(useSerif = false)) },
                         label = { Text("Без засечек", fontFamily = FontFamily.SansSerif) },
                     )
                 }
             }
             item {
-                SettingsLabel("Оформление")
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    ThemeChoice("Светлая", ReaderTheme.LIGHT, state.theme, onThemeChange, Modifier.weight(1f))
-                    ThemeChoice("Сепия", ReaderTheme.SEPIA, state.theme, onThemeChange, Modifier.weight(1f))
-                    ThemeChoice("Тёмная", ReaderTheme.DARK, state.theme, onThemeChange, Modifier.weight(1f))
+                SettingsLabel("Межстрочный интервал")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(1.35f to "Плотный", 1.55f to "Обычный", 1.8f to "Свободный").forEach { (value, title) ->
+                        FilterChip(
+                            selected = abs(typography.lineSpacing - value) < 0.01f,
+                            onClick = { actions.typographyChanged(typography.copy(lineSpacing = value)) },
+                            label = { Text(title) },
+                        )
+                    }
                 }
             }
             item {
-                SettingsLabel("Скорость озвучки")
-                Slider(
-                    value = state.speechSpeed.coerceIn(0.7f, 1.5f),
-                    onValueChange = onSpeechSpeedChange,
-                    valueRange = 0.7f..1.5f,
+                SettingsLabel("Поля")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ReaderMargin.entries.forEach { margin ->
+                        FilterChip(
+                            selected = typography.margin == margin,
+                            onClick = { actions.typographyChanged(typography.copy(margin = margin)) },
+                            label = { Text(margin.label) },
+                        )
+                    }
+                }
+            }
+            item {
+                ToggleRow(
+                    title = "Выравнивание по ширине",
+                    subtitle = "С переносами слов, как в бумажной книге",
+                    checked = typography.justify,
+                    onChange = { actions.typographyChanged(typography.copy(justify = it)) },
                 )
-                Text(speechSpeedLabel(state.speechSpeed), color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            if (state.isVoiceReady) {
-                item {
-                    SettingsLabel("Тембр голоса")
-                    Text(
-                        "Supertonic 3 · 10 вариантов для русского текста",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Row(
-                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        for (id in 0 until 10) {
-                            FilterChip(
-                                selected = state.voiceId == id,
-                                onClick = { onVoiceChange(id) },
-                                label = { Text("Голос ${id + 1}") },
-                            )
-                        }
-                    }
-                    OutlinedButton(onClick = onPreviewVoice) { Text("Прослушать пример") }
-                }
-                item {
-                    SettingsLabel("Качество модели")
-                    if (state.isFullVoiceReady) {
-                        Text(
-                            "Полноточная модель установлена. Её можно переключить на быстрый вариант в любой момент.",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            FilterChip(
-                                selected = state.preferFullVoice,
-                                onClick = { onQualityChange(true) },
-                                label = { Text("Полноточное") },
-                            )
-                            FilterChip(
-                                selected = !state.preferFullVoice,
-                                onClick = { onQualityChange(false) },
-                                label = { Text("Быстрое") },
-                            )
-                        }
-                    } else {
-                        Text(
-                            "Полноточные веса Supertonic 3 без INT8-квантования — около 400 МБ. Разница на слух зависит от текста и голоса; подготовка речи может занять больше времени.",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                        if (state.voiceDownloadProgress != null) {
-                            Spacer(Modifier.height(8.dp))
-                            Text(state.voiceStatus ?: "Загружаем модель", style = MaterialTheme.typography.bodySmall)
-                            LinearProgressIndicator(
-                                progress = state.voiceDownloadProgress.coerceIn(0f, 1f),
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                        }
-                        Spacer(Modifier.height(8.dp))
-                        OutlinedButton(
-                            onClick = if (state.voiceDownloadProgress == null) onDownloadFullVoice else onCancelVoiceDownload,
-                        ) {
-                            Text(if (state.voiceDownloadProgress == null) "Загрузить полноточную модель" else "Отменить загрузку")
-                        }
-                    }
-                }
-            }
-            if (!state.isVoiceReady) {
-                item {
-                    SettingsLabel("Голос")
-                    Text(
-                        state.voiceStatus ?: "Загрузите голосовую модель, чтобы слушать книгу офлайн.",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Spacer(Modifier.height(5.dp))
-                    Text(
-                        "Загрузка — около 129 МБ. После установки голос работает без интернета.",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    state.voiceDownloadProgress?.let { progress ->
-                        Spacer(Modifier.height(8.dp))
-                        LinearProgressIndicator(progress = progress.coerceIn(0f, 1f), modifier = Modifier.fillMaxWidth())
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedButton(
-                        onClick = if (state.voiceDownloadProgress == null) onDownloadVoice else onCancelVoiceDownload,
-                    ) {
-                        Text(if (state.voiceDownloadProgress == null) "Загрузить голос" else "Отменить загрузку")
-                    }
-                }
+                ToggleRow(
+                    title = "Красная строка",
+                    subtitle = "Отступ в начале абзаца вместо пустой строки",
+                    checked = typography.paragraphIndent,
+                    onChange = { actions.typographyChanged(typography.copy(paragraphIndent = it)) },
+                )
+                ToggleRow(
+                    title = "Листать кнопками громкости",
+                    subtitle = "Во время озвучки кнопки меняют громкость",
+                    checked = state.volumeKeysTurnPages,
+                    onChange = actions::volumeKeysChanged,
+                )
+                ToggleRow(
+                    title = "Не гасить экран",
+                    subtitle = "Пока открыта книга",
+                    checked = state.keepScreenOn,
+                    onChange = actions::keepScreenOnChanged,
+                )
             }
             item {
                 SettingsLabel("Экспорт книги")
@@ -642,8 +910,8 @@ private fun ReaderSettingsSheet(
                 )
                 Spacer(Modifier.height(9.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedButton(onClick = { onDismiss(); onExport("epub") }, modifier = Modifier.weight(1f)) { Text("EPUB") }
-                    OutlinedButton(onClick = { onDismiss(); onExport("fb2") }, modifier = Modifier.weight(1f)) { Text("FB2") }
+                    OutlinedButton(onClick = { onDismiss(); actions.export("epub") }, modifier = Modifier.weight(1f)) { Text("EPUB") }
+                    OutlinedButton(onClick = { onDismiss(); actions.export("fb2") }, modifier = Modifier.weight(1f)) { Text("FB2") }
                 }
             }
         }
@@ -651,9 +919,25 @@ private fun ReaderSettingsSheet(
 }
 
 @Composable
-private fun SettingsLabel(text: String) {
+internal fun ToggleRow(title: String, subtitle: String?, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().clickable { onChange(!checked) }.padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            if (subtitle != null) {
+                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
+@Composable
+internal fun SettingsLabel(text: String) {
     Text(text, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-    Spacer(Modifier.height(7.dp))
+    Spacer(Modifier.height(8.dp))
 }
 
 @Composable
@@ -674,12 +958,12 @@ private fun ThemeChoice(
                 shape = RoundedCornerShape(14.dp),
             )
             .clickable { onClick(theme) }
-            .padding(10.dp),
+            .padding(vertical = 10.dp, horizontal = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
-        Text("Aa", fontFamily = FontFamily.Serif, fontSize = 25.sp, color = colors.text)
-        Text(title, fontSize = 11.sp, color = colors.text, maxLines = 1)
+        Text("Aa", fontFamily = FontFamily.Serif, fontSize = 22.sp, color = colors.text)
+        Text(title, fontSize = 11.sp, color = colors.text, maxLines = 1, textAlign = TextAlign.Center)
         Box(
             Modifier.size(7.dp).clip(CircleShape)
                 .background(if (theme == selected) colors.accent else colors.line),
