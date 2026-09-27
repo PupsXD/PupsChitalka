@@ -223,7 +223,7 @@ fun ReaderScreen(
                     widthPx, heightPx, density, measurer,
                 )
             }
-            key(state.bookId, state.chapterIndex, state.typography, widthPx, heightPx) {
+            key(state.bookId, state.chapterIndex, state.typography, widthPx, heightPx, pages) {
                 val initialPage = pages.indexOfLast { it.startsAt <= pageAnchor + 0.0001f }.coerceAtLeast(0)
                 val pager = rememberPagerState(initialPage = initialPage) { pages.size }
                 val dragged by pager.interactionSource.collectIsDraggedAsState()
@@ -231,8 +231,9 @@ fun ReaderScreen(
                 LaunchedEffect(dragged) { if (dragged) browsingUntil = System.currentTimeMillis() + 8_000 }
                 LaunchedEffect(pages.size) { pageCount = pages.size }
                 LaunchedEffect(pager.currentPage, pages) {
+                    val page = pages.getOrNull(pager.currentPage) ?: return@LaunchedEffect
                     pageIndex = pager.currentPage
-                    val start = pages[pager.currentPage].startsAt
+                    val start = page.startsAt
                     pageAnchor = start
                     charactersLeft = pages.drop(pager.currentPage).sumOf { it.characters }
                     currentActions.readingProgressChanged((state.chapterIndex + start) / state.chapterCount.coerceAtLeast(1))

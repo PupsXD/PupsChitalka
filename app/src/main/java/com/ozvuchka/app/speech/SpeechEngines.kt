@@ -235,7 +235,11 @@ internal class SystemTtsClient(context: Context, val enginePackage: String) {
     private var appliedVoice: String? = null
     private var appliedLanguage: String? = null
     private var appliedRate = -1f
-    private val directory = File(app.cacheDir, "system-tts").apply { mkdirs() }
+    private val directory = File(File(app.cacheDir, "system-tts"), enginePackage.replace(Regex("[^A-Za-z0-9._-]"), "_")).apply {
+        mkdirs()
+        // Files left behind if the process died in the middle of a sentence.
+        listFiles()?.forEach { it.delete() }
+    }
 
     init {
         tts = TextToSpeech(app, { status ->
