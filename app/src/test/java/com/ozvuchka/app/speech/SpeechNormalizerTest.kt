@@ -161,6 +161,8 @@ class SpeechNormalizerTest {
         assertEquals("ten thirty", en("10:30"))
         assertEquals("three point one four", en("3.14"))
         assertEquals("the nineteen nineties", en("the 1990s"))
+        assertEquals("By April twelfth, at seven thirty", en("By April 12, at 7:30"))
+        assertEquals("on the fifth of May", en("on 5 May"))
     }
 
     @Test

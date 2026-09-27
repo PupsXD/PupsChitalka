@@ -31,6 +31,17 @@ class SpeechTextChunkerTest {
     }
 
     @Test
+    fun dialogueLineAfterAuthorWordsStartsNewSentence() {
+        val source = "— Конечно, — ответил он, не оборачиваясь. — К утру всё закончится. — и замолчал."
+        val chunks = splitForSpeech(source, "ru")
+
+        assertEquals(
+            listOf("— Конечно, — ответил он, не оборачиваясь.", "— К утру всё закончится. — и замолчал."),
+            chunks.map { it.text },
+        )
+    }
+
+    @Test
     fun duplicateSentencesPointToTheirOwnOccurrence() {
         val source = "Повтори это. Повтори это."
         val chunks = splitForSpeech(source, "ru")

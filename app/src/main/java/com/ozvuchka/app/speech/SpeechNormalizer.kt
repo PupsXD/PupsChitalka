@@ -640,6 +640,16 @@ object SpeechNormalizer {
             if (cents != null && cents > 0) main + " and " + EnglishNumbers.cardinal(cents) + if (cents == 1L) " cent" else " cents" else main
         }
         text = Regex("(\\d+(?:\\.\\d+)?)\\s?%").replace(text) { match -> match.groupValues[1] + " percent" }
+        // Dates: «April 12» → «April twelfth», «12 April» → «the twelfth of April».
+        val monthNames = "January|February|March|April|May|June|July|August|September|October|November|December"
+        text = Regex("\\b($monthNames)\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b").replace(text) { match ->
+            val day = match.groupValues[2].toLong()
+            if (day !in 1..31) match.value else match.groupValues[1] + " " + EnglishNumbers.ordinal(day)
+        }
+        text = Regex("\\b(?:the\\s+)?(\\d{1,2})(?:st|nd|rd|th)?\\s+(?:of\\s+)?($monthNames)\\b").replace(text) { match ->
+            val day = match.groupValues[1].toLong()
+            if (day !in 1..31) match.value else "the " + EnglishNumbers.ordinal(day) + " of " + match.groupValues[2]
+        }
         text = Regex("\\b(\\d{1,6})(st|nd|rd|th)\\b").replace(text) { match -> EnglishNumbers.ordinal(match.groupValues[1].toLong()) }
         text = Regex("(?<![\\d:])([01]?\\d|2[0-3]):([0-5]\\d)(?![\\d:])").replace(text) { match ->
             val hours = EnglishNumbers.cardinal(match.groupValues[1].toLong())

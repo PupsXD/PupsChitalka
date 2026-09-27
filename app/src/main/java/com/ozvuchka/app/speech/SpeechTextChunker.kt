@@ -54,9 +54,19 @@ internal fun splitForSpeech(text: String, language: String, maxChars: Int = 260)
         }
     }
 
-    var sentenceStart = iterator.first()
-    var sentenceEnd = iterator.next()
-    while (sentenceEnd != BreakIterator.DONE) {
+    // A dialogue line after the author's words, «…не оборачиваясь. — К утру…», is a new sentence,
+    // but the sentence iterator treats a dash after a full stop as a continuation.
+    val boundaries = sortedSetOf(0, text.length)
+    var boundary = iterator.first()
+    while (boundary != BreakIterator.DONE) {
+        boundaries += boundary
+        boundary = iterator.next()
+    }
+    dialogueTurn.findAll(text).forEach { boundaries += it.range.last + 1 }
+    val sentenceBounds = boundaries.toList()
+    for (bound in 1 until sentenceBounds.size) {
+        val sentenceStart = sentenceBounds[bound - 1]
+        val sentenceEnd = sentenceBounds[bound]
         var cursor = sentenceStart
         while (cursor < sentenceEnd) {
             while (cursor < sentenceEnd && text[cursor].isWhitespace()) cursor++
@@ -76,11 +86,11 @@ internal fun splitForSpeech(text: String, language: String, maxChars: Int = 260)
             addRange(cursor, split)
             cursor = split
         }
-        sentenceStart = sentenceEnd
-        sentenceEnd = iterator.next()
     }
     return chunks
 }
+
+private val dialogueTurn = Regex("(?<=[.!?…][»”\"]?)\\s+(?=[—–]\\s*\\p{Lu})")
 
 /**
  * Picks the voice language of a sentence. Letters decide; a sentence switches away from the
