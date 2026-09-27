@@ -1,0 +1,298 @@
+diff --git a/README.md b/README.md
+index 5c160d4..df45af2 100644
+--- a/README.md
++++ b/README.md
+@@ -21,7 +21,7 @@ microphone recordings.
+ 
+ - On-device Qwen3-TTS synthesis through the `qwen3-tts.cpp` native runtime
+ - Jetpack Compose UI with Studio, Voices, History, and Settings screens
+-- Q4_K_M model download and loading from app-private storage
++- Q4_K_M and Q8_0 model download and loading from app-private storage
+ - Voice profiles with microphone recording and speaker embedding extraction
+ - Local generation history with playback, stop, delete, and WAV export
+ - CPU runtime path for Android devices
+@@ -30,10 +30,16 @@ microphone recordings.
+ 
+ ## Model
+ 
+-The app uses this model package:
++The app offers two separate model packages:
+ 
+-- `qwen-tokenizer-12hz-Q4_K_M.gguf`
+-- `qwen-talker-0.6b-base-Q4_K_M.gguf`
++- Q4_K_M: `qwen-tokenizer-12hz-Q4_K_M.gguf` and `qwen-talker-0.6b-base-Q4_K_M.gguf` (about 844 MiB)
++- Q8_0: `qwen-tokenizer-12hz-Q8_0.gguf` and `qwen-talker-0.6b-base-Q8_0.gguf` (about 1.20 GiB)
++
++Both variants generated the same short Russian phrase on Galaxy S24 Ultra. Q4_K_M
++took 97.879 seconds for 1.60 seconds of audio; Q8_0 took 124.254 seconds for
++1.28 seconds of audio. Voice quality still needs a listening comparison. The
++packages use separate directories so loading one variant cannot silently
++select the other variant's tokenizer.
+ 
+ Model files are downloaded from
+ [`Serveurperso/Qwen3-TTS-GGUF`](https://huggingface.co/Serveurperso/Qwen3-TTS-GGUF)
+@@ -83,7 +89,7 @@ With a device connected through ADB:
+ adb install -r app\build\outputs\apk\release\app-release.apk
+ ```
+ 
+-On first launch, open Settings and download the Q4_K_M model package.
++On first launch, open Settings, choose a model package, and download it.
+ 
+ ## Repository Layout
+ 
+diff --git a/app/src/main/java/com/qwen/tts/android/MainActivity.kt b/app/src/main/java/com/qwen/tts/android/MainActivity.kt
+index b92ff41..17dc93d 100644
+--- a/app/src/main/java/com/qwen/tts/android/MainActivity.kt
++++ b/app/src/main/java/com/qwen/tts/android/MainActivity.kt
+@@ -9,6 +9,7 @@ import android.media.AudioTrack
+ import android.net.Uri
+ import android.os.Bundle
+ import android.os.SystemClock
++import android.util.Log
+ import android.view.WindowManager
+ import androidx.activity.ComponentActivity
+ import androidx.activity.compose.rememberLauncherForActivityResult
+@@ -149,6 +150,7 @@ private val languageOptions = listOf(
+ 
+ private val backendOptions = listOf(
+     BackendOption("cpu", "CPU", QwenEngine.BACKEND_CPU),
++    BackendOption("adreno", "Adreno OpenCL (тест)", QwenEngine.BACKEND_AUTO),
+ )
+ 
+ private val defaultBackendOption = backendOptions.first { it.id == "cpu" }
+@@ -167,17 +169,22 @@ private object QwenModel {
+         tokenizerSizeBytes = 254_974_752L,
+     )
+ 
+-    val variants = listOf(defaultVariant)
++    val qualityVariant: ModelVariant = variant(
++        id = "q8_0",
++        label = "Q8_0",
++        displayName = "Qwen3-TTS 0.6B Q8_0",
++        talkerName = "qwen-talker-0.6b-base-Q8_0.gguf",
++        tokenizerName = "qwen-tokenizer-12hz-Q8_0.gguf",
++        talkerSizeBytes = 992_615_488L,
++        tokenizerSizeBytes = 291_150_624L,
++    )
++
++    val variants = listOf(defaultVariant, qualityVariant)
+ 
+     val obsoleteFileNames = setOf(
+-        "qwen-talker-0.6b-base-Q8_0.gguf",
+         "qwen-talker-0.6b-base-NVFP4.gguf",
+-        "qwen-tokenizer-12hz-Q8_0.gguf",
+     )
+ 
+-    // Q8_0 and NVFP4 used to be available here. The Android app now intentionally
+-    // ships one supported path: Q4_K_M.
+-
+     fun variantById(id: String): ModelVariant =
+         variants.firstOrNull { it.id == id } ?: defaultVariant
+ 
+@@ -205,7 +212,7 @@ private object QwenModel {
+ }
+ 
+ data class QwenTtsUiState(
+-    val text: String = "Hello World from Qwen3 TTS running on Android on-device!",
++    val text: String = "Привет, как дела?",
+     val selectedModelId: String = QwenModel.defaultVariant.id,
+     val selectedBackendId: String = defaultBackendOption.id,
+     val selectedVoiceId: String? = null,
+@@ -229,7 +236,7 @@ data class QwenTtsUiState(
+     val maxAudioTokens: Int = 512,
+     val cpuThreads: Int = 0,
+     val selectedCpuThreads: Int = 0,
+-    val selectedLanguageId: Int = 2050,
++    val selectedLanguageId: Int = 2069,
+     val tokenizeMillis: Long = 0,
+     val encodeMillis: Long = 0,
+     val generateMillis: Long = 0,
+@@ -286,6 +293,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+         engine?.setCpuThreads(value)
+     }
+ 
++    fun updateBackend(id: String) {
++        if (_uiState.value.busy || _uiState.value.loaded) return
++        _uiState.update { it.copy(selectedBackendId = backendOptionById(id).id) }
++    }
++
+     fun updateLanguage(languageId: Int) {
+         if (_uiState.value.busy) return
+         _uiState.update { it.copy(selectedLanguageId = languageId) }
+@@ -349,7 +361,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+ 
+             val result = runCatching {
+                 withContext(Dispatchers.IO) {
+-                    modelDir.mkdirs()
++                    variantDirectory(variant).mkdirs()
+                     downloadFiles(variant)
+                 }
+             }
+@@ -428,6 +440,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+             val result = runCatching {
+                 withContext(Dispatchers.IO) {
+                     val native = ensureEngineLoaded(variant)
++                    Log.i(
++                        "QwenGpuProbe",
++                        "Synthesis start: model=${variant.id}, backend=${native.getActiveBackendName()}, " +
++                            "threads=${native.getCpuThreads()}, chars=${text.length}, language=${_uiState.value.selectedLanguageId}",
++                    )
+                     native.setProgressCallback { frames, maxTokens ->
+                         _uiState.update {
+                             it.copy(
+@@ -442,7 +459,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+                         native.synthesize(
+                             text = text,
+                             speakerEmbeddingPath = selectedVoice?.speakerEmbeddingPath,
+-                            params = QwenEngine.NativeParams(languageId = _uiState.value.selectedLanguageId),
++                            params = QwenEngine.NativeParams(
++                                languageId = _uiState.value.selectedLanguageId,
++                                maxAudioTokens = 128,
++                            ),
+                         )
+                     } finally {
+                         _uiState.update {
+@@ -457,6 +477,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+                 onSuccess = { nativeResult ->
+                     stopBusyTicker()
+                     if (!nativeResult.success || nativeResult.audio == null) {
++                        Log.e("QwenGpuProbe", "Synthesis failed: ${nativeResult.errorMsg}; time=${nativeResult.timeMs}ms")
+                         _uiState.update {
+                             it.copy(
+                                 busy = false,
+@@ -470,6 +491,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+ 
+                     generatedAudio = nativeResult.audio
+                     val sampleRate = nativeResult.sampleRate.takeIf { it > 0 } ?: 24_000
++                    val audioSeconds = nativeResult.audio.size.toDouble() / sampleRate
++                    val realTimeFactor = if (audioSeconds > 0) nativeResult.timeMs / (audioSeconds * 1_000) else 0.0
++                    Log.i(
++                        "QwenGpuProbe",
++                        "Synthesis success: model=${variant.id}, total=${nativeResult.timeMs}ms, " +
++                            "samples=${nativeResult.audio.size}, audioSeconds=$audioSeconds, RTF=$realTimeFactor",
++                    )
+                     val voiceName = selectedVoice?.name ?: "Default Voice"
+                     persistGeneratedAudio(text, nativeResult.audio, sampleRate, voiceName, selectedVoice?.voiceId, nativeResult.timeMs)
+                     _uiState.update {
+@@ -495,6 +523,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+                     playAudio()
+                 },
+                 onFailure = { throwable ->
++                    Log.e("QwenGpuProbe", "Synthesis exception", throwable)
+                     stopBusyTicker()
+                     _uiState.update {
+                         it.copy(
+@@ -719,7 +748,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+         val threads = selectedCpuThreadCount()
+         native.setCpuThreads(threads)
+         if (!_uiState.value.loaded) {
+-            if (!native.loadModels(modelDir.absolutePath, variant.talkerName)) {
++            if (!native.loadModels(variantDirectory(variant).absolutePath, variant.talkerName)) {
+                 error(native.getLastError() ?: "Native model load failed")
+             }
+             val caps = native.getModelCapabilities()
+@@ -840,22 +869,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
+     private fun selectedVariant(): ModelVariant =
+         QwenModel.variantById(_uiState.value.selectedModelId)
+ 
++    // Keep each tokenizer beside its talker. The native loader otherwise prefers
++    // Q8_0 whenever both variants share a directory, invalidating A/B comparisons.
++    private fun variantDirectory(variant: ModelVariant): File =
++        if (variant.id == QwenModel.defaultVariant.id) modelDir else File(modelDir, variant.id)
++
+     private fun isModelReady(variant: ModelVariant): Boolean =
+         variant.files.all { file ->
+-            val local = File(modelDir, file.name)
++            val local = File(variantDirectory(variant), file.name)
+             local.isFile && local.length() >= file.sizeBytes
+         }
+ 
+     private fun downloadFiles(variant: ModelVariant) {
++        val directory = variantDirectory(variant)
+         var completedBytes = 0L
+         variant.files.forEachIndexed { index, file ->
+-            val target = File(modelDir, file.name)
++            val target = File(directory, file.name)
+             if (target.isFile && target.length() >= file.sizeBytes) {
+                 completedBytes += file.sizeBytes
+                 return@forEachIndexed
+             }
+             val url = file.url ?: error("${file.name} is a local experiment file. Use scripts/install_nvfp4_android.ps1 to sideload it.")
+-            val temp = File(modelDir, "${file.name}.download")
++            val temp = File(directory, "${file.name}.download")
+             val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                 instanceFollowRedirects = true
+                 connectTimeout = 30_000
+@@ -1359,12 +1394,14 @@ private fun SettingsScreen(viewModel: MainViewModel) {
+     ) {
+         ModelPanel(
+             state = state,
++            onSelectModel = viewModel::selectModel,
+             onDownload = viewModel::downloadModel,
+             onLoad = viewModel::loadModel,
+         )
+         RuntimePanel(
+             state = state,
+             onCpuThreadsChange = viewModel::updateCpuThreads,
++            onBackendChange = viewModel::updateBackend,
+         )
+     }
+ }
+@@ -1528,6 +1565,7 @@ private fun LanguageDropdown(
+ @Composable
+ private fun ModelPanel(
+     state: QwenTtsUiState,
++    onSelectModel: (String) -> Unit,
+     onDownload: () -> Unit,
+     onLoad: () -> Unit,
+ ) {
+@@ -1548,6 +1586,17 @@ private fun ModelPanel(
+                 AssistChip(onClick = {}, label = { Text(if (state.modelReady) "Ready" else "Missing") })
+             }
+ 
++            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
++                QwenModel.variants.forEach { variant ->
++                    FilterChip(
++                        selected = state.selectedModelId == variant.id,
++                        onClick = { onSelectModel(variant.id) },
++                        enabled = !state.busy,
++                        label = { Text(variant.label) },
++                    )
++                }
++            }
++
+             if (state.downloading) {
+                 LinearProgressIndicator(progress = { state.downloadProgress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
+                 Text("${formatBytes(state.downloadBytes)} / ${formatBytes(state.downloadTotalBytes)}", style = MaterialTheme.typography.bodySmall)
+@@ -1579,6 +1628,7 @@ private fun ModelPanel(
+ private fun RuntimePanel(
+     state: QwenTtsUiState,
+     onCpuThreadsChange: (Int) -> Unit,
++    onBackendChange: (String) -> Unit,
+ ) {
+     ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+@@ -1586,11 +1636,18 @@ private fun RuntimePanel(
+                 Icon(Icons.Default.Tune, contentDescription = null)
+                 Text("Performance", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+             }
+-            Text(
+-                "CPU backend",
+-                style = MaterialTheme.typography.bodyMedium,
+-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+-            )
++            Text("Compute backend", style = MaterialTheme.typography.bodyMedium)
++            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
++                backendOptions.forEach { option ->
++                    FilterChip(
++                        selected = state.selectedBackendId == option.id,
++                        onClick = { onBackendChange(option.id) },
++                        enabled = !state.busy && !state.loaded,
++                        label = { Text(option.label) },
++                    )
++                }
++            }
++            state.activeBackendName?.let { Text("Active: $it", style = MaterialTheme.typography.bodySmall) }
+             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                 listOf(4, 6).forEach { threads ->
+                     FilterChip(
