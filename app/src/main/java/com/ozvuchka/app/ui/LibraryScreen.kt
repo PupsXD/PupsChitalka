@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -23,15 +22,28 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.Button
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Headphones
+import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.RecordVoiceOver
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -54,22 +66,36 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-private val libraryFilters = listOf("Все", "Читаю", "Прочитано", "PDF", "EPUB", "FB2")
+private val libraryFilters = listOf("Все", "Читаю", "Прочитано", "PDF", "EPUB", "FB2", "WEB")
+
+private val coverPalettes = listOf(
+    listOf(Color(0xFF403969), Color(0xFF8773AB)),
+    listOf(Color(0xFF21535E), Color(0xFF6A9D94)),
+    listOf(Color(0xFF7A433D), Color(0xFFC68969)),
+    listOf(Color(0xFF333F68), Color(0xFF7184B2)),
+    listOf(Color(0xFF655057), Color(0xFFA98990)),
+)
+
+private fun coverPalette(id: String) = coverPalettes[id.hashCode().ushr(1) % coverPalettes.size]
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LibraryScreen(
     books: List<LibraryBookUi>,
+    narratingBookId: String?,
+    narrationPlaying: Boolean,
     onOpenBook: (String) -> Unit,
+    onListen: (String) -> Unit,
     onImportFile: () -> Unit,
     onImportUrl: (String) -> Unit,
     onDeleteBook: (String) -> Unit,
+    onOpenVoices: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var query by rememberSaveable { mutableStateOf("") }
@@ -78,6 +104,9 @@ fun LibraryScreen(
     var url by rememberSaveable { mutableStateOf("") }
     var pendingDeleteId by rememberSaveable { mutableStateOf<String?>(null) }
 
+    val continueBook = remember(books) {
+        books.filter { it.progress > 0f && it.progress < 0.995f }.maxByOrNull { it.lastOpenedAt }
+    }
     val visibleBooks = remember(books, query, filter) {
         books.filter { book ->
             val matchesQuery = query.isBlank() || listOf(book.title, book.author, book.format)
@@ -96,54 +125,69 @@ fun LibraryScreen(
         modifier = modifier,
         containerColor = MaterialTheme.colorScheme.background,
         floatingActionButton = {
-            FloatingActionButton(
+            ExtendedFloatingActionButton(
                 onClick = { showImportSheet = true },
                 containerColor = MaterialTheme.colorScheme.primary,
                 contentColor = MaterialTheme.colorScheme.onPrimary,
-            ) {
-                Text("+", fontSize = 30.sp, fontWeight = FontWeight.Light)
-            }
+                icon = { Icon(Icons.Filled.Add, contentDescription = null) },
+                text = { Text("Добавить") },
+            )
         },
     ) { padding ->
         LazyVerticalGrid(
             columns = GridCells.Adaptive(minSize = 158.dp),
             modifier = Modifier.fillMaxSize().padding(padding),
-            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 24.dp, bottom = 108.dp),
+            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 20.dp, bottom = 108.dp),
             horizontalArrangement = Arrangement.spacedBy(14.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             item(span = { GridItemSpan(maxLineSpan) }) {
-                LibraryHeader(bookCount = books.size)
+                LibraryHeader(bookCount = books.size, onOpenVoices = onOpenVoices)
             }
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                OutlinedTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text("Название, автор или формат") },
-                    leadingIcon = { Text("⌕", fontSize = 28.sp) },
-                    singleLine = true,
-                    shape = RoundedCornerShape(18.dp),
-                )
+            if (continueBook != null && query.isBlank()) {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    ContinueCard(
+                        book = continueBook,
+                        narrating = narratingBookId == continueBook.id && narrationPlaying,
+                        onOpen = { onOpenBook(continueBook.id) },
+                        onListen = { onListen(continueBook.id) },
+                    )
+                }
             }
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                LazyRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    contentPadding = PaddingValues(vertical = 2.dp),
-                ) {
-                    items(libraryFilters.size) { index ->
-                        val name = libraryFilters[index]
-                        FilterChip(
-                            selected = filter == name,
-                            onClick = { filter = name },
-                            label = { Text(name) },
-                        )
+            if (books.isNotEmpty()) {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    OutlinedTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        placeholder = { Text("Название, автор или формат") },
+                        leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                        trailingIcon = if (query.isNotEmpty()) {
+                            { IconButton(onClick = { query = "" }) { Icon(Icons.Filled.Close, contentDescription = "Очистить") } }
+                        } else null,
+                        singleLine = true,
+                        shape = RoundedCornerShape(18.dp),
+                    )
+                }
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = PaddingValues(vertical = 2.dp),
+                    ) {
+                        items(libraryFilters.size) { index ->
+                            val name = libraryFilters[index]
+                            FilterChip(
+                                selected = filter == name,
+                                onClick = { filter = name },
+                                label = { Text(name) },
+                            )
+                        }
                     }
                 }
             }
             item(span = { GridItemSpan(maxLineSpan) }) {
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
@@ -173,7 +217,9 @@ fun LibraryScreen(
                 items(visibleBooks, key = { it.id }) { book ->
                     LibraryBookCard(
                         book = book,
+                        narrating = narratingBookId == book.id,
                         onClick = { onOpenBook(book.id) },
+                        onListen = { onListen(book.id) },
                         onRequestDelete = { pendingDeleteId = book.id },
                     )
                 }
@@ -189,7 +235,7 @@ fun LibraryScreen(
             ) {
                 Text("Добавить историю", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
                 Text(
-                    "Импортируйте книгу с устройства или вставьте ссылку на главу.",
+                    "EPUB, FB2, PDF (со сканами), DOCX, TXT, HTML или Markdown. Можно также вставить ссылку на главу или поделиться ею из браузера.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Button(
@@ -200,6 +246,8 @@ fun LibraryScreen(
                     modifier = Modifier.fillMaxWidth(),
                     contentPadding = PaddingValues(vertical = 15.dp),
                 ) {
+                    Icon(Icons.Filled.UploadFile, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
                     Text("Выбрать файл", fontSize = 16.sp)
                 }
                 OutlinedTextField(
@@ -208,6 +256,7 @@ fun LibraryScreen(
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text("Ссылка на веб-главу") },
                     placeholder = { Text("https://...") },
+                    leadingIcon = { Icon(Icons.Filled.Link, contentDescription = null) },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                     singleLine = true,
                     shape = RoundedCornerShape(16.dp),
@@ -256,20 +305,26 @@ fun LibraryScreen(
 }
 
 @Composable
-private fun LibraryHeader(bookCount: Int) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(
-            "OZVUCHKA  ·  ВАША БИБЛИОТЕКА",
-            color = MaterialTheme.colorScheme.primary,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 2.sp,
-        )
+private fun LibraryHeader(bookCount: Int, onOpenVoices: () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "OZVUCHKA  ·  ВАША БИБЛИОТЕКА",
+                color = MaterialTheme.colorScheme.primary,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 2.sp,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(onClick = onOpenVoices) {
+                Icon(Icons.Filled.RecordVoiceOver, contentDescription = "Голоса и озвучка", tint = MaterialTheme.colorScheme.primary)
+            }
+        }
         Text(
             "Истории всегда\nс вами.",
             fontFamily = FontFamily.Serif,
-            fontSize = 38.sp,
-            lineHeight = 42.sp,
+            fontSize = 36.sp,
+            lineHeight = 40.sp,
             color = MaterialTheme.colorScheme.onBackground,
         )
         Text(
@@ -278,27 +333,90 @@ private fun LibraryHeader(bookCount: Int) {
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(4.dp))
+    }
+}
+
+@Composable
+private fun ContinueCard(book: LibraryBookUi, narrating: Boolean, onOpen: () -> Unit, onListen: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onOpen),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp),
+    ) {
+        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier.width(78.dp).height(112.dp).clip(RoundedCornerShape(14.dp))
+                    .background(Brush.linearGradient(coverPalette(book.id))),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    book.title.take(1).uppercase(),
+                    fontFamily = FontFamily.Serif,
+                    fontSize = 44.sp,
+                    color = Color.White.copy(alpha = 0.85f),
+                )
+            }
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text("ПРОДОЛЖИТЬ", color = MaterialTheme.colorScheme.primary, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    book.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (book.chapterTitle.isNotBlank()) {
+                    Text(
+                        book.chapterTitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    LinearProgressIndicator(
+                        progress = { book.progress.coerceIn(0f, 1f) },
+                        modifier = Modifier.weight(1f).height(4.dp).clip(CircleShape),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("${(book.progress * 100).toInt()}%", style = MaterialTheme.typography.labelSmall)
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onOpen, contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)) {
+                        Icon(Icons.AutoMirrored.Filled.MenuBook, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Читать")
+                    }
+                    FilledTonalButton(onClick = onListen, contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)) {
+                        Icon(if (narrating) Icons.Filled.Pause else Icons.Filled.Headphones, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (narrating) "Пауза" else "Слушать")
+                    }
+                }
+            }
+        }
     }
 }
 
 @Composable
 private fun LibraryBookCard(
     book: LibraryBookUi,
+    narrating: Boolean,
     onClick: () -> Unit,
+    onListen: () -> Unit,
     onRequestDelete: () -> Unit,
 ) {
     var showMenu by remember { mutableStateOf(false) }
-    val palette = remember(book.id) {
-        val palettes = listOf(
-            listOf(Color(0xFF403969), Color(0xFF8773AB)),
-            listOf(Color(0xFF21535E), Color(0xFF6A9D94)),
-            listOf(Color(0xFF7A433D), Color(0xFFC68969)),
-            listOf(Color(0xFF333F68), Color(0xFF7184B2)),
-            listOf(Color(0xFF655057), Color(0xFFA98990)),
-        )
-        palettes[book.id.hashCode().ushr(1) % palettes.size]
-    }
+    val palette = remember(book.id) { coverPalette(book.id) }
     Card(
         modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
         shape = RoundedCornerShape(22.dp),
@@ -349,6 +467,14 @@ private fun LibraryBookCard(
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 0.5.sp,
                 )
+                if (narrating) {
+                    Icon(
+                        Icons.Filled.Headphones,
+                        contentDescription = "Сейчас звучит",
+                        tint = Color.White,
+                        modifier = Modifier.align(Alignment.TopStart).padding(10.dp).size(18.dp),
+                    )
+                }
             }
             Spacer(Modifier.height(12.dp))
             Text(
@@ -378,12 +504,20 @@ private fun LibraryBookCard(
                         onClick = { showMenu = true },
                         modifier = Modifier.size(36.dp),
                     ) {
-                        Text("⋮", fontSize = 22.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Icon(Icons.Filled.MoreVert, contentDescription = "Действия", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     DropdownMenu(
                         expanded = showMenu,
                         onDismissRequest = { showMenu = false },
                     ) {
+                        DropdownMenuItem(
+                            text = { Text("Слушать") },
+                            leadingIcon = { Icon(Icons.Filled.Headphones, contentDescription = null) },
+                            onClick = {
+                                showMenu = false
+                                onListen()
+                            },
+                        )
                         DropdownMenuItem(
                             text = { Text("Удалить книгу") },
                             onClick = {
@@ -396,7 +530,7 @@ private fun LibraryBookCard(
             }
             Spacer(Modifier.height(9.dp))
             LinearProgressIndicator(
-                progress = book.progress.coerceIn(0f, 1f),
+                progress = { book.progress.coerceIn(0f, 1f) },
                 modifier = Modifier.fillMaxWidth().height(4.dp).clip(CircleShape),
                 color = MaterialTheme.colorScheme.primary,
                 trackColor = MaterialTheme.colorScheme.surfaceVariant,
@@ -434,7 +568,12 @@ private fun LibraryEmptyState(
                 .background(MaterialTheme.colorScheme.surfaceVariant),
             contentAlignment = Alignment.Center,
         ) {
-            Text("◫", fontFamily = FontFamily.Serif, fontSize = 70.sp, color = MaterialTheme.colorScheme.primary)
+            Icon(
+                Icons.AutoMirrored.Filled.MenuBook,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(56.dp),
+            )
         }
         Text(
             if (isLibraryEmpty) "Пока здесь тихо" else "Ничего не найдено",
