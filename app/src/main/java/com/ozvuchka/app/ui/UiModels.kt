@@ -2,7 +2,9 @@ package com.ozvuchka.app.ui
 
 import com.ozvuchka.app.speech.ModelInstallState
 import com.ozvuchka.app.speech.SpeechModel
+import com.ozvuchka.app.speech.SystemEngineInfo
 import com.ozvuchka.app.speech.SystemVoiceInfo
+import com.ozvuchka.app.speech.VoiceCatalog
 import com.ozvuchka.app.speech.VoiceChoice
 
 /** The small, storage-independent model shown in the library. */
@@ -52,6 +54,9 @@ data class ReaderNarrationUi(
     val paragraphIndex: Int? = null,
     val textOffset: Int = 0,
     val textLength: Int = 0,
+    /** The word being spoken, for voices that report words; -1 when unknown or turned off. */
+    val wordOffset: Int = -1,
+    val wordLength: Int = 0,
     val speed: Float = 1f,
     val sleepEndsAt: Long? = null,
     val sleepAtChapterEnd: Boolean = false,
@@ -78,6 +83,7 @@ data class ReaderUiState(
     val hasNextWebChapter: Boolean = false,
     val volumeKeysTurnPages: Boolean = true,
     val keepScreenOn: Boolean = true,
+    val highlightWords: Boolean = true,
 )
 
 interface ReaderActions {
@@ -98,6 +104,7 @@ interface ReaderActions {
     fun themeChanged(theme: ReaderTheme)
     fun volumeKeysChanged(enabled: Boolean)
     fun keepScreenOnChanged(enabled: Boolean)
+    fun highlightWordsChanged(enabled: Boolean)
     fun export(format: String)
     fun importNextChapter()
 }
@@ -106,18 +113,25 @@ interface ReaderActions {
 data class VoiceSettingsUi(
     val russianVoice: VoiceChoice,
     val englishVoice: VoiceChoice,
+    /** What the reader shows as the current voice: «RuVoice · Xenia», «Supertonic · Женский 1». */
+    val russianVoiceLabel: String = "",
+    val englishVoiceLabel: String = "",
     val speed: Float,
     val pauseScale: Float,
     val supertonicSteps: Int,
     val preferFullModels: Boolean,
     val installedModels: Set<SpeechModel> = emptySet(),
     val installStates: Map<SpeechModel, ModelInstallState> = emptyMap(),
-    val systemVoices: List<SystemVoiceInfo> = emptyList(),
-    val systemVoicesLoading: Boolean = false,
-    val ruVoiceInstalled: Boolean = false,
+    /** Android TTS engines installed on the phone. */
+    val systemEngines: List<SystemEngineInfo> = emptyList(),
+    /** Voices of each engine asked so far, by package; an empty list means the engine reported none. */
+    val engineVoices: Map<String, List<SystemVoiceInfo>> = emptyMap(),
+    val loadingEngines: Set<String> = emptySet(),
     /** The voice whose sample is playing now. */
     val previewVoice: VoiceChoice? = null,
-)
+) {
+    val ruVoiceInstalled: Boolean get() = systemEngines.any { it.packageName == VoiceCatalog.RUVOICE_PACKAGE }
+}
 
 interface VoiceSettingsActions {
     fun selectVoice(language: String, voice: VoiceChoice)
@@ -132,5 +146,8 @@ interface VoiceSettingsActions {
     fun setPreferFullModels(enabled: Boolean)
     fun openRuVoicePage()
     fun openSystemTtsSettings()
+    /** Opens the engine's own app, where RuVoice keeps its voices, stress dictionaries and packs. */
+    fun openEngineApp(enginePackage: String)
+    fun loadEngineVoices(enginePackage: String)
     fun refreshSystemVoices()
 }

@@ -231,6 +231,8 @@ internal class SystemTtsClient(context: Context, val enginePackage: String) {
     @Volatile private var initStatus = TextToSpeech.ERROR
     private val waiting = ConcurrentHashMap<String, CountDownLatch>()
     private val failures = ConcurrentHashMap<String, Int>()
+    /** Word starts the engine reported for each utterance (RuVoice does; many engines do not). */
+    private val words = ConcurrentHashMap<String, MutableList<WordMark>>()
     private val tts: TextToSpeech
     private var appliedVoice: String? = null
     private var appliedLanguage: String? = null
@@ -248,6 +250,10 @@ internal class SystemTtsClient(context: Context, val enginePackage: String) {
         }, enginePackage)
         tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) = Unit
+            // File synthesis reports each word right away, with the frame where it starts in the file.
+            override fun onRangeStart(utteranceId: String?, start: Int, end: Int, frame: Int) {
+                utteranceId?.let { words[it]?.add(WordMark(frame, start, end)) }
+            }
             override fun onDone(utteranceId: String?) {
                 utteranceId?.let { waiting[it]?.countDown() }
             }
@@ -281,6 +287,7 @@ internal class SystemTtsClient(context: Context, val enginePackage: String) {
         val file = File(directory, "$id.wav")
         val latch = CountDownLatch(1)
         waiting[id] = latch
+        words[id] = java.util.Collections.synchronizedList(ArrayList())
         try {
             val params = Bundle().apply { putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, id) }
             val result = tts.synthesizeToFile(text, params, file, id)
@@ -291,9 +298,12 @@ internal class SystemTtsClient(context: Context, val enginePackage: String) {
                 throw IllegalStateException("движок не успел озвучить фразу")
             }
             failures.remove(id)?.let { code -> throw IllegalStateException("ошибка движка $code") }
-            return WavReader.read(file)
+            val audio = WavReader.read(file)
+            val marks = words[id]?.let { list -> synchronized(list) { list.sortedBy { it.frame } } }.orEmpty()
+            return SynthesizedAudio(audio.samples, audio.sampleRate, marks)
         } finally {
             waiting.remove(id)
+            words.remove(id)
             file.delete()
         }
     }
@@ -384,6 +394,14 @@ object SystemVoices {
         } finally {
             runCatching { tts.shutdown() }
         }
+    }
+
+    /** Short engine names for the picker: «RuVoice», «Google», «Samsung», otherwise the app label. */
+    fun engineTitle(packageName: String, label: String? = null): String = when (packageName) {
+        VoiceCatalog.RUVOICE_PACKAGE -> "RuVoice"
+        "com.google.android.tts" -> "Google"
+        "com.samsung.SMT" -> "Samsung"
+        else -> label?.takeIf { it.isNotBlank() } ?: packageName
     }
 
     /** Human-friendly names for common engine voice identifiers. */

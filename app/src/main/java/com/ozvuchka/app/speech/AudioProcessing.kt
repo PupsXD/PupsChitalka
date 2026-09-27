@@ -13,8 +13,14 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.math.tanh
 
-/** Mono float audio as produced by every synthesizer. */
-class SynthesizedAudio(val samples: FloatArray, val sampleRate: Int)
+/**
+ * A spoken word: the audio frame where it starts and its [start, end) range in a text. Engines
+ * report ranges in the synthesized text; the player turns them into paragraph offsets.
+ */
+data class WordMark(val frame: Int, val start: Int, val end: Int)
+
+/** Mono float audio as produced by every synthesizer, with word starts if the engine reports them. */
+class SynthesizedAudio(val samples: FloatArray, val sampleRate: Int, val words: List<WordMark> = emptyList())
 
 /**
  * Band-limited resampler (Kaiser-windowed sinc). Voices come at 22.05, 24, 44.1 or 48 kHz and
@@ -90,7 +96,15 @@ internal object AudioShaping {
      * The player adds its own, consistent pauses between sentences.
      */
     fun trimSilence(samples: FloatArray, sampleRate: Int, threshold: Float = 0.004f, marginMs: Int = 35): FloatArray {
-        if (samples.isEmpty()) return samples
+        val bounds = speechBounds(samples, sampleRate, threshold, marginMs)
+        if (bounds.isEmpty()) return FloatArray(0)
+        if (bounds.first == 0 && bounds.last == samples.lastIndex) return samples
+        return samples.copyOfRange(bounds.first, bounds.last + 1)
+    }
+
+    /** The range [trimSilence] keeps; empty when there is no sound at all. */
+    fun speechBounds(samples: FloatArray, sampleRate: Int, threshold: Float = 0.004f, marginMs: Int = 35): IntRange {
+        if (samples.isEmpty()) return IntRange.EMPTY
         val window = (sampleRate / 200).coerceAtLeast(1) // 5 ms
         fun loud(from: Int): Boolean {
             val end = min(samples.size, from + window)
@@ -100,14 +114,11 @@ internal object AudioShaping {
         }
         var start = 0
         while (start < samples.size && !loud(start)) start += window
-        if (start >= samples.size) return FloatArray(0)
+        if (start >= samples.size) return IntRange.EMPTY
         var end = samples.size
         while (end > start && !loud(max(start, end - window))) end -= window
         val margin = sampleRate * marginMs / 1000
-        val from = max(0, start - margin)
-        val to = min(samples.size, end + margin)
-        if (from == 0 && to == samples.size) return samples
-        return samples.copyOfRange(from, to)
+        return max(0, start - margin) until min(samples.size, end + margin)
     }
 
     /** RMS over 20 ms frames that are clearly voiced, so pauses do not dilute the estimate. */

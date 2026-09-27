@@ -43,6 +43,9 @@ data class NarrationState(
     val paragraphIndex: Int? = null,
     val textOffset: Int = 0,
     val textLength: Int = 0,
+    /** The word being spoken inside the sentence, when the voice reports words; -1 otherwise. */
+    val wordOffset: Int = -1,
+    val wordLength: Int = 0,
     val language: String = "ru",
     val message: String? = null,
     val sleepEndsAt: Long? = null,
@@ -465,6 +468,8 @@ class NarrationService : Service(), NarrationPlayer.Listener {
                     paragraphIndex = if (target != null) segment.paragraph else null,
                     textOffset = segment.start,
                     textLength = segment.end - segment.start,
+                    wordOffset = -1,
+                    wordLength = 0,
                     language = segment.language,
                 )
             )
@@ -474,6 +479,13 @@ class NarrationService : Service(), NarrationPlayer.Listener {
             }
             val now = SystemClock.elapsedRealtime()
             if (now - lastSavedAt > 10_000) saveNow()
+        }
+    }
+
+    override fun onWordStarted(session: Long, index: Int, offset: Int, length: Int) {
+        handler.post {
+            if (session != player.sessionId || index != lastIndex) return@post
+            publish(state.copy(wordOffset = offset, wordLength = length))
         }
     }
 

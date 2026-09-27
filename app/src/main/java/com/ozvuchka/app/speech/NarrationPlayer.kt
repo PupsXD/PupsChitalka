@@ -61,6 +61,27 @@ internal class BookSegmentSource(
     }
 }
 
+/**
+ * Places an engine's word starts in a rendered sentence: frames shift by the trimmed lead-in and
+ * scale to the output rate; ranges in the spoken text become offsets in the paragraph [source].
+ */
+internal fun placeWords(
+    words: List<WordMark>,
+    trimmedFrames: Int,
+    sourceRate: Int,
+    outputRate: Int,
+    outputLength: Int,
+    source: String,
+    segment: SpeechSegment,
+): List<WordMark> = words.mapNotNull { word ->
+    if (word.start < 0 || word.end <= word.start || word.end > segment.text.length) return@mapNotNull null
+    val frame = ((word.frame - trimmedFrames).coerceAtLeast(0).toLong() * outputRate / sourceRate)
+        .coerceAtMost(outputLength.toLong()).toInt()
+    val start = originalOffset(source, segment.start, segment.end, word.start)
+    val end = originalOffset(source, segment.start, segment.end, word.end - 1) + 1
+    if (end > start) WordMark(frame, start, end) else null
+}.sortedBy { it.frame }
+
 /** A single sentence for voice previews. */
 internal class SingleSegmentSource(private val segment: SpeechSegment) : SegmentSource {
     override fun get(index: Int): SpeechSegment? = segment.takeIf { index == 0 }
@@ -83,6 +104,8 @@ internal class NarrationPlayer(
      */
     interface Listener {
         fun onSegmentStarted(session: Long, index: Int, segment: SpeechSegment)
+        /** The word now audible in segment [index], as a range of its paragraph (or title). */
+        fun onWordStarted(session: Long, index: Int, offset: Int, length: Int)
         fun onBufferingChanged(session: Long, buffering: Boolean)
         /** Playback stopped before [segment] because a chapter-end sleep timer was set. */
         fun onChapterBoundaryPause(session: Long, index: Int, segment: SpeechSegment)
@@ -154,6 +177,8 @@ internal class NarrationPlayer(
         val index: Int,
         val segment: SpeechSegment,
         val samples: FloatArray,
+        /** Word starts in frames of [samples], with paragraph offsets; empty if the engine gave none. */
+        val words: List<WordMark> = emptyList(),
     ) {
         @Volatile var startFrame = 0L
         @Volatile var endFrame = 0L
@@ -293,18 +318,23 @@ internal class NarrationPlayer(
                 if (outputRate == 0) outputRate = audio.sampleRate.coerceIn(8_000, 48_000)
                 outputRate
             }
-            var samples = AudioShaping.trimSilence(audio.samples, audio.sampleRate)
+            val bounds = AudioShaping.speechBounds(audio.samples, audio.sampleRate)
+            var samples = if (bounds.isEmpty()) FloatArray(0) else audio.samples.copyOfRange(bounds.first, bounds.last + 1)
+            var words = emptyList<WordMark>()
             if (samples.isNotEmpty()) {
                 val gain = loudness.gainFor(voice.encode(), AudioShaping.speechRms(samples, audio.sampleRate))
                 samples = Resampler.resample(samples, audio.sampleRate, rate)
                 AudioShaping.applyGain(samples, gain)
                 AudioShaping.fadeEdges(samples, rate)
+                if (audio.words.isNotEmpty()) {
+                    words = placeWords(audio.words, bounds.first, audio.sampleRate, rate, samples.size, source.sourceText(segment), segment)
+                }
             }
             val pauseMs = segment.pause.baseMs * settings.pauseScale / settings.speed.coerceAtLeast(0.5f)
             val pauseFrames = (rate * pauseMs / 1000f).toInt()
             val output = FloatArray(samples.size + pauseFrames)
             System.arraycopy(samples, 0, output, 0, samples.size)
-            return Rendered(index, segment, output)
+            return Rendered(index, segment, output, words)
         }
 
         private fun fallbackVoice(failed: VoiceChoice): VoiceChoice? {
@@ -470,6 +500,7 @@ internal class NarrationPlayer(
 
         private fun monitorLoop() {
             var buffering = false
+            var spokenWord = -1
             listener.onBufferingChanged(id, true)
             buffering = true
             while (!cancelled) {
@@ -484,7 +515,18 @@ internal class NarrationPlayer(
                     if (playing != null && playing !== current) {
                         current = playing
                         currentIndex = playing.index
+                        spokenWord = -1
                         if (!cancelled) listener.onSegmentStarted(id, playing.index, playing.segment)
+                    }
+                    if (playing != null && playing.words.isNotEmpty()) {
+                        val into = position - playing.startFrame
+                        var word = spokenWord
+                        while (word + 1 < playing.words.size && playing.words[word + 1].frame <= into) word++
+                        if (word != spokenWord) {
+                            spokenWord = word
+                            val mark = playing.words[word]
+                            if (!cancelled) listener.onWordStarted(id, playing.index, mark.start, mark.end - mark.start)
+                        }
                     }
                     val finishing = synchronized(lock) { synthesisFinished && queue.isEmpty() }
                     starving = !paused && !finishing && position >= framesWritten - outputRate / 10

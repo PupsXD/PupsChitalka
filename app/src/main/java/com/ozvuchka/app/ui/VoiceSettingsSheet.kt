@@ -69,7 +69,6 @@ fun VoiceSettingsSheet(
     onDismiss: () -> Unit,
 ) {
     var language by rememberSaveable { mutableStateOf(initialLanguage) }
-    LaunchedEffect(Unit) { actions.refreshSystemVoices() }
     ModalBottomSheet(
         onDismissRequest = {
             actions.stopPreview()
@@ -106,50 +105,17 @@ fun VoiceSettingsSheet(
                 }
             }
             val selected = if (language == "en") state.englishVoice else state.russianVoice
-            if (language == "ru") {
-                item { RuVoiceCard(state, selected, actions) }
-            } else {
-                item {
-                    ModelCard(
-                        title = "Kokoro v1.0",
-                        badge = "Лучший английский",
-                        description = "82M параметров, естественная интонация, работает на устройстве. Полная версия звучит чище " +
-                            "и в замерах синтезирует в 2,5 раза быстрее компактной; компактная занимает меньше места.",
-                        models = listOf(SpeechModel.KOKORO_FULL, SpeechModel.KOKORO),
-                        presets = VoiceCatalog.kokoro,
-                        language = language,
-                        selected = selected,
-                        state = state,
-                        actions = actions,
-                    )
-                }
-            }
             item {
-                ModelCard(
-                    title = "Supertonic 3",
-                    badge = if (language == "ru") "Встроенный" else null,
-                    description = "Очень быстрый многоязычный голос. Больше шагов синтеза — чище звук, но дольше подготовка.",
-                    models = listOf(SpeechModel.SUPERTONIC, SpeechModel.SUPERTONIC_FULL),
-                    presets = VoiceCatalog.supertonic,
+                CurrentVoiceCard(
+                    label = if (language == "en") state.englishVoiceLabel else state.russianVoiceLabel,
+                    voice = selected,
                     language = language,
-                    selected = selected,
                     state = state,
                     actions = actions,
-                    footer = {
-                        Text("Шаги синтеза", style = MaterialTheme.typography.labelLarge)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            listOf(6 to "Быстро", 10 to "Баланс", 16 to "Качество").forEach { (steps, title) ->
-                                FilterChip(
-                                    selected = state.supertonicSteps == steps,
-                                    onClick = { actions.setSupertonicSteps(steps) },
-                                    label = { Text(title) },
-                                )
-                            }
-                        }
-                    },
                 )
             }
-            item { SystemVoicesCard(state, language, selected, actions) }
+            item { EnginePicker(state, language, selected, actions) }
+            item { EngineVoices(state, language, selected, actions) }
             item {
                 SettingsLabel("Темп · ${speechSpeedLabel(state.speed)}")
                 var dragging by remember { mutableStateOf<Float?>(null) }
@@ -219,46 +185,257 @@ private fun CardTitle(title: String, badge: String?) {
 }
 
 @Composable
-private fun RuVoiceCard(state: VoiceSettingsUi, selected: VoiceChoice, actions: VoiceSettingsActions) {
+private fun CurrentVoiceCard(
+    label: String,
+    voice: VoiceChoice,
+    language: String,
+    state: VoiceSettingsUi,
+    actions: VoiceSettingsActions,
+) {
     SheetCard {
-        CardTitle("Silero v5 · RuVoice", "Лучший русский")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    if (language == "en") "Английский текст читает" else "Русский текст читает",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            }
+            if (state.previewVoice == voice) {
+                IconButton(onClick = actions::stopPreview) { Icon(Icons.Filled.Stop, contentDescription = "Остановить пример") }
+            } else {
+                IconButton(onClick = { actions.preview(language, voice) }) {
+                    Icon(Icons.Filled.PlayArrow, contentDescription = "Прослушать")
+                }
+            }
+        }
+    }
+}
+
+/** One synthesizer the reader can use for a language: a downloadable model or an Android TTS engine. */
+private class EngineOption(
+    val key: String,
+    val title: String,
+    val subtitle: String,
+    val installed: Boolean,
+    val choice: VoiceChoice,
+    val recommended: Boolean = false,
+)
+
+private fun engineKey(voice: VoiceChoice): String = when (voice.engine) {
+    VoiceEngine.SUPERTONIC -> "supertonic"
+    VoiceEngine.KOKORO -> "kokoro"
+    VoiceEngine.SYSTEM -> "system:${voice.enginePackage}"
+}
+
+private fun engineOptions(state: VoiceSettingsUi, language: String): List<EngineOption> = buildList {
+    val models = state.installedModels
+    if (language == "ru") {
+        add(
+            EngineOption(
+                key = "system:${VoiceCatalog.RUVOICE_PACKAGE}",
+                title = "RuVoice · Silero v5",
+                subtitle = if (state.ruVoiceInstalled) "Живая интонация, ударения по контексту" else "Не установлен · нажмите, чтобы скачать",
+                installed = state.ruVoiceInstalled,
+                choice = VoiceChoice(VoiceEngine.SYSTEM, enginePackage = VoiceCatalog.RUVOICE_PACKAGE),
+                recommended = true,
+            ),
+        )
+    } else {
+        val kokoro = SpeechModel.KOKORO in models || SpeechModel.KOKORO_FULL in models
+        add(
+            EngineOption(
+                key = "kokoro",
+                title = "Kokoro v1.0",
+                subtitle = if (kokoro) "Естественная английская речь" else "Нужно скачать модель, ≈ 350 МБ",
+                installed = kokoro,
+                choice = VoiceChoice(VoiceEngine.KOKORO, 3),
+                recommended = true,
+            ),
+        )
+    }
+    val supertonic = SpeechModel.SUPERTONIC in models || SpeechModel.SUPERTONIC_FULL in models
+    add(
+        EngineOption(
+            key = "supertonic",
+            title = "Supertonic 3",
+            subtitle = if (supertonic) "Встроенный, 10 голосов, очень быстрый" else "Нужно скачать модель, ≈ 130 МБ",
+            installed = supertonic,
+            choice = VoiceChoice(VoiceEngine.SUPERTONIC, 0),
+        ),
+    )
+    state.systemEngines.filter { it.packageName != VoiceCatalog.RUVOICE_PACKAGE }.forEach { engine ->
+        add(
+            EngineOption(
+                key = "system:${engine.packageName}",
+                title = SystemVoices.engineTitle(engine.packageName, engine.label),
+                subtitle = "Системный движок Android",
+                installed = true,
+                choice = VoiceChoice(VoiceEngine.SYSTEM, enginePackage = engine.packageName),
+            ),
+        )
+    }
+}
+
+@Composable
+private fun EnginePicker(state: VoiceSettingsUi, language: String, selected: VoiceChoice, actions: VoiceSettingsActions) {
+    SheetCard {
+        CardTitle("Движок", null)
+        val selectedKey = engineKey(selected)
+        engineOptions(state, language).forEach { option ->
+            val isSelected = option.key == selectedKey
+            val onSelect = {
+                when {
+                    isSelected -> Unit
+                    option.choice.enginePackage == VoiceCatalog.RUVOICE_PACKAGE && !option.installed -> actions.openRuVoicePage()
+                    else -> {
+                        actions.selectVoice(language, option.choice)
+                        if (option.choice.engine == VoiceEngine.SYSTEM) actions.loadEngineVoices(option.choice.enginePackage)
+                    }
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().clickable(onClick = onSelect).padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RadioButton(selected = isSelected, onClick = onSelect)
+                Column(Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            option.title,
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                        )
+                        if (option.recommended) {
+                            Spacer(Modifier.width(6.dp))
+                            Icon(Icons.Filled.Star, contentDescription = "Рекомендуем", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp))
+                        }
+                    }
+                    Text(
+                        option.subtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (option.installed) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Voices of the engine chosen for [language], with downloads for the built-in models. */
+@Composable
+private fun EngineVoices(state: VoiceSettingsUi, language: String, selected: VoiceChoice, actions: VoiceSettingsActions) {
+    when (selected.engine) {
+        VoiceEngine.SUPERTONIC -> ModelCard(
+            title = "Голоса Supertonic 3",
+            badge = null,
+            description = "Очень быстрый многоязычный голос. Больше шагов синтеза — чище звук, но дольше подготовка.",
+            models = listOf(SpeechModel.SUPERTONIC, SpeechModel.SUPERTONIC_FULL),
+            presets = VoiceCatalog.supertonic,
+            language = language,
+            selected = selected,
+            state = state,
+            actions = actions,
+            footer = {
+                Text("Шаги синтеза", style = MaterialTheme.typography.labelLarge)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(6 to "Быстро", 10 to "Баланс", 16 to "Качество").forEach { (steps, title) ->
+                        FilterChip(
+                            selected = state.supertonicSteps == steps,
+                            onClick = { actions.setSupertonicSteps(steps) },
+                            label = { Text(title) },
+                        )
+                    }
+                }
+            },
+        )
+        VoiceEngine.KOKORO -> ModelCard(
+            title = "Голоса Kokoro v1.0",
+            badge = null,
+            description = "82M параметров, естественная интонация, работает на устройстве. Полная версия звучит чище " +
+                "и в замерах синтезирует в 2,5 раза быстрее компактной; компактная занимает меньше места.",
+            models = listOf(SpeechModel.KOKORO_FULL, SpeechModel.KOKORO),
+            presets = VoiceCatalog.kokoro,
+            language = language,
+            selected = selected,
+            state = state,
+            actions = actions,
+        )
+        VoiceEngine.SYSTEM -> SystemEngineVoices(state, language, selected, actions)
+    }
+}
+
+@Composable
+private fun SystemEngineVoices(state: VoiceSettingsUi, language: String, selected: VoiceChoice, actions: VoiceSettingsActions) {
+    val enginePackage = selected.enginePackage
+    LaunchedEffect(enginePackage) { actions.loadEngineVoices(enginePackage) }
+    val engine = state.systemEngines.firstOrNull { it.packageName == enginePackage }
+    val title = SystemVoices.engineTitle(enginePackage, engine?.label)
+    val ruVoice = enginePackage == VoiceCatalog.RUVOICE_PACKAGE
+    SheetCard {
+        CardTitle("Голоса · $title", null)
+        if (engine == null) {
+            Text(
+                if (ruVoice) {
+                    "RuVoice ставится отдельным приложением (APK с GitHub). После установки вернитесь сюда — движок появится в списке."
+                } else {
+                    "Этот движок сейчас не установлен. Пока его нет, фразы читает Supertonic."
+                },
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (ruVoice) Button(onClick = actions::openRuVoicePage) { Text("Скачать RuVoice") }
+            return@SheetCard
+        }
         Text(
-            "Нейросеть Silero v5 в системном движке RuVoice: живая интонация, ударения и омографы по контексту, " +
-                "числа, даты и сокращения. Работает офлайн и очень быстро.",
+            if (ruVoice) {
+                "Нейросеть Silero v5: интонация, ударения и омографы по контексту, числа и сокращения. " +
+                    "Словари ударений и дополнительные голоса — в приложении RuVoice."
+            } else {
+                "Голоса с пометкой «нужен интернет» отправляют текст фразы в сеть."
+            },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        if (!state.ruVoiceInstalled) {
-            Text(
-                "RuVoice устанавливается отдельным приложением (APK из GitHub). После установки вернитесь сюда — голоса появятся в списке.",
-                style = MaterialTheme.typography.bodySmall,
-            )
-            Button(onClick = actions::openRuVoicePage) { Text("Скачать RuVoice") }
-            return@SheetCard
-        }
-        val voices = state.systemVoices.filter { it.enginePackage == VoiceCatalog.RUVOICE_PACKAGE && it.language == "ru" }
+        val engineDefault = VoiceChoice(VoiceEngine.SYSTEM, enginePackage = enginePackage)
+        VoiceRow(
+            title = "По умолчанию",
+            subtitle = "Голос, выбранный в настройках движка",
+            selected = selected == engineDefault,
+            enabled = true,
+            previewing = state.previewVoice == engineDefault,
+            onSelect = { actions.selectVoice(language, engineDefault) },
+            onPreview = { actions.preview(language, engineDefault) },
+            onStop = actions::stopPreview,
+        )
+        val voices = state.engineVoices[enginePackage]?.filter { it.language == language }
         when {
-            voices.isEmpty() && state.systemVoicesLoading -> LoadingRow("Подключаемся к RuVoice…")
-            voices.isEmpty() -> {
+            voices == null || (voices.isEmpty() && enginePackage in state.loadingEngines) -> LoadingRow("Загружаем голоса…")
+            voices.isEmpty() -> Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "RuVoice установлен, но голоса не найдены. Откройте RuVoice и установите пакет голосов.",
+                    "Движок не сообщил отдельных голосов для этого языка.",
                     style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.weight(1f),
                 )
                 TextButton(onClick = actions::refreshSystemVoices) { Text("Обновить") }
             }
-            else -> voices.forEach { voice ->
-                val choice = VoiceChoice(VoiceEngine.SYSTEM, enginePackage = voice.enginePackage, voiceName = voice.name)
+            else -> voices.take(24).forEach { voice ->
+                val choice = VoiceChoice(VoiceEngine.SYSTEM, enginePackage = enginePackage, voiceName = voice.name)
                 VoiceRow(
                     title = SystemVoices.describe(voice),
                     subtitle = null,
                     selected = selected == choice,
-                    enabled = true,
+                    enabled = !voice.notInstalled,
                     previewing = state.previewVoice == choice,
-                    onSelect = { actions.selectVoice("ru", choice) },
-                    onPreview = { actions.preview("ru", choice) },
+                    onSelect = { actions.selectVoice(language, choice) },
+                    onPreview = { actions.preview(language, choice) },
                     onStop = actions::stopPreview,
                 )
             }
+        }
+        Row {
+            TextButton(onClick = { actions.openEngineApp(enginePackage) }) { Text("Открыть $title") }
+            TextButton(onClick = actions::openSystemTtsSettings) { Text("Синтез речи Android") }
         }
     }
 }
@@ -357,43 +534,6 @@ private fun ModelStatusRow(model: SpeechModel, suggested: Boolean, state: VoiceS
                 )
             }
         }
-    }
-}
-
-@Composable
-private fun SystemVoicesCard(state: VoiceSettingsUi, language: String, selected: VoiceChoice, actions: VoiceSettingsActions) {
-    SheetCard {
-        CardTitle("Системные голоса", null)
-        Text(
-            "Голоса движков синтеза, установленных на телефоне (Google, Samsung и другие). " +
-                "Голоса с пометкой «нужен интернет» отправляют текст фразы в сеть.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        val voices = state.systemVoices.filter {
-            it.language == language && it.enginePackage != VoiceCatalog.RUVOICE_PACKAGE
-        }
-        when {
-            voices.isEmpty() && state.systemVoicesLoading -> LoadingRow("Ищем голоса…")
-            voices.isEmpty() -> Text("Подходящих системных голосов не найдено.", style = MaterialTheme.typography.bodySmall)
-            else -> voices.groupBy { it.engineLabel }.forEach { (engine, engineVoices) ->
-                Text(engine, style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 4.dp))
-                engineVoices.take(12).forEach { voice ->
-                    val choice = VoiceChoice(VoiceEngine.SYSTEM, enginePackage = voice.enginePackage, voiceName = voice.name)
-                    VoiceRow(
-                        title = SystemVoices.describe(voice),
-                        subtitle = null,
-                        selected = selected == choice,
-                        enabled = !voice.notInstalled,
-                        previewing = state.previewVoice == choice,
-                        onSelect = { actions.selectVoice(language, choice) },
-                        onPreview = { actions.preview(language, choice) },
-                        onStop = actions::stopPreview,
-                    )
-                }
-            }
-        }
-        TextButton(onClick = actions::openSystemTtsSettings) { Text("Настройки синтеза Android") }
     }
 }
 

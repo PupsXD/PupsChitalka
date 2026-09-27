@@ -19,18 +19,21 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.navigationBarsIgnoringVisibility
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.statusBarsIgnoringVisibility
 import androidx.compose.foundation.layout.systemBarsIgnoringVisibility
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -128,6 +131,8 @@ internal data class ReadingColors(
     val accent: Color,
     val line: Color,
     val highlight: Color,
+    /** Drawn over [highlight] on the word being spoken. */
+    val wordHighlight: Color,
 )
 
 internal fun ReaderTheme.colors(): ReadingColors = when (this) {
@@ -139,6 +144,7 @@ internal fun ReaderTheme.colors(): ReadingColors = when (this) {
         accent = Color(0xFF51449A),
         line = Color(0xFFE9E5EC),
         highlight = Color(0x3351449A),
+        wordHighlight = Color(0x4751449A),
     )
     ReaderTheme.SEPIA -> ReadingColors(
         background = Color(0xFFF5EFE3),
@@ -148,6 +154,7 @@ internal fun ReaderTheme.colors(): ReadingColors = when (this) {
         accent = Color(0xFF785447),
         line = Color(0xFFE5D9C8),
         highlight = Color(0x33A0663F),
+        wordHighlight = Color(0x47A0663F),
     )
     ReaderTheme.DARK -> ReadingColors(
         background = Color(0xFF171821),
@@ -157,6 +164,7 @@ internal fun ReaderTheme.colors(): ReadingColors = when (this) {
         accent = Color(0xFFCCBFFF),
         line = Color(0xFF393845),
         highlight = Color(0x40CCBFFF),
+        wordHighlight = Color(0x4DCCBFFF),
     )
     ReaderTheme.BLACK -> ReadingColors(
         background = Color(0xFF000000),
@@ -166,6 +174,7 @@ internal fun ReaderTheme.colors(): ReadingColors = when (this) {
         accent = Color(0xFFB9A7FF),
         line = Color(0xFF26262B),
         highlight = Color(0x4DB9A7FF),
+        wordHighlight = Color(0x59B9A7FF),
     )
 }
 
@@ -252,12 +261,14 @@ fun ReaderScreen(
                     }
                 }
                 // Follow narration, unless the reader is leafing through pages right now.
-                LaunchedEffect(state.narration.paragraphIndex, state.narration.textOffset, pages) {
+                // The spoken word, when known, turns the page in the middle of a long sentence.
+                val followOffset = state.narration.wordOffset.takeIf { it >= 0 } ?: state.narration.textOffset
+                LaunchedEffect(state.narration.paragraphIndex, followOffset, pages) {
                     val paragraph = state.narration.paragraphIndex ?: return@LaunchedEffect
                     if (System.currentTimeMillis() < browsingUntil) return@LaunchedEffect
                     val target = if (paragraph < 0) 0 else {
                         val length = state.paragraphs.getOrNull(paragraph)?.length?.coerceAtLeast(1) ?: 1
-                        val position = (paragraph + state.narration.textOffset.toFloat() / length) /
+                        val position = (paragraph + followOffset.toFloat() / length) /
                             state.paragraphs.size.coerceAtLeast(1)
                         pages.indexOfLast { it.startsAt <= position + 0.0001f }.coerceAtLeast(0)
                     }
@@ -382,7 +393,7 @@ fun ReaderScreen(
         }
         AnimatedVisibility(
             visible = !chromeVisible && state.narration.active,
-            modifier = Modifier.align(Alignment.BottomEnd).navigationBarsPadding().padding(end = 14.dp, bottom = 10.dp),
+            modifier = Modifier.align(Alignment.BottomEnd).windowInsetsPadding(ChromeBottomInsets).padding(end = 14.dp, bottom = 10.dp),
             enter = fadeIn(),
             exit = fadeOut(),
         ) {
@@ -410,6 +421,18 @@ fun ReaderScreen(
 }
 
 private val PageVerticalPadding = 18.dp
+
+// System bar sizes that do not change when the bars hide, so showing the reader chrome never
+// resizes it mid-animation.
+@OptIn(ExperimentalLayoutApi::class)
+private val ChromeTopInsets: WindowInsets
+    @Composable get() = WindowInsets.statusBarsIgnoringVisibility
+        .union(WindowInsets.displayCutout.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
+
+@OptIn(ExperimentalLayoutApi::class)
+private val ChromeBottomInsets: WindowInsets
+    @Composable get() = WindowInsets.navigationBarsIgnoringVisibility
+        .union(WindowInsets.displayCutout.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
 
 @Composable
 private fun ChapterHeading(state: ReaderUiState, colors: ReadingColors, label: String, highlighted: Boolean) {
@@ -443,10 +466,19 @@ private fun PageBlock(
     val highlightEnd = if (narration.paragraphIndex == block.paragraphIndex) {
         (narration.textOffset + narration.textLength - block.startOffset).coerceIn(0, block.visibleLength)
     } else 0
+    val wordStart = if (narration.paragraphIndex == block.paragraphIndex && narration.wordOffset >= 0) {
+        (narration.wordOffset - block.startOffset).coerceIn(0, block.visibleLength)
+    } else 0
+    val wordEnd = if (narration.paragraphIndex == block.paragraphIndex && narration.wordOffset >= 0) {
+        (narration.wordOffset + narration.wordLength - block.startOffset).coerceIn(0, block.visibleLength)
+    } else 0
     val marked = buildAnnotatedString {
         append(block.text)
         if (highlightEnd > highlightStart) {
             addStyle(SpanStyle(background = colors.highlight), highlightStart, highlightEnd)
+        }
+        if (wordEnd > wordStart) {
+            addStyle(SpanStyle(background = colors.wordHighlight), wordStart, wordEnd)
         }
     }
     Text(
@@ -490,7 +522,9 @@ private fun ReaderTopBar(
     onSettings: () -> Unit,
 ) {
     Surface(color = colors.surface, shadowElevation = 3.dp) {
-        Column(Modifier.fillMaxWidth().statusBarsPadding()) {
+        // Padding for the status bar whether or not it is shown: the bar slides in over this band,
+        // so the panel keeps its height while both animate.
+        Column(Modifier.fillMaxWidth().windowInsetsPadding(ChromeTopInsets)) {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -543,7 +577,7 @@ private fun ReaderBottomPanel(
     actions: ReaderActions,
 ) {
     Surface(color = colors.surface, shadowElevation = 8.dp, shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp)) {
-        Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(top = 10.dp, bottom = 6.dp)) {
+        Column(Modifier.fillMaxWidth().windowInsetsPadding(ChromeBottomInsets).padding(top = 10.dp, bottom = 6.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -617,6 +651,7 @@ private fun ReaderBottomPanel(
             }
             HorizontalDivider(color = colors.line, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
             NarrationControls(state, colors, actions)
+            if (state.narration.voiceReady) VoiceCaption(state.narration, colors, actions::openVoices)
         }
     }
 }
@@ -627,6 +662,28 @@ private fun remainingLabel(minutes: Float, listening: Boolean): String {
         minutes < 1f -> "меньше минуты"
         minutes < 60f -> "≈ ${minutes.roundToInt()} мин $suffix"
         else -> "≈ ${(minutes / 60).toInt()} ч ${(minutes % 60).roundToInt()} мин $suffix"
+    }
+}
+
+/** Which voice reads this chapter; a tap opens the engine and voice picker. */
+@Composable
+private fun VoiceCaption(narration: ReaderNarrationUi, colors: ReadingColors, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 20.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Filled.RecordVoiceOver, contentDescription = null, tint = colors.muted, modifier = Modifier.size(16.dp))
+        Spacer(Modifier.width(8.dp))
+        Text(
+            "Читает: ${narration.voiceLabel}",
+            color = colors.muted,
+            style = MaterialTheme.typography.labelMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text("Сменить", color = colors.accent, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -741,9 +798,6 @@ private fun NarrationControls(state: ReaderUiState, colors: ReadingColors, actio
                     })
                 }
             }
-        }
-        IconButton(onClick = actions::openVoices) {
-            Icon(Icons.Filled.RecordVoiceOver, contentDescription = "Голоса: ${narration.voiceLabel}", tint = colors.text)
         }
         if (narration.active) {
             IconButton(onClick = actions::stopNarration) {
@@ -888,6 +942,12 @@ private fun ReaderSettingsSheet(
                     subtitle = "Отступ в начале абзаца вместо пустой строки",
                     checked = typography.paragraphIndent,
                     onChange = { actions.typographyChanged(typography.copy(paragraphIndent = it)) },
+                )
+                ToggleRow(
+                    title = "Подсвечивать слово при озвучке",
+                    subtitle = "Для голосов, которые сообщают границы слов, например RuVoice",
+                    checked = state.highlightWords,
+                    onChange = actions::highlightWordsChanged,
                 )
                 ToggleRow(
                     title = "Листать кнопками громкости",

@@ -125,6 +125,39 @@ class NarrationLogicTest {
     }
 
     @Test
+    fun speechBoundsMatchTrimmedAudio() {
+        val rate = 24_000
+        val samples = FloatArray(rate) { index ->
+            if (index in 6_000 until 18_000) (0.3 * sin(2 * PI * 200.0 * index / rate)).toFloat() else 0f
+        }
+        val bounds = AudioShaping.speechBounds(samples, rate)
+        assertEquals(AudioShaping.trimSilence(samples, rate).size, bounds.last - bounds.first + 1)
+        assertTrue(bounds.first in 5_000..6_000)
+    }
+
+    @Test
+    fun engineWordsLandOnParagraphOffsetsAndOutputFrames() {
+        // The engine got the whitespace-collapsed sentence; the paragraph has a double space and a lead-in.
+        val paragraph = "Вдох.  Он  остановился у окна."
+        val segment = splitForSpeech(paragraph, "ru")[1].let { chunk ->
+            SpeechSegment(0, 0, chunk.start, chunk.end, chunk.text, "ru", SegmentPause.PARAGRAPH)
+        }
+        assertEquals("Он остановился у окна.", segment.text)
+        val words = listOf(
+            WordMark(frame = 8_820, start = 3, end = 14), // «остановился», listed out of order
+            WordMark(frame = 4_410, start = 0, end = 2), // «Он»
+            WordMark(frame = 9_000, start = 30, end = 40), // outside the text: dropped
+        )
+        val placed = placeWords(words, trimmedFrames = 4_410, sourceRate = 44_100, outputRate = 24_000,
+            outputLength = 20_000, source = paragraph, segment = segment)
+        assertEquals(2, placed.size)
+        assertEquals(WordMark(0, 7, 9), placed[0])
+        assertEquals("Он", paragraph.substring(placed[0].start, placed[0].end))
+        assertEquals(2_400, placed[1].frame)
+        assertEquals("остановился", paragraph.substring(placed[1].start, placed[1].end))
+    }
+
+    @Test
     fun wavReaderDecodesSixteenBitPcm() {
         val samples = shortArrayOf(0, 16_384, -16_384, 32_767)
         val data = ByteBuffer.allocate(samples.size * 2).order(ByteOrder.LITTLE_ENDIAN).apply {

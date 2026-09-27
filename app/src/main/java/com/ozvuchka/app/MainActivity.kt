@@ -53,6 +53,7 @@ import com.ozvuchka.app.speech.SpeechModel
 import com.ozvuchka.app.speech.SpeechModels
 import com.ozvuchka.app.speech.SpeechSettings
 import com.ozvuchka.app.speech.SynthesisHub
+import com.ozvuchka.app.speech.SystemEngineInfo
 import com.ozvuchka.app.speech.SystemVoiceInfo
 import com.ozvuchka.app.speech.SystemVoices
 import com.ozvuchka.app.speech.VoiceCatalog
@@ -86,19 +87,21 @@ class MainActivity : ComponentActivity() {
     private var importProgressText by mutableStateOf("Подготавливаем книгу…")
     private var notice by mutableStateOf<String?>(null)
     private var narration by mutableStateOf(NarrationController.state.value)
-    private var readerChromeVisible by mutableStateOf(true)
 
     private val preferences by lazy { getSharedPreferences("reader", MODE_PRIVATE) }
     private var typography by mutableStateOf(ReaderTypography())
     private var readerTheme by mutableStateOf(ReaderTheme.SEPIA)
     private var volumeKeysTurnPages by mutableStateOf(true)
     private var keepScreenOn by mutableStateOf(true)
+    private var highlightWords by mutableStateOf(true)
     private var speech by mutableStateOf<SpeechSettings?>(null)
     private var modelStates by mutableStateOf<Map<SpeechModel, ModelInstallState>>(emptyMap())
     private var installedModels by mutableStateOf<Set<SpeechModel>>(emptySet())
-    private var installedEngines by mutableStateOf<Set<String>>(emptySet())
-    private var systemVoices by mutableStateOf<List<SystemVoiceInfo>>(emptyList())
-    private var systemVoicesLoading by mutableStateOf(false)
+    private var systemEngines by mutableStateOf<List<SystemEngineInfo>>(emptyList())
+    private val installedEngines: Set<String> get() = systemEngines.mapTo(HashSet()) { it.packageName }
+    /** Voices each Android TTS engine reported, loaded one engine at a time when needed. */
+    private var engineVoices by mutableStateOf<Map<String, List<SystemVoiceInfo>>>(emptyMap())
+    private var loadingEngines by mutableStateOf<Set<String>>(emptySet())
     private var showVoices by mutableStateOf(false)
     private var voicesLanguage by mutableStateOf("ru")
     private var previewVoice by mutableStateOf<VoiceChoice?>(null)
@@ -161,11 +164,8 @@ class MainActivity : ComponentActivity() {
                         isAppearanceLightStatusBars = !dark
                         isAppearanceLightNavigationBars = !dark
                         systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                        if (book == null || readerChromeVisible) {
-                            show(WindowInsetsCompat.Type.systemBars())
-                        } else {
-                            hide(WindowInsetsCompat.Type.systemBars())
-                        }
+                        // In a book the reader shows and hides the bars itself, see chromeVisibilityChanged.
+                        if (book == null) show(WindowInsetsCompat.Type.systemBars())
                     }
                     if (book != null && keepScreenOn) {
                         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -206,9 +206,11 @@ class MainActivity : ComponentActivity() {
                                     preferFullModels = settings.preferFullModels,
                                     installedModels = installedModels,
                                     installStates = modelStates,
-                                    systemVoices = systemVoices,
-                                    systemVoicesLoading = systemVoicesLoading,
-                                    ruVoiceInstalled = VoiceCatalog.RUVOICE_PACKAGE in installedEngines,
+                                    russianVoiceLabel = voiceLabel(settings.russianVoice),
+                                    englishVoiceLabel = voiceLabel(settings.englishVoice),
+                                    systemEngines = systemEngines,
+                                    engineVoices = engineVoices,
+                                    loadingEngines = loadingEngines,
                                     previewVoice = previewVoice.takeIf { narration.isPreview && narration.active },
                                 ),
                                 initialLanguage = voicesLanguage,
@@ -240,9 +242,13 @@ class MainActivity : ComponentActivity() {
         receiveIncomingIntent(intent)
     }
 
+    /** Last chrome state the reader asked for; re-applied on resume, when some launchers restore the bars. */
+    private var readerChromeShown = true
+
     override fun onResume() {
         super.onResume()
         refreshEngines()
+        if (currentBook != null && !readerChromeShown) readerActions.chromeVisibilityChanged(false)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -288,6 +294,7 @@ class MainActivity : ComponentActivity() {
         }.getOrDefault(ReaderTheme.SEPIA)
         volumeKeysTurnPages = preferences.getBoolean("volumeKeysTurnPages", true)
         keepScreenOn = preferences.getBoolean("keepScreenOn", true)
+        highlightWords = preferences.getBoolean("highlightWords", true)
     }
 
     private fun saveTypography(value: ReaderTypography) {
@@ -316,15 +323,18 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshEngines() {
         lifecycleScope.launch {
-            val engines = withContext(Dispatchers.IO) { SystemVoices.engines(this@MainActivity).map { it.packageName }.toSet() }
-            val ruVoiceAppeared = VoiceCatalog.RUVOICE_PACKAGE in engines && VoiceCatalog.RUVOICE_PACKAGE !in installedEngines
-            installedEngines = engines
+            val engines = withContext(Dispatchers.IO) { SystemVoices.engines(this@MainActivity) }
+            val found = engines.mapTo(HashSet()) { it.packageName }
+            val ruVoiceAppeared = VoiceCatalog.RUVOICE_PACKAGE in found && VoiceCatalog.RUVOICE_PACKAGE !in installedEngines
+            systemEngines = engines
+            engineVoices = engineVoices.filterKeys { it in found }
             // The first time RuVoice is found, Russian books switch to Silero unless a voice was chosen by hand.
             if (ruVoiceAppeared && !preferences.getBoolean("voiceRuChosen", false)) {
                 updateSpeech { it.copy(russianVoice = VoiceChoice(VoiceEngine.SYSTEM, enginePackage = VoiceCatalog.RUVOICE_PACKAGE)) }
                 notice = "Найден RuVoice: русский текст читает Silero v5"
             }
-            if (showVoices) loadSystemVoices()
+            // Back from an engine's settings the voice lists may have changed (a new RuVoice pack).
+            if (showVoices) loadSelectedEngineVoices(reload = true)
         }
     }
 
@@ -409,6 +419,8 @@ class MainActivity : ComponentActivity() {
                 paragraphIndex = if (sameBook && narration.chapterIndex == chapterIndex) narration.paragraphIndex else null,
                 textOffset = narration.textOffset,
                 textLength = narration.textLength,
+                wordOffset = if (highlightWords) narration.wordOffset else -1,
+                wordLength = narration.wordLength,
                 speed = settings?.speed ?: 1f,
                 sleepEndsAt = narration.sleepEndsAt.takeIf { sameBook },
                 sleepAtChapterEnd = sameBook && narration.sleepAtChapterEnd,
@@ -418,6 +430,7 @@ class MainActivity : ComponentActivity() {
             hasNextWebChapter = chapterIndex == book.chapters.lastIndex && chapter.nextUrl != null,
             volumeKeysTurnPages = volumeKeysTurnPages,
             keepScreenOn = keepScreenOn,
+            highlightWords = highlightWords,
         )
     }
 
@@ -427,9 +440,16 @@ class MainActivity : ComponentActivity() {
         VoiceEngine.SYSTEM -> voice.enginePackage in installedEngines
     }
 
-    private fun voiceLabel(voice: VoiceChoice): String = VoiceCatalog.presetTitle(voice) ?: when {
-        voice.enginePackage == VoiceCatalog.RUVOICE_PACKAGE -> "Silero v5 · ${voice.voiceName.substringBefore('-').ifBlank { "по умолчанию" }}"
-        else -> voice.voiceName.ifBlank { voice.enginePackage }
+    private fun voiceLabel(voice: VoiceChoice): String = VoiceCatalog.presetTitle(voice) ?: run {
+        val engine = systemEngines.firstOrNull { it.packageName == voice.enginePackage }
+        val known = engineVoices[voice.enginePackage]?.firstOrNull { it.name == voice.voiceName }
+        val name = when {
+            voice.voiceName.isBlank() -> "голос по умолчанию"
+            known != null -> SystemVoices.describe(known)
+            voice.enginePackage == VoiceCatalog.RUVOICE_PACKAGE -> voice.voiceName.substringBefore('-').replaceFirstChar { it.uppercase() }
+            else -> voice.voiceName
+        }
+        "${SystemVoices.engineTitle(voice.enginePackage, engine?.label)} · $name"
     }
 
     // ---------------------------------------------------------------- reader actions
@@ -461,8 +481,14 @@ class MainActivity : ComponentActivity() {
             library.updatePosition(book.id, book.currentChapter, within)
         }
 
+        // Straight to the window, not through Compose state: a state change here would recompose
+        // the whole screen at the start of the chrome animation and make it stutter.
         override fun chromeVisibilityChanged(visible: Boolean) {
-            readerChromeVisible = visible
+            readerChromeShown = visible
+            WindowInsetsControllerCompat(window, window.decorView).apply {
+                systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                if (visible) show(WindowInsetsCompat.Type.systemBars()) else hide(WindowInsetsCompat.Type.systemBars())
+            }
         }
 
         override fun playPause() {
@@ -504,6 +530,11 @@ class MainActivity : ComponentActivity() {
             preferences.edit().putBoolean("volumeKeysTurnPages", enabled).apply()
         }
 
+        override fun highlightWordsChanged(enabled: Boolean) {
+            highlightWords = enabled
+            preferences.edit().putBoolean("highlightWords", enabled).apply()
+        }
+
         override fun keepScreenOnChanged(enabled: Boolean) {
             keepScreenOn = enabled
             preferences.edit().putBoolean("keepScreenOn", enabled).apply()
@@ -527,7 +558,7 @@ class MainActivity : ComponentActivity() {
     private fun openVoices(language: String) {
         voicesLanguage = language
         showVoices = true
-        loadSystemVoices()
+        loadSelectedEngineVoices(reload = true)
     }
 
     // ---------------------------------------------------------------- voice actions
@@ -581,23 +612,45 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        override fun refreshSystemVoices() = loadSystemVoices()
+        override fun openEngineApp(enginePackage: String) {
+            val launch = packageManager.getLaunchIntentForPackage(enginePackage)
+            if (launch != null) startActivity(launch) else openSystemTtsSettings()
+        }
+
+        override fun loadEngineVoices(enginePackage: String) = this@MainActivity.loadEngineVoices(enginePackage)
+
+        override fun refreshSystemVoices() {
+            loadSelectedEngineVoices(reload = true)
+            refreshEngines()
+        }
     }
 
-    private fun loadSystemVoices() {
-        if (systemVoicesLoading) return
-        systemVoicesLoading = true
+    /** Voices of the engines chosen now, plus RuVoice, so the picker opens with its list ready. */
+    private fun loadSelectedEngineVoices(reload: Boolean = false) {
+        val settings = speech ?: return
+        listOf(settings.russianVoice, settings.englishVoice)
+            .filter { it.engine == VoiceEngine.SYSTEM }
+            .map { it.enginePackage }
+            .plus(VoiceCatalog.RUVOICE_PACKAGE)
+            .distinct()
+            .forEach { loadEngineVoices(it, reload) }
+    }
+
+    /**
+     * Asks one engine for its voices. Each engine is bound separately and its list shows up as soon
+     * as it is ready, so a slow engine does not hide the others; a reload keeps the old list on
+     * screen until the new one arrives.
+     */
+    private fun loadEngineVoices(enginePackage: String, reload: Boolean = false) {
+        if (enginePackage in loadingEngines || (!reload && enginePackage in engineVoices)) return
+        val engine = systemEngines.firstOrNull { it.packageName == enginePackage } ?: return
+        loadingEngines = loadingEngines + enginePackage
         lifecycleScope.launch {
-            try {
-                val (engines, voices) = withContext(Dispatchers.IO) {
-                    val engines = SystemVoices.engines(this@MainActivity)
-                    engines to engines.flatMap { engine -> runCatching { SystemVoices.voices(this@MainActivity, engine) }.getOrDefault(emptyList()) }
-                }
-                installedEngines = engines.map { it.packageName }.toSet()
-                systemVoices = voices
-            } finally {
-                systemVoicesLoading = false
+            val voices = withContext(Dispatchers.IO) {
+                runCatching { SystemVoices.voices(this@MainActivity, engine) }.getOrDefault(emptyList())
             }
+            engineVoices = engineVoices + (enginePackage to voices)
+            loadingEngines = loadingEngines - enginePackage
         }
     }
 
