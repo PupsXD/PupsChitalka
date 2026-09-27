@@ -15,6 +15,7 @@ object SpeechNormalizer {
         if (forSupertonic) {
             // Supertonic has no pause token for a spaced dash; a comma gives the same breath.
             spoken = spoken.replace(Regex("^\\s*[—–-]\\s*"), "")
+                .replace(Regex("(?<=[.!?…,;:])\\s*[—–]\\s+"), " ")
                 .replace(Regex("\\s+[—–]\\s+"), ", ")
                 .replace(Regex("[«»„“”]"), "")
                 .replace(Regex(",\\s*,"), ",")
@@ -116,6 +117,40 @@ object SpeechNormalizer {
                 RussianNumbers.ordinal(year, Case.GENITIVE) + " года"
         }
 
+        // 12 апреля → «двенадцатого апреля»; «к 12 апреля» → «к двенадцатому», «на 12 апреля» → «на двенадцатое»;
+        // «с 1 по 5 мая» → «с первого по пятое мая».
+        val beforeDays = text
+        text = Regex("(?iu)(?<![\\p{L}\\d])(\\d{1,2})(?:(\\s*[—–-]\\s*|\\s+по\\s+)(\\d{1,2}))?(?=[\\s\\u00A0]+(?:${months.joinToString("|")})(?![\\p{L}]))")
+            .replace(beforeDays) { match ->
+                val first = match.groupValues[1].toLong()
+                val last = match.groupValues[3].toLongOrNull()
+                if (first !in 1..31 || (last != null && last !in 1..31)) return@replace match.value
+                val case = when (previousWord(beforeDays, match.range.first)) {
+                    in dativePrepositions -> Case.DATIVE
+                    "на", "по", "про", "за", "через" -> Case.ACCUSATIVE
+                    else -> Case.GENITIVE
+                }
+                val day = RussianNumbers.ordinal(first, case, Gender.NEUTER)
+                when {
+                    last == null -> day
+                    match.groupValues[2].trim() == "по" -> day + " по " + RussianNumbers.ordinal(last, Case.ACCUSATIVE, Gender.NEUTER)
+                    else -> day + " — " + RussianNumbers.ordinal(last, case, Gender.NEUTER)
+                }
+            }
+
+        // в 1941—1945 гг. → «в тысяча девятьсот сорок первом — тысяча девятьсот сорок пятом годах»
+        text = Regex("(?iu)(?<![\\p{L}\\d])(во?\\s+)?(\\d{3,4})\\s*[—–-]\\s*(\\d{3,4})(\\s*)(годах|годы|годов|гг\\.)(?![\\p{L}])")
+            .replace(text) { match ->
+                val preposition = match.groupValues[1]
+                val (case, noun) = when (match.groupValues[5].lowercase()) {
+                    "годах" -> Case.PREPOSITIONAL to "годах"
+                    "годов" -> Case.GENITIVE to "годов"
+                    else -> if (preposition.isNotBlank()) Case.PREPOSITIONAL to "годах" else Case.NOMINATIVE to "годы"
+                }
+                preposition + RussianNumbers.ordinal(match.groupValues[2].toLong(), case) + " — " +
+                    RussianNumbers.ordinal(match.groupValues[3].toLong(), case) + " " + noun
+            }
+
         // 1917 году / в 1917 г. → ordinal year in the matching case.
         text = Regex("(?iu)(?<![\\p{L}\\d])(во?\\s+)?(\\d{1,4})(\\s*)(году|года|годом|годах|годы|годов|год|гг\\.|г\\.)(?![\\p{L}])")
             .replace(text) { match ->
@@ -195,10 +230,17 @@ object SpeechNormalizer {
         }
 
         // 5-й, 3-я, 90-х, 21-го… and the colloquial «2-х», «5-ти» that mean «двух», «пяти».
-        text = Regex("(?<![\\d\\p{L}])(\\d{1,6})\\s?-\\s?(ыми|ими|ми|ти|ого|его|го|ому|ему|му|ый|ий|ой|ая|ое|ые|ых|их|ую|й|я|е|х|м|ю)(?![\\p{L}])")
+        text = Regex("(?<![\\d\\p{L}])(\\d{1,6})\\s?-\\s?(ыми|ими|ми|ти|ого|его|го|ому|ему|му|ый|ий|ой|ая|ое|ые|ых|их|ую|й|я|е|х|м|ю)(?![\\p{L}])(?=(?:[\\s\\u00A0]+(\\p{L}+))?)")
             .replace(text) { match ->
                 val number = match.groupValues[1].toLong()
                 val suffix = match.groupValues[2]
+                val next = match.groupValues[3].lowercase()
+                // «90-е годы», «в 1990-е и 2000-е»: decades are plural unless a neuter noun follows,
+                // as in «20-е число» or «20-е мая»; «5-е место» is always neuter.
+                val neuterNext = next.length > 3 && (next.endsWith("о") || next.endsWith("е") || next.endsWith("ё") ||
+                    next.endsWith("мя") || next in months)
+                val decade = next.startsWith("год") || next == "гг" || (number >= 20 && number % 10 == 0L && !neuterNext)
+                if (suffix == "е" && decade) return@replace RussianNumbers.ordinal(number, Case.NOMINATIVE, plural = true)
                 val colloquialGenitive = suffix == "ти" || suffix == "ми" ||
                     (suffix == "х" && number < 100 && number % 10 != 0L)
                 if (colloquialGenitive) return@replace RussianNumbers.cardinalGenitive(number)
@@ -218,35 +260,54 @@ object SpeechNormalizer {
                 RussianNumbers.ordinal(number, case, gender, plural)
             }
 
-        // 21:30 → «двадцать один тридцать»
-        text = Regex("(?<![\\d:])([01]?\\d|2[0-3]):([0-5]\\d)(?![\\d:])").replace(text) { match ->
-            val hours = RussianNumbers.cardinal(match.groupValues[1].toLong())
+        // 21:30 → «двадцать один тридцать», «к двадцати одному тридцати»
+        val beforeTime = text
+        text = Regex("(?<![\\d:])([01]?\\d|2[0-3]):([0-5]\\d)(?![\\d:])").replace(beforeTime) { match ->
+            val case = when (previousWord(beforeTime, match.range.first)) {
+                in dativePrepositions -> Case.DATIVE
+                in genitivePrepositions, "с", "со" -> Case.GENITIVE
+                in prepositionalPrepositions -> Case.PREPOSITIONAL
+                else -> Case.NOMINATIVE
+            }
+            val hours = RussianNumbers.cardinal(match.groupValues[1].toLong(), Gender.MASCULINE, case)
             val minutesText = match.groupValues[2]
             val minutes = when {
                 minutesText == "00" -> "ноль ноль"
-                minutesText.startsWith("0") -> "ноль " + RussianNumbers.cardinal(minutesText.toLong())
-                else -> RussianNumbers.cardinal(minutesText.toLong())
+                minutesText.startsWith("0") -> "ноль " + RussianNumbers.cardinal(minutesText.toLong(), Gender.MASCULINE, case)
+                else -> RussianNumbers.cardinal(minutesText.toLong(), Gender.MASCULINE, case)
             }
             "$hours $minutes"
         }
 
+        // A score or ratio that is not a time: «2:1» → «два — один».
+        text = text.replace(Regex("(?<![\\d:])(\\d{1,3}):(\\d{1,3})(?![\\d:])"), "$1 — $2")
+
         // Numbers with units and currencies: 3 км, 5 руб., 10 %, $20, −5 °C.
         text = Regex("([$€₽])\\s?(\\d+)").replace(text) { match -> match.groupValues[2] + " " + match.groupValues[1] }
+        val beforeUnits = text
         text = Regex("(?iu)(?<![\\d\\p{L}])(−?)(\\d+(?:[.,]\\d+)?)\\s?(°c|°|%|\\$|€|₽|км|мм|см|мл|кг|млрд|млн|тыс|руб|коп|мин|сек|гр|м|л|ч|р)(\\.?)(?![\\p{L}])")
-            .replace(text) { match ->
+            .replace(beforeUnits) { match ->
                 val unit = ruUnits[match.groupValues[3].lowercase()] ?: return@replace match.value
                 val sign = if (match.groupValues[1].isNotEmpty()) "минус " else ""
                 val number = match.groupValues[2]
                 val trailingDot = match.groupValues[4]
-                val spoken = if (number.contains(',') || number.contains('.')) {
-                    decimal(number) + " " + unit.few
-                } else {
-                    val value = number.toLong()
-                    RussianNumbers.cardinal(value, unit.gender) + " " +
-                        RussianNumbers.plural(value, unit.one, unit.few, unit.many)
+                val genitive = previousWord(beforeUnits, match.range.first) in genitivePrepositions
+                val spoken = when {
+                    number.contains(',') || number.contains('.') -> decimal(number) + " " + unit.few
+                    genitive -> {
+                        // «около трёх километров», «более одного процента»: every count takes the genitive.
+                        val value = number.toLong()
+                        val singular = value % 10 == 1L && value % 100 != 11L
+                        RussianNumbers.cardinal(value, unit.gender, Case.GENITIVE) + " " + if (singular) unit.few else unit.many
+                    }
+                    else -> {
+                        val value = number.toLong()
+                        RussianNumbers.cardinal(value, unit.gender) + " " +
+                            RussianNumbers.plural(value, unit.one, unit.few, unit.many)
+                    }
                 }
                 // Keep a sentence-final period that the abbreviation dot swallowed.
-                sign + spoken + if (trailingDot.isNotEmpty() && match.range.last + 1 >= text.length) "." else ""
+                sign + spoken + if (trailingDot.isNotEmpty() && match.range.last + 1 >= beforeUnits.length) "." else ""
             }
 
         for ((regex, replacement) in ruAbbreviations) text = regex.replace(text, replacement)
@@ -254,14 +315,32 @@ object SpeechNormalizer {
         // 3,5 → «три целых пять десятых»
         text = Regex("(?<![\\d.,])(\\d+)[,.](\\d{1,3})(?![\\d.,]\\d)").replace(text) { match -> decimal(match.value) }
 
-        // Remaining integers, with gender taken from the noun that follows: «1 книга», «2 окна».
-        text = Regex("(?<![\\d\\p{L}])([−]?)(\\d{1,15})(?![\\d])(\\s+)?(\\p{L}+)?").replace(text) { match ->
-            val sign = if (match.groupValues[1].isNotEmpty()) "минус " else ""
-            val value = match.groupValues[2].toLongOrNull() ?: return@replace match.value
-            val space = match.groupValues[3]
-            val noun = match.groupValues[4]
-            sign + RussianNumbers.cardinal(value, genderFromNoun(value, noun)) + space + noun
-        }
+        // Remaining integers agree with their noun: «1 книга», «с 2 чашек», «между 3 домами»,
+        // or become ordinals when only an ordinal fits the noun: «на 3 этаже», «в 21 веке».
+        val beforeIntegers = text
+        text = Regex("(?<![\\d\\p{L}])(−?)(\\d{1,15})(?![\\d])(?=(?:[\\s\\u00A0]+(\\p{L}+))?)")
+            .replace(beforeIntegers) { match ->
+                val negative = match.groupValues[1].isNotEmpty()
+                val value = match.groupValues[2].toLongOrNull() ?: return@replace match.value
+                // «счёт 3 — 2 в пользу»: a preposition or conjunction after the number is not its noun.
+                val noun = match.groupValues[3].lowercase().takeUnless { it in functionWords }.orEmpty()
+                val previous = previousWord(beforeIntegers, match.range.first)
+                val ordinal = if (negative) null else ordinalReading(value, previous, noun)
+                if (ordinal != null) return@replace ordinal
+                // «в 2 ночи» counts hours, so only the preposition sets the case: «в два ночи»,
+                // «до двух ночи», and one o'clock is «в час ночи».
+                if (noun in timesOfDay && !negative) {
+                    val hourCase = casesAfter(previous).firstOrNull { it != Case.PREPOSITIONAL } ?: Case.NOMINATIVE
+                    return@replace if (value == 1L) hourForms.getValue(hourCase) else RussianNumbers.cardinal(value, Gender.MASCULINE, hourCase)
+                }
+                val case = caseOf(value, previous, noun)
+                (if (negative) "минус " else "") + RussianNumbers.cardinal(value, genderOf(value, case, noun), case)
+            }
+
+        // «в вторую» → «во вторую», «с ста» → «со ста», «о одном» → «об одном».
+        text = text.replace(Regex("(?<![\\p{L}])([вВкК]) (?=втор)"), "$1о ")
+            .replace(Regex("(?<![\\p{L}])([сС]) (?=втор|ст[ао](?![\\p{L}]))"), "$1о ")
+            .replace(Regex("(?<![\\p{L}])([оО]) (?=одн|одиннадцат)"), "$1б ")
 
         return text
     }
@@ -281,25 +360,250 @@ object SpeechNormalizer {
         return wholeWords + " " + RussianNumbers.cardinal(fractionValue, Gender.FEMININE) + " " + denominator
     }
 
+    private val genitivePrepositions = setOf(
+        "до", "от", "из", "без", "для", "около", "после", "у", "против", "кроме", "вместо", "вокруг",
+        "возле", "среди", "более", "менее", "свыше", "больше", "меньше", "ради", "мимо", "сверх",
+    )
+    private val dativePrepositions = setOf("к", "ко", "благодаря", "согласно", "вопреки", "навстречу")
+    private val prepositionalPrepositions = setOf("о", "об", "обо", "при")
+    private val instrumentalPrepositions = setOf("над", "под", "перед", "между", "меж")
+    private val accusativePrepositions = setOf("в", "во", "на", "за", "через", "про", "сквозь", "спустя")
+
+    private class LabelNoun(val gender: Gender, val cases: List<Case>, val alwaysOrdinal: Boolean)
+
     /**
-     * Gender only matters for numbers ending in 1 or 2. The noun after a number is in the
-     * nominative singular after 1 and in the genitive singular after 2–4, so its ending is a
-     * good hint: «книга/книги» are feminine, «окно/окна» neuter only after 1.
+     * Singular forms of nouns that are numbered in order: «на 3 этаже», «с 5 страницы», «в 21 веке».
+     * Each entry lists nominative, genitive, dative, accusative, instrumental and prepositional; a
+     * dash marks a form left out («дня» also means «of the day» in «в 5 дня»). The second group
+     * reads as an ordinal only where a cardinal cannot agree: «за 1 минуту» is «одну минуту».
      */
-    private fun genderFromNoun(value: Long, noun: String): Gender {
-        if (noun.isEmpty()) return Gender.MASCULINE
-        val lastTwo = value % 100
+    private val labelNouns: Map<String, LabelNoun> = buildMap {
+        val order = listOf(Case.NOMINATIVE, Case.GENITIVE, Case.DATIVE, Case.ACCUSATIVE, Case.INSTRUMENTAL, Case.PREPOSITIONAL)
+        fun add(gender: Gender, alwaysOrdinal: Boolean, entries: List<String>) = entries.forEach { entry ->
+            val forms = entry.split(' ')
+            forms.distinct().filter { it != "-" }.forEach { form ->
+                val cases = order.filterIndexed { index, _ -> forms[index] == form }
+                put(form, LabelNoun(gender, cases, alwaysOrdinal))
+            }
+        }
+        add(
+            Gender.MASCULINE, true,
+            listOf(
+                "этаж этажа этажу этаж этажом этаже", "класс класса классу класс классом классе",
+                "курс курса курсу курс курсом курсе", "том тома тому том томом томе",
+                "век века веку век веком веке", "раздел раздела разделу раздел разделом разделе",
+                "параграф параграфа параграфу параграф параграфом параграфе", "пункт пункта пункту пункт пунктом пункте",
+                "абзац абзаца абзацу абзац абзацем абзаце", "эпизод эпизода эпизоду эпизод эпизодом эпизоде",
+                "сезон сезона сезону сезон сезоном сезоне", "раунд раунда раунду раунд раундом раунде",
+                "тур тура туру тур туром туре", "акт акта акту акт актом акте", "этап этапа этапу этап этапом этапе",
+                "уровень уровня уровню уровень уровнем уровне", "вагон вагона вагону вагон вагоном вагоне",
+                "подъезд подъезда подъезду подъезд подъездом подъезде", "корпус корпуса корпусу корпус корпусом корпусе",
+                "квартал квартала кварталу квартал кварталом квартале", "канал канала каналу канал каналом канале",
+                "урок урока уроку урок уроком уроке", "съезд съезда съезду съезд съездом съезде",
+                "ряд ряда ряду ряд рядом ряду", "путь пути пути путь путём пути", "номер номера номеру номер номером номере",
+            ),
+        )
+        add(
+            Gender.FEMININE, true,
+            listOf(
+                "страница страницы странице страницу страницей странице", "глава главы главе главу главой главе",
+                "серия серии серии серию серией серии", "строка строки строке строку строкой строке",
+                "линия линии линии линию линией линии", "палата палаты палате палату палатой палате",
+                "школа школы школе школу школой школе", "аудитория аудитории аудитории аудиторию аудиторией аудитории",
+                "часть части части часть частью части", "группа группы группе группу группой группе",
+            ),
+        )
+        add(Gender.MASCULINE, false, listOf("день - дню день днём дне", "месяц месяца месяцу месяц месяцем месяце"))
+        add(
+            Gender.FEMININE, false,
+            listOf(
+                "неделя недели неделе неделю неделей неделе", "минута минуты минуте минуту минутой минуте",
+                "квартира квартиры квартире квартиру квартирой квартире", "комната комнаты комнате комнату комнатой комнате",
+            ),
+        )
+        add(Gender.NEUTER, false, listOf("место места месту место местом месте"))
+    }
+
+    /** The cases a preposition allows, most likely first. */
+    private fun casesAfter(previous: String?): List<Case> = when (previous) {
+        "в", "во", "на" -> listOf(Case.PREPOSITIONAL, Case.ACCUSATIVE)
+        "за" -> listOf(Case.ACCUSATIVE, Case.INSTRUMENTAL)
+        "с", "со" -> listOf(Case.GENITIVE, Case.INSTRUMENTAL)
+        "через", "про", "сквозь", "спустя" -> listOf(Case.ACCUSATIVE)
+        in genitivePrepositions -> listOf(Case.GENITIVE)
+        in dativePrepositions -> listOf(Case.DATIVE)
+        in prepositionalPrepositions -> listOf(Case.PREPOSITIONAL)
+        in instrumentalPrepositions -> listOf(Case.INSTRUMENTAL)
+        else -> emptyList()
+    }
+
+    private val functionWords = setOf(
+        "в", "во", "на", "с", "со", "к", "ко", "о", "об", "у", "и", "а", "но", "до", "от", "из", "за", "по",
+        "под", "над", "при", "для", "без", "или", "же", "ли", "не", "ни", "то",
+    )
+    private val timesOfDay = setOf("утра", "дня", "вечера", "ночи")
+    private val hourForms = mapOf(
+        Case.NOMINATIVE to "час", Case.ACCUSATIVE to "час", Case.GENITIVE to "часа", Case.DATIVE to "часу",
+        Case.INSTRUMENTAL to "часом", Case.PREPOSITIONAL to "часе",
+    )
+
+    private val masculineDatives = setOf(
+        "человеку", "другу", "брату", "отцу", "сыну", "мужу", "врачу", "учителю", "ребёнку", "ребенку",
+        "мальчику", "гостю", "рублю", "доллару", "году", "дню", "месяцу", "часу",
+    )
+
+    /** Masculine nouns with a stressed locative in «-у»: «в 10 часу», «в 3 ряду». */
+    private val masculineLocatives = setOf("году", "часу", "ряду", "кругу", "шагу", "бою", "углу")
+
+    private val feminineLocatives = setOf(
+        "странице", "главе", "строке", "строчке", "сцене", "минуте", "секунде", "неделе", "улице", "квартире",
+        "комнате", "палате", "парте", "полке", "книге", "картине", "игре", "платформе", "дороге", "точке",
+        "клетке", "камере", "школе", "группе", "команде", "роте", "бригаде", "колонне", "задаче", "статье",
+        "поправке", "остановке", "передаче", "программе", "схеме", "попытке", "волне", "высоте", "отметке",
+        "половине", "паре", "смене", "букве", "цифре", "лиге", "ступеньке", "полосе", "версте", "миле",
+        "фазе", "зоне", "песне",
+    )
+
+    /** Prepositional and dative singular in «-е» belong to both genders; the ordinal ending differs. */
+    private fun looksFeminine(noun: String) = noun in feminineLocatives || noun.endsWith("ице")
+
+    /** «в 5 серии» (feminine) against «в 5 издании», «в 3 столетии» (neuter) and «на 5 пути». */
+    private fun genderOfLocativeInI(noun: String): Gender = when {
+        noun == "пути" -> Gender.MASCULINE
+        listOf("ении", "ании", "етии", "ятии", "итии", "ытии").any { noun.endsWith(it) } -> Gender.NEUTER
+        else -> Gender.FEMININE
+    }
+
+    /**
+     * An ordinal reading when the noun's form cannot agree with a cardinal: «на 3 этаже» (a
+     * cardinal would need «этажах»), «на 3 минуту», «ко 2 числу». Returns null for the usual
+     * cardinal phrases: «в 5 часов», «в 2 раза», «на 3 части».
+     */
+    private fun ordinalReading(value: Long, previous: String?, noun: String): String? {
+        if (value <= 0 || noun.isEmpty()) return null
+        val lastDigit = value % 10
+        val teen = value % 100 in 11..19
+        val one = !teen && lastDigit == 1L
+        val few = !teen && lastDigit in 2..4
+        labelNouns[noun]?.let { label ->
+            if (one && !label.alwaysOrdinal) return null
+            val allowed = casesAfter(previous)
+            // «2 этажа», «на 3 части» are cardinal phrases wherever a nominative or accusative can
+            // stand; «с 3 страницы» and «к 3 части» are not, nor «во 2 части», written for «второй».
+            val cardinalPosition = allowed.isEmpty() || Case.ACCUSATIVE in allowed
+            if (few && Case.GENITIVE in label.cases && cardinalPosition && !(previous == "во" && value == 2L)) return null
+            val case = allowed.firstOrNull { it in label.cases } ?: label.cases.first()
+            return RussianNumbers.ordinal(value, case, label.gender)
+        }
+        val singularOblique = noun.length > 2 && !noun.endsWith("ие")
+        val reading = when (previous) {
+            "в", "во", "на" -> when {
+                noun in masculineLocatives -> RussianNumbers.ordinal(value, Case.PREPOSITIONAL)
+                singularOblique && noun.endsWith("е") && !one -> RussianNumbers.ordinal(
+                    value, Case.PREPOSITIONAL, if (looksFeminine(noun)) Gender.FEMININE else Gender.MASCULINE,
+                )
+                noun.length > 3 && noun.endsWith("и") && noun != "ночи" && !one && !few ->
+                    RussianNumbers.ordinal(value, Case.PREPOSITIONAL, genderOfLocativeInI(noun))
+                singularOblique && (noun.endsWith("у") || noun.endsWith("ю")) && !one ->
+                    RussianNumbers.ordinal(value, Case.ACCUSATIVE, Gender.FEMININE)
+                else -> null
+            }
+            // «за 2 партой», «под 3 номером»: a cardinal would need «партами».
+            "за", "под", "над", "перед", "между", "с", "со" -> when {
+                one || noun.length <= 3 -> null
+                noun.endsWith("ом") || noun.endsWith("ём") || noun.endsWith("ем") -> RussianNumbers.ordinal(value, Case.INSTRUMENTAL)
+                noun.endsWith("ой") || noun.endsWith("ью") -> RussianNumbers.ordinal(value, Case.INSTRUMENTAL, Gender.FEMININE)
+                else -> null
+            }
+            "к", "ко" -> when {
+                noun.endsWith("ам") || noun.endsWith("ям") || one -> null
+                singularOblique && (noun.endsWith("у") || noun.endsWith("ю")) -> RussianNumbers.ordinal(value, Case.DATIVE)
+                singularOblique && noun.endsWith("е") -> RussianNumbers.ordinal(value, Case.DATIVE, Gender.FEMININE)
+                else -> null
+            }
+            else -> null
+        }
+        if (reading != null || previous != "во" || value != 2L) return reading
+        // «во 2 части»: the author already wrote the preposition for «второй».
+        return when {
+            noun.endsWith("и") -> RussianNumbers.ordinal(value, Case.PREPOSITIONAL, genderOfLocativeInI(noun))
+            noun.endsWith("е") -> RussianNumbers.ordinal(value, Case.PREPOSITIONAL, if (looksFeminine(noun)) Gender.FEMININE else Gender.MASCULINE)
+            noun.endsWith("у") || noun.endsWith("ю") -> RussianNumbers.ordinal(value, Case.ACCUSATIVE, Gender.FEMININE)
+            else -> RussianNumbers.ordinal(value, Case.ACCUSATIVE)
+        }
+    }
+
+    private fun previousWord(text: String, index: Int): String? =
+        Regex("(\\p{L}+)[\\s\\u00A0]*$").find(text.substring((index - 40).coerceAtLeast(0), index))
+            ?.groupValues?.get(1)?.lowercase()
+
+    /**
+     * The case a numeral takes, from the preposition before it and the ending of the noun after
+     * it. Plural endings such as «-ами» or «-ах» are unambiguous; a noun that cannot follow a
+     * nominative numeral («1 книги», «2 чашек») marks the genitive of a coordinated phrase.
+     */
+    private fun caseOf(value: Long, previous: String?, noun: String): Case {
+        if (noun.endsWith("ами") || noun.endsWith("ями") || noun.endsWith("ьми")) return Case.INSTRUMENTAL
+        if (noun.length > 3 && (noun.endsWith("ах") || noun.endsWith("ях"))) return Case.PREPOSITIONAL
+        if (noun.length > 3 && (noun.endsWith("ам") || noun.endsWith("ям"))) return Case.DATIVE
+        val singular = value % 10 == 1L && value % 100 != 11L
+        val singularInstrumental = listOf("ом", "ем", "ём", "ой", "ей", "ью").any { noun.endsWith(it) }
+        when (previous) {
+            // «с 21 другом», «между 1 домом»: singular instrumental after one.
+            in instrumentalPrepositions, "с", "со" -> if (singular && singularInstrumental) return Case.INSTRUMENTAL
+        }
+        when (previous) {
+            in genitivePrepositions, "с", "со" -> return Case.GENITIVE
+            in dativePrepositions -> return Case.DATIVE
+            in prepositionalPrepositions -> return Case.PREPOSITIONAL
+            in instrumentalPrepositions -> return Case.INSTRUMENTAL
+        }
+        // «в 1 доме», «на 21 странице»; «на 1 неделю», «за 21 минуту».
+        if ((previous == "в" || previous == "во" || previous == "на") && noun.length > 2 && noun.endsWith("е") && !noun.endsWith("ие")) {
+            return Case.PREPOSITIONAL
+        }
+        if (previous in accusativePrepositions && (noun.endsWith("у") || noun.endsWith("ю"))) return Case.ACCUSATIVE
+        if (singular && previous == "по") return Case.DATIVE
+        if (singular && casesAfter(previous).isEmpty()) {
+            // «купил 21 книгу»: after one, «-у» is usually a feminine accusative, bar a few datives.
+            if (noun in masculineDatives) return Case.DATIVE
+            if (noun.endsWith("у") || noun.endsWith("ю")) return Case.ACCUSATIVE
+            // «и 1 квартире»: «одной» serves every oblique feminine case.
+            if (looksFeminine(noun)) return Case.PREPOSITIONAL
+        }
+        if (noun.isEmpty() || noun.first() !in 'а'..'я' && noun.first() != 'ё') return Case.NOMINATIVE
         val last = value % 10
-        if (lastTwo in 11..14) return Gender.MASCULINE
-        val lower = noun.lowercase()
+        val lastTwo = value % 100
+        if (lastTwo in 11..14) return Case.NOMINATIVE
         return when (last) {
-            1L -> when {
-                lower.endsWith("а") || lower.endsWith("я") -> Gender.FEMININE
-                lower.endsWith("о") || lower.endsWith("е") -> Gender.NEUTER
+            1L -> if (noun.endsWith("ы") || noun.endsWith("и")) Case.GENITIVE else Case.NOMINATIVE
+            2L, 3L, 4L -> if (noun.last() in "аяиыеь") Case.NOMINATIVE else Case.GENITIVE
+            else -> Case.NOMINATIVE
+        }
+    }
+
+    /**
+     * Gender only matters for numbers ending in 1 or 2, and the noun's ending in the chosen
+     * case gives it away: «книга/книги/книгой» are feminine, «окно» neuter after 1.
+     */
+    private fun genderOf(value: Long, case: Case, noun: String): Gender {
+        if (noun.isEmpty() || value % 100 in 11..14) return Gender.MASCULINE
+        val last = value % 10
+        return when (case) {
+            Case.NOMINATIVE, Case.ACCUSATIVE -> when (last) {
+                1L -> when {
+                    noun.endsWith("а") || noun.endsWith("я") -> Gender.FEMININE
+                    case == Case.ACCUSATIVE && (noun.endsWith("у") || noun.endsWith("ю")) -> Gender.FEMININE
+                    noun.endsWith("о") || noun.endsWith("е") -> Gender.NEUTER
+                    else -> Gender.MASCULINE
+                }
+                2L -> if (noun.endsWith("ы") || noun.endsWith("и")) Gender.FEMININE else Gender.MASCULINE
                 else -> Gender.MASCULINE
             }
-            2L -> if (lower.endsWith("ы") || lower.endsWith("и")) Gender.FEMININE else Gender.MASCULINE
-            else -> Gender.MASCULINE
+            Case.GENITIVE -> if (noun.endsWith("ы") || noun.endsWith("и")) Gender.FEMININE else Gender.MASCULINE
+            Case.DATIVE -> if (noun.endsWith("е")) Gender.FEMININE else Gender.MASCULINE
+            Case.INSTRUMENTAL -> if (noun.endsWith("ой") || noun.endsWith("ей") || noun.endsWith("ью")) Gender.FEMININE else Gender.MASCULINE
+            Case.PREPOSITIONAL -> if (noun.endsWith("и") || looksFeminine(noun)) Gender.FEMININE else Gender.MASCULINE
         }
     }
 

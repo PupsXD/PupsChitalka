@@ -34,6 +34,8 @@ class SpeechNormalizerTest {
         assertEquals("в тысяча девятьсот семнадцатом году началась", ru("в 1917 г. началась"))
         assertEquals("пятого декабря две тысячи двадцатого года", ru("05.12.2020"))
         assertEquals("в двадцать один тридцать", ru("в 21:30"))
+        assertEquals("к двадцати одному тридцати", ru("к 21:30"))
+        assertEquals("до семи ноль пяти", ru("до 7:05"))
         assertEquals("прошло три года", ru("прошло 3 года"))
         assertEquals("в девяностых годах", ru("в 90-х годах"))
         assertEquals("для двух человек", ru("для 2-х человек"))
@@ -58,6 +60,90 @@ class SpeechNormalizerTest {
         assertEquals("то есть так далее", ru("т. е. т. д."))
         assertEquals("номер пять", ru("№5"))
         assertEquals("город Москва", ru("г. Москва"))
+    }
+
+    @Test
+    fun russianNumeralsAgreeInCase() {
+        assertEquals("с двух чашек кофе и одной книги", ru("с 2 чашек кофе и 1 книги"))
+        assertEquals("с пяти до семи часов", ru("с 5 до 7 часов"))
+        assertEquals("между тремя домами", ru("между 3 домами"))
+        assertEquals("в пяти домах", ru("в 5 домах"))
+        assertEquals("к двадцати пяти годам", ru("к 25 годам"))
+        assertEquals("с двадцатью одним другом", ru("с 21 другом"))
+        assertEquals("около трёх километров", ru("около 3 км"))
+        assertEquals("более двадцати одного процента", ru("более 21%"))
+        assertEquals("около тысячи двухсот рублей", ru("около 1200 рублей"))
+        assertEquals("в пять часов", ru("в 5 часов"))
+        assertEquals("по два рубля", ru("по 2 рубля"))
+        assertEquals("тремястами", RussianNumbers.cardinal(300, RussianNumbers.Gender.MASCULINE, Case.INSTRUMENTAL))
+    }
+
+    @Test
+    fun russianOrdinalsFromNounForm() {
+        assertEquals("на третьем этаже", ru("на 3 этаже"))
+        assertEquals("в пятом классе", ru("в 5 классе"))
+        assertEquals("в двадцать первом веке", ru("в 21 веке"))
+        assertEquals("с пятой страницы", ru("с 5 страницы"))
+        assertEquals("ученик пятого класса", ru("ученик 5 класса"))
+        assertEquals("в десятом часу", ru("в 10 часу"))
+        assertEquals("на третью минуту", ru("на 3 минуту"))
+        assertEquals("во вторую группу", ru("в 2 группу"))
+        assertEquals("во второй части", ru("во 2 части"))
+        assertEquals("ко второму числу", ru("к 2 числу"))
+        assertEquals("на седьмой ступени", ru("на 7 ступени"))
+        assertEquals("в пятом издании", ru("в 5 издании"))
+        assertEquals("на втором месте", ru("на 2 месте"))
+        assertEquals("в пятьдесят седьмой школе", ru("в 57 школе"))
+    }
+
+    @Test
+    fun russianOrdinalsInOtherCases() {
+        assertEquals("за второй партой", ru("за 2 партой"))
+        assertEquals("под третьим номером", ru("под 3 номером"))
+        assertEquals("на второй путь", ru("на 2 путь"))
+        assertEquals("на третий день", ru("на 3 день"))
+    }
+
+    @Test
+    fun russianDatesDecadesAndScores() {
+        assertEquals("она родилась двенадцатого апреля", ru("она родилась 12 апреля"))
+        assertEquals("к двенадцатому апреля", ru("к 12 апреля"))
+        assertEquals("с первого по пятое мая", ru("с 1 по 5 мая"))
+        assertEquals("в девяностые годы", ru("в 90-е годы"))
+        assertEquals("в тысяча девятьсот девяностые и двухтысячные", ru("в 1990-е и 2000-е"))
+        assertEquals("двадцатое число", ru("20-е число"))
+        assertEquals(
+            "в тысяча девятьсот сорок первом — тысяча девятьсот сорок пятом годах",
+            ru("в 1941—1945 гг."),
+        )
+        assertEquals("счёт три — два в пользу хозяев", ru("счёт 3:2 в пользу хозяев"))
+    }
+
+    @Test
+    fun russianCardinalPhrasesStayCardinal() {
+        assertEquals("он купил двадцать одну книгу", ru("он купил 21 книгу"))
+        assertEquals("помогли одному человеку", ru("помогли 1 человеку"))
+        assertEquals("в два ночи", ru("в 2 ночи"))
+        assertEquals("в час ночи", ru("в 1 ночи"))
+        assertEquals("в двух домах и одной квартире", ru("в 2 домах и 1 квартире"))
+        assertEquals("по одному рублю", ru("по 1 рублю"))
+        assertEquals("в пять часов", ru("в 5 часов"))
+        assertEquals("в два раза", ru("в 2 раза"))
+        assertEquals("на три части", ru("на 3 части"))
+        assertEquals("раз в две недели", ru("раз в 2 недели"))
+        assertEquals("два класса", ru("2 класса"))
+        assertEquals("в одном доме", ru("в 1 доме"))
+        assertEquals("на одну неделю", ru("на 1 неделю"))
+        assertEquals("через двадцать одну минуту", ru("через 21 минуту"))
+        assertEquals("об одной книге", ru("о 1 книге"))
+        assertEquals("со ста рублей", ru("с 100 рублей"))
+        assertEquals("в десять утра", ru("в 10 утра"))
+    }
+
+    @Test
+    fun supertonicDashAfterPunctuationIsDropped() {
+        val spoken = SpeechNormalizer.normalize("— Ты вернёшься? — спросила она почти шёпотом.", "ru", forSupertonic = true)
+        assertEquals("Ты вернёшься? спросила она почти шёпотом.", spoken)
     }
 
     @Test

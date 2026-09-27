@@ -73,30 +73,83 @@ internal object RussianNumbers {
         return parts.joinToString(" ")
     }
 
-    private val genitiveUnits = arrayOf("", "одного", "двух", "трёх", "четырёх", "пяти", "шести", "семи", "восьми", "девяти")
-    private val genitiveTens = arrayOf(
-        "", "", "двадцати", "тридцати", "сорока", "пятидесяти", "шестидесяти", "семидесяти", "восьмидесяти", "девяноста",
+    /** Oblique forms indexed by digit: genitive, dative, instrumental, prepositional. */
+    private val obliqueUnits = arrayOf(
+        arrayOf("", "одного", "двух", "трёх", "четырёх", "пяти", "шести", "семи", "восьми", "девяти"),
+        arrayOf("", "одному", "двум", "трём", "четырём", "пяти", "шести", "семи", "восьми", "девяти"),
+        arrayOf("", "одним", "двумя", "тремя", "четырьмя", "пятью", "шестью", "семью", "восемью", "девятью"),
+        arrayOf("", "одном", "двух", "трёх", "четырёх", "пяти", "шести", "семи", "восьми", "девяти"),
     )
-    private val genitiveHundreds = arrayOf(
-        "", "ста", "двухсот", "трёхсот", "четырёхсот", "пятисот", "шестисот", "семисот", "восьмисот", "девятисот",
+    private val obliqueFeminineOne = arrayOf("одной", "одной", "одной", "одной")
+    private val obliqueTens = arrayOf(
+        arrayOf("", "", "двадцати", "тридцати", "сорока", "пятидесяти", "шестидесяти", "семидесяти", "восьмидесяти", "девяноста"),
+        arrayOf("", "", "двадцати", "тридцати", "сорока", "пятидесяти", "шестидесяти", "семидесяти", "восьмидесяти", "девяноста"),
+        arrayOf("", "", "двадцатью", "тридцатью", "сорока", "пятьюдесятью", "шестьюдесятью", "семьюдесятью", "восемьюдесятью", "девяноста"),
+        arrayOf("", "", "двадцати", "тридцати", "сорока", "пятидесяти", "шестидесяти", "семидесяти", "восьмидесяти", "девяноста"),
+    )
+    private val obliqueHundreds = arrayOf(
+        arrayOf("", "ста", "двухсот", "трёхсот", "четырёхсот", "пятисот", "шестисот", "семисот", "восьмисот", "девятисот"),
+        arrayOf("", "ста", "двумстам", "трёмстам", "четырёмстам", "пятистам", "шестистам", "семистам", "восьмистам", "девятистам"),
+        arrayOf("", "ста", "двумястами", "тремястами", "четырьмястами", "пятьюстами", "шестьюстами", "семьюстами", "восемьюстами", "девятьюстами"),
+        arrayOf("", "ста", "двухстах", "трёхстах", "четырёхстах", "пятистах", "шестистах", "семистах", "восьмистах", "девятистах"),
+    )
+    // Scale nouns in oblique cases: [case][0] after one, [case][1] after two and more.
+    private val obliqueScales = mapOf(
+        1_000L to arrayOf(arrayOf("тысячи", "тысяч"), arrayOf("тысяче", "тысячам"), arrayOf("тысячей", "тысячами"), arrayOf("тысяче", "тысячах")),
+        1_000_000L to arrayOf(arrayOf("миллиона", "миллионов"), arrayOf("миллиону", "миллионам"), arrayOf("миллионом", "миллионами"), arrayOf("миллионе", "миллионах")),
+        1_000_000_000L to arrayOf(arrayOf("миллиарда", "миллиардов"), arrayOf("миллиарду", "миллиардам"), arrayOf("миллиардом", "миллиардами"), arrayOf("миллиарде", "миллиардах")),
     )
 
-    /** Genitive cardinal below a thousand («двух», «двадцати пяти»); larger values fall back to nominative. */
-    fun cardinalGenitive(value: Long): String {
-        if (value !in 1..999) return cardinal(value)
+    /**
+     * A cardinal in any case: «двух чашек», «двумя друзьями», «о пяти домах». Nominative and
+     * accusative (for inanimate nouns) share the nominative form.
+     */
+    fun cardinal(value: Long, gender: Gender, case: Case): String {
+        if (case == Case.NOMINATIVE || case == Case.ACCUSATIVE || value <= 0 || value >= 1_000_000_000_000L) {
+            val nominative = cardinal(value, gender)
+            // «одну книгу»: feminine «одна» is the only inanimate numeral with its own accusative.
+            return if (case == Case.ACCUSATIVE && nominative.endsWith("одна")) nominative.dropLast(1) + "у" else nominative
+        }
+        val slot = when (case) {
+            Case.GENITIVE -> 0
+            Case.DATIVE -> 1
+            Case.INSTRUMENTAL -> 2
+            else -> 3
+        }
         val parts = mutableListOf<String>()
-        val h = (value / 100).toInt()
-        val rest = (value % 100).toInt()
-        if (h > 0) parts += genitiveHundreds[h]
+        var rest = value
+        for (scale in listOf(1_000_000_000L, 1_000_000L, 1_000L)) {
+            val count = rest / scale
+            if (count > 0) {
+                val scaleGender = if (scale == 1_000L) Gender.FEMININE else Gender.MASCULINE
+                if (count != 1L) parts += obliqueBelowThousand(count.toInt(), scaleGender, slot)
+                parts += obliqueScales.getValue(scale)[slot][if (count == 1L) 0 else 1]
+                rest %= scale
+            }
+        }
+        if (rest > 0) parts += obliqueBelowThousand(rest.toInt(), gender, slot)
+        return parts.joinToString(" ")
+    }
+
+    private fun obliqueBelowThousand(value: Int, gender: Gender, slot: Int): String {
+        val parts = mutableListOf<String>()
+        val h = value / 100
+        val rest = value % 100
+        if (h > 0) parts += obliqueHundreds[slot][h]
         when {
-            rest in 10..19 -> parts += teens[rest - 10].dropLast(1) + "и"
+            rest in 10..19 -> parts += teens[rest - 10].dropLast(1) + if (slot == 2) "ью" else "и"
             rest > 0 -> {
-                if (rest >= 20) parts += genitiveTens[rest / 10]
-                if (rest % 10 > 0) parts += genitiveUnits[rest % 10]
+                if (rest >= 20) parts += obliqueTens[slot][rest / 10]
+                val unit = rest % 10
+                if (unit == 1 && gender == Gender.FEMININE) parts += obliqueFeminineOne[slot]
+                else if (unit > 0) parts += obliqueUnits[slot][unit]
             }
         }
         return parts.joinToString(" ")
     }
+
+    /** Genitive cardinal: «двух», «двадцати пяти». */
+    fun cardinalGenitive(value: Long): String = cardinal(value, Gender.MASCULINE, Case.GENITIVE)
 
     private fun unitWord(unit: Int, gender: Gender): String = when {
         unit == 1 && gender == Gender.FEMININE -> "одна"
