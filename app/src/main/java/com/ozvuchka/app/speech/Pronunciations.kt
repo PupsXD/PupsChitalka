@@ -177,6 +177,11 @@ object PronunciationStore {
         if (bookId != null) update(context, bookId) { it.remove(key) }
     }
 
+    /** Drops a deleted book's own pronunciations. */
+    fun clearBook(context: Context, bookId: String) {
+        prefs(context).edit().remove(key(bookId)).apply()
+    }
+
     private fun update(context: Context, bookId: String?, change: (MutableMap<String, String>) -> Unit) {
         val current = entries(context, bookId).toMutableMap()
         change(current)

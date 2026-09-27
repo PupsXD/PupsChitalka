@@ -1,8 +1,11 @@
 package com.ozvuchka.app
 
 import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.WindowManager
@@ -27,6 +30,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -38,10 +42,14 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import com.ozvuchka.app.conversion.BookExporter
+import com.ozvuchka.app.data.Annotation
+import com.ozvuchka.app.data.AnnotationStore
 import com.ozvuchka.app.data.Book
 import com.ozvuchka.app.data.Chapter
 import com.ozvuchka.app.data.LibraryStore
+import com.ozvuchka.app.data.SearchHit
 import com.ozvuchka.app.data.chapterProgressOf
+import com.ozvuchka.app.data.searchBook
 import com.ozvuchka.app.importer.FileBookImporter
 import com.ozvuchka.app.importer.WebChapter
 import com.ozvuchka.app.importer.WebChapterImporter
@@ -50,6 +58,8 @@ import com.ozvuchka.app.speech.ModelInstallState
 import com.ozvuchka.app.speech.NarrationController
 import com.ozvuchka.app.speech.NarrationPhase
 import com.ozvuchka.app.speech.NarrationState
+import com.ozvuchka.app.speech.PronunciationDictionary
+import com.ozvuchka.app.speech.PronunciationStore
 import com.ozvuchka.app.speech.SpeechModel
 import com.ozvuchka.app.speech.SpeechModels
 import com.ozvuchka.app.speech.SpeechSettings
@@ -64,7 +74,9 @@ import com.ozvuchka.app.speech.dominantLanguage
 import com.ozvuchka.app.ui.LibraryBookUi
 import com.ozvuchka.app.ui.LibraryScreen
 import com.ozvuchka.app.ui.OzvuchkaTheme
+import com.ozvuchka.app.ui.PronunciationUi
 import com.ozvuchka.app.ui.ReaderActions
+import com.ozvuchka.app.ui.ReaderJump
 import com.ozvuchka.app.ui.ReaderMargin
 import com.ozvuchka.app.ui.ReaderNarrationUi
 import com.ozvuchka.app.ui.ReaderScreen
@@ -95,6 +107,11 @@ class MainActivity : ComponentActivity() {
     private var volumeKeysTurnPages by mutableStateOf(true)
     private var keepScreenOn by mutableStateOf(true)
     private var highlightWords by mutableStateOf(true)
+    private val annotationStore by lazy { AnnotationStore(this) }
+    /** Bookmarks and highlights of the open book. */
+    private var annotations by mutableStateOf<List<Annotation>>(emptyList())
+    private var readerJump by mutableStateOf<ReaderJump?>(null)
+    private var pronunciationCount by mutableIntStateOf(0)
     private var speech by mutableStateOf<SpeechSettings?>(null)
     private var modelStates by mutableStateOf<Map<SpeechModel, ModelInstallState>>(emptyMap())
     private var installedModels by mutableStateOf<Set<SpeechModel>>(emptySet())
@@ -435,6 +452,9 @@ class MainActivity : ComponentActivity() {
             volumeKeysTurnPages = volumeKeysTurnPages,
             keepScreenOn = keepScreenOn,
             highlightWords = highlightWords,
+            annotations = annotations,
+            jump = readerJump,
+            pronunciationCount = pronunciationCount,
         )
     }
 
@@ -546,6 +566,80 @@ class MainActivity : ComponentActivity() {
 
         override fun export(format: String) = requestExport(format)
         override fun importNextChapter() = this@MainActivity.importNextChapter()
+
+        override fun pronunciationOf(word: String): PronunciationUi? =
+            PronunciationStore.find(this@MainActivity, currentBook?.id, word)?.let { (spoken, ownBook) ->
+                PronunciationUi(word, spoken, everyBook = !ownBook)
+            }
+
+        override fun pronunciations(): List<PronunciationUi> {
+            val id = currentBook?.id
+            val own = if (id == null) emptyList() else {
+                PronunciationStore.entries(this@MainActivity, id).map { PronunciationUi(it.key, it.value, everyBook = false) }
+            }
+            val shared = PronunciationStore.entries(this@MainActivity, null).map { PronunciationUi(it.key, it.value, everyBook = true) }
+            return (own + shared).sortedBy { it.word }
+        }
+
+        override fun savePronunciation(word: String, spoken: String, everyBook: Boolean) {
+            PronunciationStore.put(this@MainActivity, currentBook?.id, word, spoken, everyBook)
+            refreshPronunciationCount()
+            // Narration in progress picks the new pronunciation up from the current sentence.
+            NarrationController.settingsChanged(this@MainActivity)
+            notice = "«$word» будет звучать как «${PronunciationDictionary.display(spoken)}»"
+        }
+
+        override fun removePronunciation(word: String) {
+            PronunciationStore.remove(this@MainActivity, currentBook?.id, word)
+            refreshPronunciationCount()
+            NarrationController.settingsChanged(this@MainActivity)
+        }
+
+        override fun previewPronunciation(word: String, spoken: String, sentence: String, language: String) {
+            val settings = speech ?: SpeechSettings.load(this@MainActivity)
+            val voice = settings.voiceFor(language)
+            previewVoice = voice
+            NarrationController.preview(this@MainActivity, voice, language, sentence, PronunciationDictionary(mapOf(word to spoken)))
+        }
+
+        override fun addAnnotation(annotation: Annotation) = changeAnnotations { it + annotation }
+
+        override fun updateAnnotation(annotation: Annotation) =
+            changeAnnotations { list -> list.map { if (it.id == annotation.id) annotation else it } }
+
+        override fun removeAnnotation(id: String) = changeAnnotations { list -> list.filterNot { it.id == id } }
+
+        override fun jumpTo(chapter: Int, paragraph: Int, offset: Int, mark: IntRange?) {
+            val book = currentBook ?: return
+            val paragraphs = book.chapters.getOrNull(chapter)?.paragraphs ?: return
+            val progress = if (paragraph < 0) 0f else chapterProgressOf(paragraphs, paragraph, offset)
+            val updated = book.copy(currentChapter = chapter, chapterProgress = progress)
+            currentBook = updated
+            replaceBook(updated)
+            library.updatePosition(book.id, chapter, progress)
+            readerJump = ReaderJump(System.nanoTime(), chapter, paragraph, offset, mark)
+        }
+
+        override suspend fun search(query: String): List<SearchHit> {
+            val book = currentBook ?: return emptyList()
+            return withContext(Dispatchers.Default) { searchBook(book.chapters, query) }
+        }
+
+        override fun translate(text: String) = translateText(text)
+
+        override fun copyText(text: String) {
+            getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("Цитата", text))
+            // Android 13 and later confirm a copy themselves.
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) notice = "Скопировано"
+        }
+
+        override fun shareQuote(text: String) {
+            val book = currentBook
+            val signature = listOfNotNull(book?.title, book?.author?.takeIf { it.isNotBlank() }).joinToString(", ")
+            val body = "«${text.trim()}»" + if (signature.isNotBlank()) "\n— $signature" else ""
+            val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, body)
+            startActivity(Intent.createChooser(send, "Поделиться цитатой"))
+        }
     }
 
     private fun startNarration(book: Book, chapter: Int, paragraph: Int, offset: Int) {
@@ -683,6 +777,51 @@ class MainActivity : ComponentActivity() {
         replaceBook(opened)
         library.updatePosition(opened.id, opened.currentChapter, opened.chapterProgress, opened.lastOpenedAt)
         warmUpVoice(opened)
+        annotations = emptyList()
+        readerJump = null
+        refreshPronunciationCount()
+        lifecycleScope.launch {
+            val loaded = withContext(Dispatchers.IO) { runCatching { annotationStore.list(opened.id) }.getOrDefault(emptyList()) }
+            if (currentBook?.id == opened.id) annotations = loaded
+        }
+    }
+
+    private fun changeAnnotations(change: (List<Annotation>) -> List<Annotation>) {
+        val book = currentBook ?: return
+        val updated = change(annotations)
+        annotations = updated
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching { annotationStore.save(book.id, updated) }
+                .onFailure { withContext(Dispatchers.Main) { notice = "Не удалось сохранить закладки: ${it.message}" } }
+        }
+    }
+
+    private fun refreshPronunciationCount() {
+        val id = currentBook?.id
+        pronunciationCount = PronunciationStore.entries(this, null).size + (id?.let { PronunciationStore.entries(this, it).size } ?: 0)
+    }
+
+    /**
+     * Shows a translation without leaving the book: Google Translate, Yandex, DeepL or Microsoft
+     * answer the selected-text action with a popup; the web page is the fallback.
+     */
+    private fun translateText(text: String) {
+        val intent = Intent(Intent.ACTION_PROCESS_TEXT)
+            .setType("text/plain")
+            .putExtra(Intent.EXTRA_PROCESS_TEXT, text)
+            .putExtra(Intent.EXTRA_PROCESS_TEXT_READONLY, true)
+        val handlers = packageManager.queryIntentActivities(intent, 0)
+        val preferred = listOf("com.google.android.apps.translate", "ru.yandex.translate", "com.deepl.mobiletranslator", "com.microsoft.translator")
+        val translator = preferred.firstNotNullOfOrNull { pkg -> handlers.firstOrNull { it.activityInfo.packageName == pkg } }
+        try {
+            when {
+                translator != null -> startActivity(intent.setClassName(translator.activityInfo.packageName, translator.activityInfo.name))
+                handlers.isNotEmpty() -> startActivity(Intent.createChooser(intent, "Перевести"))
+                else -> openUrl("https://translate.google.com/?sl=auto&tl=ru&text=" + Uri.encode(text))
+            }
+        } catch (_: ActivityNotFoundException) {
+            openUrl("https://translate.google.com/?sl=auto&tl=ru&text=" + Uri.encode(text))
+        }
     }
 
     /** Loads the book's voice in the background, so «Слушать» starts without a model load. */
@@ -853,7 +992,11 @@ class MainActivity : ComponentActivity() {
         if (narration.bookId == id && narration.active) NarrationController.stop(this)
         lifecycleScope.launch {
             try {
-                val removed = withContext(Dispatchers.IO) { library.delete(id) }
+                val removed = withContext(Dispatchers.IO) {
+                    runCatching { annotationStore.delete(id) }
+                    PronunciationStore.clearBook(this@MainActivity, id)
+                    library.delete(id)
+                }
                 if (removed) {
                     books.removeAll { it.id == id }
                     notice = "Книга удалена из библиотеки"
