@@ -17,17 +17,32 @@ internal interface SegmentSource {
 
     /** The paragraph (or title) text a segment was cut from, for exact splitting. */
     fun sourceText(segment: SpeechSegment): String
+
+    /** True while more text may still arrive (the next web chapter is loading). */
+    fun mayGrow(): Boolean = false
 }
 
 /** Segments of a book from one chapter onward; later chapters are split only when reached. */
 internal class BookSegmentSource(
-    private val chapters: List<Chapter>,
+    chapters: List<Chapter>,
     private val firstChapter: Int,
     /** Cut characters' lines into their own segments, for dialogue voices. */
     val splitDialogue: Boolean = false,
 ) : SegmentSource {
+    private val chapters = ArrayList(chapters)
     private val segments = ArrayList<SpeechSegment>()
     private var nextChapter = firstChapter
+
+    /** Set while the next web chapter is being fetched; narration waits instead of ending. */
+    @Volatile var growing = false
+
+    override fun mayGrow(): Boolean = growing
+
+    /** A chapter fetched while narration runs; it is split when narration reaches it. */
+    @Synchronized
+    fun append(chapter: Chapter) {
+        chapters += chapter
+    }
 
     @Synchronized
     override fun get(index: Int): SpeechSegment? {
@@ -40,6 +55,7 @@ internal class BookSegmentSource(
         return segments.getOrNull(index)
     }
 
+    @Synchronized
     override fun sourceText(segment: SpeechSegment): String {
         val chapter = chapters.getOrNull(segment.chapter) ?: return segment.text
         return if (segment.paragraph < 0) chapter.title.trim() else chapter.paragraphs.getOrNull(segment.paragraph) ?: segment.text
@@ -274,12 +290,19 @@ internal class NarrationPlayer(
                     splitForQuickStart(first, source.sourceText(first)).forEach { pending.addLast(startIndex to it) }
                     nextIndex = startIndex + 1
                 }
+                fun nextFromSource(): Pair<Int, SpeechSegment>? {
+                    while (!cancelled) {
+                        source.get(nextIndex)?.let { return (nextIndex to it).also { nextIndex++ } }
+                        // The next web chapter is on its way: wait for it rather than end the book.
+                        if (!source.mayGrow()) return null
+                        Thread.sleep(300)
+                    }
+                    return null
+                }
                 while (!cancelled) {
                     waitForRoom()
                     if (cancelled) break
-                    val (index, segment) = pending.removeFirstOrNull()
-                        ?: source.get(nextIndex)?.let { (nextIndex to it).also { nextIndex++ } }
-                        ?: break
+                    val (index, segment) = pending.removeFirstOrNull() ?: nextFromSource() ?: break
                     val rendered = render(index, segment) ?: continue
                     synchronized(lock) {
                         queue.addLast(rendered)

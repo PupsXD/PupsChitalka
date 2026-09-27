@@ -125,6 +125,19 @@ class NarrationLogicTest {
     }
 
     @Test
+    fun bookSourceGrowsWithAFetchedChapter() {
+        val source = BookSegmentSource(listOf(Chapter("Первая", listOf("Раз. Два."))), firstChapter = 0)
+        val first = generateSequence(0) { it + 1 }.takeWhile { source.get(it) != null }.count()
+        assertNull(source.get(first))
+        source.growing = true
+        assertTrue(source.mayGrow())
+        source.append(Chapter("Вторая", listOf("Три.")))
+        source.growing = false
+        assertEquals(1, source.get(first)?.chapter)
+        assertEquals("Три.", source.get(first + 1)?.text)
+    }
+
+    @Test
     fun speechBoundsMatchTrimmedAudio() {
         val rate = 24_000
         val samples = FloatArray(rate) { index ->

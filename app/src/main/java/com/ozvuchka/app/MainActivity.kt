@@ -53,6 +53,7 @@ import com.ozvuchka.app.data.searchBook
 import com.ozvuchka.app.importer.FileBookImporter
 import com.ozvuchka.app.importer.WebChapter
 import com.ozvuchka.app.importer.WebChapterImporter
+import com.ozvuchka.app.importer.toBookChapter
 import com.ozvuchka.app.speech.DialogueVoices
 import com.ozvuchka.app.speech.ModelInstallState
 import com.ozvuchka.app.speech.NarrationController
@@ -107,6 +108,8 @@ class MainActivity : ComponentActivity() {
     private var volumeKeysTurnPages by mutableStateOf(true)
     private var keepScreenOn by mutableStateOf(true)
     private var highlightWords by mutableStateOf(true)
+    private var autoLoadWebChapters by mutableStateOf(true)
+    private var prefetchingChapterOf: String? = null
     private val annotationStore by lazy { AnnotationStore(this) }
     /** Bookmarks and highlights of the open book. */
     private var annotations by mutableStateOf<List<Annotation>>(emptyList())
@@ -145,6 +148,14 @@ class MainActivity : ComponentActivity() {
 
         lifecycleScope.launch {
             NarrationController.state.collect(::onNarrationState)
+        }
+        lifecycleScope.launch {
+            // Narration fetched the next web chapter: show it in the open book and the library.
+            NarrationController.bookUpdates.collect { id ->
+                val fresh = withContext(Dispatchers.IO) { library.get(id) } ?: return@collect
+                books.indexOfFirst { it.id == id }.takeIf { it >= 0 }?.let { index -> books[index] = books[index].copy(chapters = fresh.chapters) }
+                currentBook?.takeIf { it.id == id }?.let { open -> currentBook = open.copy(chapters = fresh.chapters) }
+            }
         }
         lifecycleScope.launch {
             SpeechModels.states.collect { states ->
@@ -316,6 +327,7 @@ class MainActivity : ComponentActivity() {
         volumeKeysTurnPages = preferences.getBoolean("volumeKeysTurnPages", true)
         keepScreenOn = preferences.getBoolean("keepScreenOn", true)
         highlightWords = preferences.getBoolean("highlightWords", true)
+        autoLoadWebChapters = preferences.getBoolean("autoLoadWebChapters", true)
     }
 
     private fun saveTypography(value: ReaderTypography) {
@@ -455,6 +467,8 @@ class MainActivity : ComponentActivity() {
             annotations = annotations,
             jump = readerJump,
             pronunciationCount = pronunciationCount,
+            isWebBook = book.chapters.any { it.sourceUrl != null },
+            autoLoadWebChapters = autoLoadWebChapters,
         )
     }
 
@@ -488,6 +502,7 @@ class MainActivity : ComponentActivity() {
             currentBook = updated
             replaceBook(updated)
             library.updatePosition(book.id, index, 0f)
+            prefetchWebChapter(updated)
             // Listening continues from the chapter the reader jumped to.
             if (narration.active && narration.bookId == book.id && !narration.isPreview) {
                 NarrationController.playBook(this@MainActivity, updated, index, 0, 0)
@@ -552,6 +567,12 @@ class MainActivity : ComponentActivity() {
         override fun volumeKeysChanged(enabled: Boolean) {
             volumeKeysTurnPages = enabled
             preferences.edit().putBoolean("volumeKeysTurnPages", enabled).apply()
+        }
+
+        override fun autoLoadWebChaptersChanged(enabled: Boolean) {
+            autoLoadWebChapters = enabled
+            preferences.edit().putBoolean("autoLoadWebChapters", enabled).apply()
+            currentBook?.let(::prefetchWebChapter)
         }
 
         override fun highlightWordsChanged(enabled: Boolean) {
@@ -777,12 +798,38 @@ class MainActivity : ComponentActivity() {
         replaceBook(opened)
         library.updatePosition(opened.id, opened.currentChapter, opened.chapterProgress, opened.lastOpenedAt)
         warmUpVoice(opened)
+        prefetchWebChapter(opened)
         annotations = emptyList()
         readerJump = null
         refreshPronunciationCount()
         lifecycleScope.launch {
             val loaded = withContext(Dispatchers.IO) { runCatching { annotationStore.list(opened.id) }.getOrDefault(emptyList()) }
             if (currentBook?.id == opened.id) annotations = loaded
+        }
+    }
+
+    /**
+     * Reading the last chapter of a web book loads the next one quietly, so «Глава →» and narration
+     * just go on. While this book is narrated the service does it instead.
+     */
+    private fun prefetchWebChapter(book: Book) {
+        if (!autoLoadWebChapters || prefetchingChapterOf == book.id) return
+        if (book.currentChapter < book.chapters.lastIndex) return
+        val nextUrl = book.chapters.lastOrNull()?.nextUrl ?: return
+        if (narration.active && narration.bookId == book.id && !narration.isPreview) return
+        prefetchingChapterOf = book.id
+        lifecycleScope.launch {
+            try {
+                val fetched = WebChapterImporter.importChapter(nextUrl).toBookChapter()
+                val updated = withContext(Dispatchers.IO) { library.appendChapter(book.id, fetched) } ?: return@launch
+                books.indexOfFirst { it.id == book.id }.takeIf { it >= 0 }?.let { index -> books[index] = books[index].copy(chapters = updated.chapters) }
+                currentBook?.takeIf { it.id == book.id }?.let { open -> currentBook = open.copy(chapters = updated.chapters) }
+            } catch (error: Exception) {
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                // Offline or the site changed: the «Загрузить» button stays for a manual try.
+            } finally {
+                prefetchingChapterOf = null
+            }
         }
     }
 
@@ -954,16 +1001,6 @@ class MainActivity : ComponentActivity() {
                 importProgressText = "Подготавливаем книгу…"
             }
         }
-    }
-
-    private fun WebChapter.toBookChapter(): Chapter {
-        val body = Jsoup.parseBodyFragment(html).body()
-        val selected = body.select("p, h2, h3, blockquote, li")
-            .map { it.text().trim() }.filter(String::isNotBlank)
-        val paragraphs = if (selected.isNotEmpty()) selected else body.wholeText().split(Regex("\\n+"))
-            .map(String::trim).filter(String::isNotBlank)
-        val chapterTitle = title.substringBefore(" | ").trim().ifBlank { title }
-        return Chapter(chapterTitle, paragraphs, sourceUrl, nextUrl)
     }
 
     private fun saveReadingPosition(book: Book) {

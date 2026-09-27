@@ -28,8 +28,18 @@ import com.ozvuchka.app.data.Book
 import com.ozvuchka.app.data.Chapter
 import com.ozvuchka.app.data.LibraryStore
 import com.ozvuchka.app.data.chapterProgressOf
+import com.ozvuchka.app.importer.WebChapterImporter
+import com.ozvuchka.app.importer.toBookChapter
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicReference
 
 enum class NarrationPhase { IDLE, PREPARING, PLAYING, PAUSED, ERROR }
@@ -79,6 +89,14 @@ object NarrationController {
 
     private val mutableState = MutableStateFlow(NarrationState())
     val state: StateFlow<NarrationState> = mutableState
+
+    private val mutableBookUpdates = MutableSharedFlow<String>(extraBufferCapacity = 8)
+    /** Ids of books that gained a chapter during narration (the next web chapter). */
+    val bookUpdates: SharedFlow<String> = mutableBookUpdates
+
+    internal fun bookUpdated(bookId: String) {
+        mutableBookUpdates.tryEmit(bookId)
+    }
     private val pending = AtomicReference<PlayRequest?>(null)
 
     /** Reads [book] from a paragraph and character offset; continues through later chapters. */
@@ -201,6 +219,8 @@ class NarrationService : Service(), NarrationPlayer.Listener {
     private var shownChapter: Int? = null
 
     private val idleStop = Runnable { finish(save = true) }
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var fetchingChapter = false
 
     private val noisyReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -291,6 +311,7 @@ class NarrationService : Service(), NarrationPlayer.Listener {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        scope.cancel()
         handler.removeCallbacksAndMessages(null)
         player.stop()
         // Keep the voice warm for a few minutes: pressing play again starts at once.
@@ -535,8 +556,41 @@ class NarrationService : Service(), NarrationPlayer.Listener {
                 shownChapter = segment.chapter
                 updateSession()
             }
+            if (target != null) prefetchNextWebChapter(target, segment.chapter)
             val now = SystemClock.elapsedRealtime()
             if (now - lastSavedAt > 10_000) saveNow()
+        }
+    }
+
+    /**
+     * In the last chapter of a web book the next chapter is fetched in the background, so narration
+     * goes on without a stop; the player waits for it if the chapter runs out first.
+     */
+    private fun prefetchNextWebChapter(target: Book, chapter: Int) {
+        if (fetchingChapter || chapter < target.chapters.lastIndex) return
+        val nextUrl = target.chapters.last().nextUrl ?: return
+        if (!getSharedPreferences("reader", MODE_PRIVATE).getBoolean("autoLoadWebChapters", true)) return
+        val growingSource = source ?: return
+        fetchingChapter = true
+        growingSource.growing = true
+        scope.launch {
+            try {
+                val fetched = WebChapterImporter.importChapter(nextUrl).toBookChapter()
+                val updated = withContext(Dispatchers.IO) { library.appendChapter(target.id, fetched) }
+                val current = book
+                if (updated != null && current?.id == target.id) {
+                    book = current.copy(chapters = updated.chapters)
+                    if (source === growingSource) growingSource.append(fetched)
+                    NarrationController.bookUpdated(target.id)
+                }
+            } catch (error: Exception) {
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                Log.w(TAG, "Next web chapter failed", error)
+                if (book?.id == target.id) publish(state.copy(message = "Не удалось загрузить следующую главу: ${error.message ?: "нет сети"}"))
+            } finally {
+                fetchingChapter = false
+                growingSource.growing = false
+            }
         }
     }
 

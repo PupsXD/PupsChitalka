@@ -93,6 +93,9 @@ data class ReaderUiState(
     val jump: ReaderJump? = null,
     /** How many pronunciations the reader saved (for this book and for all books). */
     val pronunciationCount: Int = 0,
+    /** Chapters come from a website, one by one. */
+    val isWebBook: Boolean = false,
+    val autoLoadWebChapters: Boolean = true,
 )
 
 /** Shows [paragraph] at [offset]; [mark] briefly highlights a search hit. A new [id] repeats a jump. */
@@ -120,6 +123,7 @@ interface ReaderActions {
     fun volumeKeysChanged(enabled: Boolean)
     fun keepScreenOnChanged(enabled: Boolean)
     fun highlightWordsChanged(enabled: Boolean)
+    fun autoLoadWebChaptersChanged(enabled: Boolean)
     fun export(format: String)
     fun importNextChapter()
 

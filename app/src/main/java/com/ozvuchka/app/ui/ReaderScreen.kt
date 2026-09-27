@@ -1161,6 +1161,14 @@ private fun ReaderSettingsSheet(
                     checked = state.highlightWords,
                     onChange = actions::highlightWordsChanged,
                 )
+                if (state.isWebBook) {
+                    ToggleRow(
+                        title = "Подгружать главы с сайта",
+                        subtitle = "Следующая глава загружается заранее — чтение и озвучка идут без остановки",
+                        checked = state.autoLoadWebChapters,
+                        onChange = actions::autoLoadWebChaptersChanged,
+                    )
+                }
                 ToggleRow(
                     title = "Листать кнопками громкости",
                     subtitle = "Во время озвучки кнопки меняют громкость",

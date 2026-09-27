@@ -1,5 +1,6 @@
 package com.ozvuchka.app.importer
 
+import com.ozvuchka.app.data.Chapter
 import java.net.URI
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
@@ -15,6 +16,17 @@ data class WebChapter(
     val sourceUrl: String,
     val nextUrl: String?,
 )
+
+/** A web chapter as book text: its paragraphs, with the site's own title suffix dropped. */
+fun WebChapter.toBookChapter(): Chapter {
+    val body = Jsoup.parseBodyFragment(html).body()
+    val selected = body.select("p, h2, h3, blockquote, li")
+        .map { it.text().trim() }.filter(String::isNotBlank)
+    val paragraphs = if (selected.isNotEmpty()) selected else body.wholeText().split(Regex("\\n+"))
+        .map(String::trim).filter(String::isNotBlank)
+    val chapterTitle = title.substringBefore(" | ").trim().ifBlank { title }
+    return Chapter(chapterTitle, paragraphs, sourceUrl, nextUrl)
+}
 
 /** Imports only the URL selected by the reader. [nextUrl] is offered for a separate action. */
 object WebChapterImporter {
