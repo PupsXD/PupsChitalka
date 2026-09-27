@@ -15,7 +15,7 @@ with look-ahead synthesis instead of waiting for a faster big model.
 | Language | Voice | Why | Status |
 | --- | --- | --- | --- |
 | Russian | Silero v5 (`v5_5_ru`) through the [RuVoice](https://github.com/kost-t-human/ruvoice-tts) system TTS engine | Non-autoregressive Russian model with neural stress and homograph resolution plus a large normalizer (numbers with cases, dates, abbreviations). Its author reports RTF 0.21 on a Galaxy A32 and about 0.05 on Snapdragon 4 Gen 2. | Integrated through Android `TextToSpeech.synthesizeToFile`; needs a listening comparison with the Qwen samples and an RTF check on the S24 Ultra |
-| English | Kokoro v1.0 (sherpa-onnx, INT8 or FP32) | The best-rated small English model; a third-party Android project reports RTF ≈ 0.67 with 4 threads on a Snapdragon 865/870 phone, so the much faster S24 Ultra should stay ahead of playback. | Integrated as an in-app download; RTF on the S24 Ultra to be measured |
+| English | Kokoro v1.0 (sherpa-onnx, FP32 recommended) | The best-rated small English model; a third-party Android project reports RTF ≈ 0.67 with 4 threads on a Snapdragon 865/870 phone, so the much faster S24 Ultra should stay ahead of playback. The FP32 build is both cleaner and faster than INT8 (see below). | Integrated as an in-app download; RTF on the S24 Ultra to be measured |
 | Fallback / other | Supertonic 3 (INT8 or full) | Very fast, 31 languages, already installed by existing users | Integrated; now 4 threads and configurable flow steps |
 | Any | Installed system engines (Google, Samsung) | No download, many voices | Integrated; network voices are marked |
 
@@ -26,8 +26,35 @@ could not run the APK:
    the passage used for Qwen and on a dialogue-heavy chapter.
 2. Time to first sound and whether the look-ahead buffer stays full for each voice
    (the reader shows «Готовлю голос…» whenever playback waits for synthesis).
-3. Kokoro INT8 against FP32: whether the FP32 quality gain is audible and whether FP32 keeps
-   up at 1.5× speed.
+3. Kokoro FP32 at 1.5× speed: the container measurement below predicts a comfortable margin,
+   but the phone's thermal behaviour over a long chapter is untested.
+
+## Measured in the development container
+
+The cloud session measured the app's exact sherpa-onnx 1.13.8 configurations (4 threads,
+Supertonic 10 flow steps, Kokoro `en-us`) on an Intel Xeon 2.1 GHz with 4 vCPUs. These numbers
+compare the variants with each other; the S24 Ultra's absolute speed will differ.
+
+| Model | RTF (synthesis time / audio time) | Note |
+| --- | --- | --- |
+| Supertonic 3 INT8 | 0.33 (0.51 at 16 steps) | Russian and English alike |
+| Supertonic 3 full precision | 0.29 | Slightly faster than INT8 |
+| Kokoro v1.0 INT8 | 1.00 | Too slow to stay ahead of playback on this CPU |
+| Kokoro v1.0 FP32 | 0.40 | 2.5× faster than INT8 |
+
+The INT8 Kokoro export uses dynamic quantization: it replaces the 90 convolutions with
+`ConvInteger` and adds 98 `DynamicQuantizeLinear` nodes that recompute activation scales on every
+call. ONNX Runtime has no fast path for that pattern, so the smaller file is the slower one. The
+app therefore offers the full Kokoro model first and keeps INT8 as the compact option.
+
+Listening samples, rendered sentence by sentence with the reader's segmentation, normalization
+and pauses: Supertonic 3 full, Russian [F1](samples/ru-supertonic-f1.mp3) and
+[M1](samples/ru-supertonic-m1.mp3); Kokoro FP32, English [Heart](samples/en-kokoro-heart.mp3),
+[Michael](samples/en-kokoro-michael.mp3) and [Emma](samples/en-kokoro-emma.mp3); Supertonic 3 full,
+English [F1](samples/en-supertonic-f1.mp3) for comparison. Whisper small transcribes every sample
+back to the source passage (numbers as digits); the only slips are unstressed endings such as
+«ответила он» in Supertonic's Russian. RuVoice cannot run outside Android, so its voices are
+compared in the app with the preview button.
 
 ## Measured baseline on this phone
 
