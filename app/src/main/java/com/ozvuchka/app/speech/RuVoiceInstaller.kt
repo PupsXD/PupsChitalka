@@ -283,7 +283,7 @@ object RuVoiceInstaller {
 
     private fun installFailure(status: Int, detail: String?): String = when (status) {
         PackageInstaller.STATUS_FAILURE_BLOCKED ->
-            "Android не дал установить RuVoice. Разрешите «Озвучке» устанавливать приложения; на Samsung также " +
+            "Android не дал установить RuVoice. Разрешите PupsChitalka устанавливать приложения; на Samsung также " +
                 "проверьте, что выключена «Автоблокировка» (Auto Blocker) в разделе «Безопасность и конфиденциальность»."
         PackageInstaller.STATUS_FAILURE_CONFLICT ->
             "Уже установлен RuVoice с другой подписью. Удалите его и повторите."

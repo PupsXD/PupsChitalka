@@ -12,7 +12,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** «Озвучка» in quick settings: pauses and resumes, or picks up the last book where it stopped. */
+/** «PupsChitalka» in quick settings: pauses and resumes, or picks up the last book where it stopped. */
 class NarrationTileService : TileService() {
     private val scope = CoroutineScope(Dispatchers.Main.immediate)
     private var watching: Job? = null
@@ -38,7 +38,7 @@ class NarrationTileService : TileService() {
         val tile = qsTile ?: return
         val listening = state.active && !state.isPreview
         tile.state = if (listening && state.isPlaying) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
-        tile.label = "Озвучка"
+        tile.label = "PupsChitalka"
         tile.subtitle = when {
             listening && state.isPlaying -> state.bookTitle ?: "Читает"
             listening -> "На паузе"

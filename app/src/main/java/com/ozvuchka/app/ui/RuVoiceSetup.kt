@@ -76,7 +76,7 @@ internal fun RuVoiceSetupBody(state: RuVoiceInstallState, actions: RuVoiceSetupA
             )
             Text(
                 "Отдельное бесплатное приложение, $RUVOICE_SIZE_LABEL, лучше скачивать по Wi-Fi. Android попросит подтвердить " +
-                    "установку, а в первый раз — разрешить установку из «Озвучки».",
+                    "установку, а в первый раз — разрешить установку из PupsChitalka.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -88,7 +88,7 @@ internal fun RuVoiceSetupBody(state: RuVoiceInstallState, actions: RuVoiceSetupA
                 } ?: LinearProgressIndicator(Modifier.fillMaxWidth().height(4.dp).clip(CircleShape))
                 Stage.LOOKING, Stage.PREPARING -> LinearProgressIndicator(Modifier.fillMaxWidth().height(4.dp).clip(CircleShape))
                 Stage.CONFIRMING -> Text(
-                    "Если Android попросит разрешить установку из «Озвучки», включите переключатель и вернитесь назад.",
+                    "Если Android попросит разрешить установку из PupsChitalka, включите переключатель и вернитесь назад.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

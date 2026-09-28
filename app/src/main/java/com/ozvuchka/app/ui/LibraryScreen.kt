@@ -338,7 +338,7 @@ private fun LibraryHeader(bookCount: Int, onOpenVoices: () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                "OZVUCHKA  ·  ВАША БИБЛИОТЕКА",
+                "PUPSCHITALKA  ·  ВАША БИБЛИОТЕКА",
                 color = MaterialTheme.colorScheme.primary,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
@@ -483,7 +483,7 @@ private fun LibraryBookCard(
                     modifier = Modifier.fillMaxSize().padding(15.dp),
                     verticalArrangement = Arrangement.SpaceBetween,
                 ) {
-                    Text("OZVUCHKA", color = Color.White.copy(alpha = 0.78f), fontSize = 9.sp, letterSpacing = 2.sp)
+                    Text("PUPSCHITALKA", color = Color.White.copy(alpha = 0.78f), fontSize = 9.sp, letterSpacing = 2.sp)
                     Text(
                         book.title,
                         color = Color.White,

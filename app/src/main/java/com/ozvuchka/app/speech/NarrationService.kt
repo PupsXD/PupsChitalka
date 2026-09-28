@@ -874,9 +874,9 @@ class NarrationService : Service(), NarrationPlayer.Listener {
     private fun updateSession() {
         val chapterTitle = state.chapterTitle?.takeIf { it.isNotBlank() }
         val metadata = MediaMetadata.Builder()
-            .putString(MediaMetadata.METADATA_KEY_TITLE, chapterTitle ?: state.bookTitle ?: "Озвучка")
-            .putString(MediaMetadata.METADATA_KEY_ARTIST, state.bookTitle ?: "Озвучка")
-            .putString(MediaMetadata.METADATA_KEY_ALBUM, book?.author?.takeIf { it.isNotBlank() } ?: "Озвучка")
+            .putString(MediaMetadata.METADATA_KEY_TITLE, chapterTitle ?: state.bookTitle ?: "PupsChitalka")
+            .putString(MediaMetadata.METADATA_KEY_ARTIST, state.bookTitle ?: "PupsChitalka")
+            .putString(MediaMetadata.METADATA_KEY_ALBUM, book?.author?.takeIf { it.isNotBlank() } ?: "PupsChitalka")
         coverFor(book)?.let { cover ->
             metadata.putBitmap(MediaMetadata.METADATA_KEY_ART, cover)
             metadata.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, cover)
@@ -927,7 +927,7 @@ class NarrationService : Service(), NarrationPlayer.Listener {
         coverFor(book)?.let(builder::setLargeIcon)
         return builder
             .setSmallIcon(R.drawable.ic_stat_narration)
-            .setContentTitle(state.chapterTitle?.takeIf { it.isNotBlank() } ?: state.bookTitle ?: "Озвучка")
+            .setContentTitle(state.chapterTitle?.takeIf { it.isNotBlank() } ?: state.bookTitle ?: "PupsChitalka")
             .setContentText(status)
             .setContentIntent(contentIntent)
             .setCategory(Notification.CATEGORY_TRANSPORT)
