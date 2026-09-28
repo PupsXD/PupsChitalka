@@ -11,6 +11,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
@@ -22,13 +26,28 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.util.Log
 import com.ozvuchka.app.R
 import com.ozvuchka.app.data.Book
+import com.ozvuchka.app.data.Chapter
+import com.ozvuchka.app.data.Covers
 import com.ozvuchka.app.data.LibraryStore
 import com.ozvuchka.app.data.chapterProgressOf
+import com.ozvuchka.app.importer.WebChapterImporter
+import com.ozvuchka.app.importer.toBookChapter
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicReference
 
 enum class NarrationPhase { IDLE, PREPARING, PLAYING, PAUSED, ERROR }
@@ -70,10 +89,22 @@ object NarrationController {
         val offset: Int,
         val preview: SpeechSegment? = null,
         val previewVoice: VoiceChoice? = null,
+        /** A short multi-paragraph sample, read with the saved settings (dialogue voices). */
+        val previewParagraphs: List<String>? = null,
+        /** Pronunciations for a preview; a book uses its saved ones. */
+        val pronunciations: PronunciationDictionary? = null,
     )
 
     private val mutableState = MutableStateFlow(NarrationState())
     val state: StateFlow<NarrationState> = mutableState
+
+    private val mutableBookUpdates = MutableSharedFlow<String>(extraBufferCapacity = 8)
+    /** Ids of books that gained a chapter during narration (the next web chapter). */
+    val bookUpdates: SharedFlow<String> = mutableBookUpdates
+
+    internal fun bookUpdated(bookId: String) {
+        mutableBookUpdates.tryEmit(bookId)
+    }
     private val pending = AtomicReference<PlayRequest?>(null)
 
     /** Reads [book] from a paragraph and character offset; continues through later chapters. */
@@ -87,9 +118,34 @@ object NarrationController {
     }
 
     /** Plays a short sample with [voice] without touching reading positions. */
-    fun preview(context: Context, voice: VoiceChoice, language: String, text: String): Boolean {
+    fun preview(
+        context: Context,
+        voice: VoiceChoice,
+        language: String,
+        text: String,
+        pronunciations: PronunciationDictionary? = null,
+    ): Boolean {
         val segment = SpeechSegment(-1, -2, 0, text.length, text, language, SegmentPause.SENTENCE)
-        pending.set(PlayRequest(null, 0, 0, 0, preview = segment, previewVoice = voice))
+        pending.set(PlayRequest(null, 0, 0, 0, preview = segment, previewVoice = voice, pronunciations = pronunciations))
+        return start(context, NarrationService.ACTION_PLAY)
+    }
+
+    /** Plays a short dialogue with the saved narrator and character voices. */
+    fun previewDialogue(context: Context, language: String): Boolean {
+        val paragraphs = if (language == "en") {
+            listOf(
+                "“Are you coming back?” she whispered.",
+                "“Of course,” he said without turning around. “It will all be over by morning.”",
+                "She watched him go for a long time.",
+            )
+        } else {
+            listOf(
+                "— Ты вернёшься? — спросила она почти шёпотом.",
+                "— Конечно, — ответил он, не оборачиваясь. — К утру всё закончится.",
+                "Она долго смотрела ему вслед.",
+            )
+        }
+        pending.set(PlayRequest(null, 0, 0, 0, previewParagraphs = paragraphs))
         return start(context, NarrationService.ACTION_PLAY)
     }
 
@@ -157,6 +213,7 @@ class NarrationService : Service(), NarrationPlayer.Listener {
 
     private var book: Book? = null
     private var source: BookSegmentSource? = null
+    private var pronunciations = PronunciationDictionary.EMPTY
     private var previewSource: SegmentSource? = null
     private var settings: SpeechSettings? = null
     private var state = NarrationState()
@@ -170,6 +227,37 @@ class NarrationService : Service(), NarrationPlayer.Listener {
     private var shownChapter: Int? = null
 
     private val idleStop = Runnable { finish(save = true) }
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var fetchingChapter = false
+
+    // Shake to extend the sleep timer: listened to only near its end, so the sensor costs nothing otherwise.
+    private var sensorManager: SensorManager? = null
+    private var shakeArmed = false
+    private var shakeWindowEnd = 0L
+    private var lastJoltAt = 0L
+    private var lastShakeAt = 0L
+    private var pausedBySleep = false
+    private val armShake = Runnable { armShakeWindow(SystemClock.elapsedRealtime() + 3 * 60_000L) }
+    private val disarmShake = Runnable { disarmShakeWindow() }
+    private val shakeListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            val (x, y, z) = event.values
+            val force = kotlin.math.sqrt(x * x + y * y + z * z) / SensorManager.GRAVITY_EARTH
+            if (force < 2.2f) return
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastShakeAt < 1_500) return
+            // Two jolts close together make a shake; one bump of the bed does not.
+            if (now - lastJoltAt > 700) {
+                lastJoltAt = now
+                return
+            }
+            lastShakeAt = now
+            lastJoltAt = 0
+            handler.post { onShake() }
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+    }
 
     private val noisyReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -217,8 +305,8 @@ class NarrationService : Service(), NarrationPlayer.Listener {
             override fun onStop() = finish(save = true)
             override fun onSkipToNext() = skip(+1)
             override fun onSkipToPrevious() = skip(-1)
-            override fun onFastForward() = skip(+1)
-            override fun onRewind() = skip(-1)
+            override fun onFastForward() = seekBy(+15f)
+            override fun onRewind() = seekBy(-15f)
         })
         mediaSession.isActive = true
     }
@@ -249,6 +337,7 @@ class NarrationService : Service(), NarrationPlayer.Listener {
             }
             ACTION_NEXT -> skip(+1)
             ACTION_PREVIOUS -> skip(-1)
+            ACTION_REWIND -> seekBy(-15f)
             ACTION_STOP -> finish(save = true)
             ACTION_SLEEP -> setSleep(intent.getIntExtra(EXTRA_MINUTES, 0))
             ACTION_SETTINGS -> restartWithNewSettings()
@@ -260,6 +349,8 @@ class NarrationService : Service(), NarrationPlayer.Listener {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        scope.cancel()
+        disarmShakeWindow()
         handler.removeCallbacksAndMessages(null)
         player.stop()
         // Keep the voice warm for a few minutes: pressing play again starts at once.
@@ -282,19 +373,35 @@ class NarrationService : Service(), NarrationPlayer.Listener {
         if (player.isActive && book != null) saveNow()
         val loaded = SpeechSettings.load(this)
         val preview = request.preview
+        val sample = request.previewParagraphs
         if (preview != null) {
             book = null
             source = null
             val voice = request.previewVoice ?: loaded.voiceFor(preview.language)
-            settings = if (preview.language == "en") loaded.copy(englishVoice = voice) else loaded.copy(russianVoice = voice)
+            // A single voice is being auditioned: no character voices in the way.
+            settings = if (preview.language == "en") {
+                loaded.copy(englishVoice = voice, englishDialogue = DialogueVoices())
+            } else {
+                loaded.copy(russianVoice = voice, russianDialogue = DialogueVoices())
+            }
+            pronunciations = request.pronunciations ?: PronunciationDictionary.EMPTY
             previewSource = SingleSegmentSource(preview)
             state = NarrationState(phase = NarrationPhase.PREPARING, bookTitle = "Пример голоса", isPreview = true)
+        } else if (sample != null) {
+            book = null
+            source = null
+            settings = loaded
+            pronunciations = PronunciationDictionary.EMPTY
+            previewSource = BookSegmentSource(listOf(Chapter("", sample)), 0, splitDialogue = true)
+            state = NarrationState(phase = NarrationPhase.PREPARING, bookTitle = "Пример диалога", isPreview = true)
         } else {
             val target = request.book ?: return
             book = target
             previewSource = null
             settings = loaded
-            val bookSource = BookSegmentSource(target.chapters, request.chapter)
+            pronunciations = PronunciationStore.load(this, target.id)
+            val bookSource = BookSegmentSource(target.chapters, request.chapter, splitDialogue = loaded.splitsDialogue)
+            prepareGrowth(bookSource, target)
             source = bookSource
             lastIndex = bookSource.indexOf(request.chapter, request.paragraph, request.offset)
             val chapter = target.chapters.getOrNull(request.chapter)
@@ -312,15 +419,16 @@ class NarrationService : Service(), NarrationPlayer.Listener {
         publish(state)
         updateSession()
         val activeSettings = settings ?: return
-        val voiceCheck = activeSettings.voiceFor(preview?.language ?: dominantBookLanguage())
+        val previewLanguage = preview?.language ?: sample?.let { dominantLanguage(it) }
+        val voiceCheck = activeSettings.voiceFor(previewLanguage ?: dominantBookLanguage())
         if (!hub.isAvailable(voiceCheck, activeSettings) && !hub.isAvailable(VoiceChoice(VoiceEngine.SUPERTONIC), activeSettings)) {
             finish(save = false, error = "Сначала скачайте голос в настройках озвучки")
             return
         }
-        if (preview != null) {
-            player.play(previewSource!!, 0, activeSettings)
+        if (preview != null || sample != null) {
+            player.play(previewSource!!, 0, activeSettings, pronunciations = pronunciations)
         } else {
-            player.play(source!!, lastIndex, activeSettings)
+            player.play(source!!, lastIndex, activeSettings, pronunciations = pronunciations)
         }
     }
 
@@ -354,6 +462,10 @@ class NarrationService : Service(), NarrationPlayer.Listener {
         }
         handler.removeCallbacks(idleStop)
         resumeOnFocusGain = false
+        if (pausedBySleep) {
+            pausedBySleep = false
+            disarmShakeWindow()
+        }
         player.resume()
         publish(state.copy(phase = NarrationPhase.PLAYING, message = null))
         updateSession()
@@ -373,22 +485,109 @@ class NarrationService : Service(), NarrationPlayer.Listener {
         handler.removeCallbacks(idleStop)
         requestFocus()
         lastIndex = target
-        player.play(currentSource, target, activeSettings, stopAtChapterEnd = state.sleepAtChapterEnd)
+        player.play(currentSource, target, activeSettings, stopAtChapterEnd = state.sleepAtChapterEnd, pronunciations = pronunciations)
         publish(state.copy(phase = NarrationPhase.PREPARING))
         updateSession()
     }
 
+    /**
+     * Moves about [seconds] back or forward, in whole sentences: the length of a sentence's text
+     * and its pause estimate how long it plays at the current speed.
+     */
+    private fun seekBy(seconds: Float) {
+        val currentSource = source ?: return
+        val activeSettings = settings ?: return
+        val current = player.currentIndex ?: lastIndex
+        val charactersPerSecond = 14f * activeSettings.speed
+        fun duration(segment: SpeechSegment) = segment.text.length / charactersPerSecond + segment.pause.baseMs / 1000f
+        var target = current
+        if (seconds < 0) {
+            var remaining = -seconds - player.secondsIntoCurrent
+            while (remaining > 0 && target > 0) {
+                target--
+                remaining -= currentSource.get(target)?.let(::duration) ?: break
+            }
+        } else {
+            var remaining = seconds + player.secondsIntoCurrent
+            while (true) {
+                val here = currentSource.get(target) ?: break
+                if (remaining < duration(here) || currentSource.get(target + 1) == null) break
+                remaining -= duration(here)
+                target++
+            }
+        }
+        if (target == current && seconds > 0) return
+        handler.removeCallbacks(idleStop)
+        requestFocus()
+        lastIndex = target
+        player.play(currentSource, target, activeSettings, stopAtChapterEnd = state.sleepAtChapterEnd, pronunciations = pronunciations)
+        publish(state.copy(phase = NarrationPhase.PREPARING))
+        updateSession()
+    }
+
+    private fun armShakeWindow(until: Long) {
+        shakeWindowEnd = until
+        handler.removeCallbacks(disarmShake)
+        handler.postDelayed(disarmShake, (until - SystemClock.elapsedRealtime()).coerceAtLeast(0L))
+        if (shakeArmed) return
+        val manager = sensorManager ?: getSystemService(SensorManager::class.java).also { sensorManager = it } ?: return
+        val accelerometer = manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) ?: return
+        shakeArmed = manager.registerListener(shakeListener, accelerometer, SensorManager.SENSOR_DELAY_UI)
+    }
+
+    private fun disarmShakeWindow() {
+        handler.removeCallbacks(disarmShake)
+        if (shakeArmed) sensorManager?.unregisterListener(shakeListener)
+        shakeArmed = false
+    }
+
+    /** A shake near the end of the sleep timer, or just after it paused, buys ten more minutes. */
+    private fun onShake() {
+        if (SystemClock.elapsedRealtime() > shakeWindowEnd || !player.isActive) {
+            disarmShakeWindow()
+            return
+        }
+        vibrate()
+        player.cancelFade()
+        if (pausedBySleep && player.isPaused) resumePlayback()
+        pausedBySleep = false
+        setSleep(10)
+        publish(state.copy(message = "Таймер сна продлён на 10 минут"))
+    }
+
+    private fun vibrate() {
+        val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            getSystemService(VibratorManager::class.java)?.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            getSystemService(Vibrator::class.java)
+        }
+        runCatching { vibrator?.vibrate(VibrationEffect.createOneShot(60, VibrationEffect.DEFAULT_AMPLITUDE)) }
+    }
+
     private fun restartWithNewSettings() {
         val loaded = SpeechSettings.load(this)
-        val currentSource = source
+        book?.let { pronunciations = PronunciationStore.load(this, it.id) }
+        var currentSource = source
         if (currentSource == null || !player.isActive) {
             settings = loaded
             return
         }
         settings = loaded
         val wasPaused = player.isPaused
-        val index = player.currentIndex ?: lastIndex
-        player.play(currentSource, index, loaded, stopAtChapterEnd = state.sleepAtChapterEnd)
+        var index = player.currentIndex ?: lastIndex
+        val target = book
+        if (target != null && currentSource.splitDialogue != loaded.splitsDialogue) {
+            // Dialogue voices were switched on or off: cut the text again, keeping the place.
+            val here = currentSource.get(index)
+            val chapter = here?.chapter ?: state.chapterIndex ?: 0
+            val rebuilt = BookSegmentSource(target.chapters, chapter, splitDialogue = loaded.splitsDialogue)
+            prepareGrowth(rebuilt, target)
+            index = if (here == null) 0 else rebuilt.indexOf(here.chapter, here.paragraph, here.start)
+            source = rebuilt
+            currentSource = rebuilt
+        }
+        player.play(currentSource, index, loaded, stopAtChapterEnd = state.sleepAtChapterEnd, pronunciations = pronunciations)
         if (wasPaused) {
             player.pause()
         } else {
@@ -406,12 +605,15 @@ class NarrationService : Service(), NarrationPlayer.Listener {
                         handler.post {
                             if (session != player.sessionId) return@post
                             publish(state.copy(sleepEndsAt = null))
+                            pausedBySleep = true
                             onPaused()
+                            armShakeWindow(SystemClock.elapsedRealtime() + 2 * 60_000L)
                         }
                     }
                 }
                 sleepRunnable = runnable
                 handler.postDelayed(runnable, minutes * 60_000L)
+                handler.postDelayed(armShake, (minutes * 60_000L - 60_000L).coerceAtLeast(0L))
                 publish(state.copy(sleepEndsAt = System.currentTimeMillis() + minutes * 60_000L, sleepAtChapterEnd = false))
             }
             minutes < 0 -> {
@@ -425,6 +627,8 @@ class NarrationService : Service(), NarrationPlayer.Listener {
     private fun cancelSleep(publishState: Boolean) {
         sleepRunnable?.let { handler.removeCallbacks(it) }
         sleepRunnable = null
+        handler.removeCallbacks(armShake)
+        disarmShakeWindow()
         player.setStopAtChapterEnd(false)
         if (publishState) publish(state.copy(sleepEndsAt = null, sleepAtChapterEnd = false))
     }
@@ -477,8 +681,56 @@ class NarrationService : Service(), NarrationPlayer.Listener {
                 shownChapter = segment.chapter
                 updateSession()
             }
+            if (target != null) prefetchNextWebChapter(target, segment.chapter)
             val now = SystemClock.elapsedRealtime()
             if (now - lastSavedAt > 10_000) saveNow()
+        }
+    }
+
+    private fun autoLoadsChapters() = getSharedPreferences("reader", MODE_PRIVATE).getBoolean("autoLoadWebChapters", true)
+
+    /** A web book's narration waits at its end for the next chapter, which is fetched when needed. */
+    private fun prepareGrowth(bookSource: BookSegmentSource, target: Book) {
+        bookSource.growing = target.chapters.lastOrNull()?.nextUrl != null && autoLoadsChapters()
+        bookSource.onExhausted = { handler.post { book?.let { prefetchNextWebChapter(it, force = true) } } }
+    }
+
+    /**
+     * In the last chapter of a web book the next chapter is fetched in the background, so narration
+     * goes on without a stop; the player waits for it if the text runs out first ([force]).
+     */
+    private fun prefetchNextWebChapter(target: Book, chapter: Int = Int.MAX_VALUE, force: Boolean = false) {
+        if (fetchingChapter || (!force && chapter < target.chapters.lastIndex)) return
+        val growingSource = source ?: return
+        val nextUrl = target.chapters.last().nextUrl
+        if (nextUrl == null || !autoLoadsChapters()) {
+            growingSource.growing = false
+            return
+        }
+        fetchingChapter = true
+        scope.launch {
+            var more = false
+            try {
+                val fetched = WebChapterImporter.importChapter(nextUrl).toBookChapter()
+                // The reader may have stored this chapter already; either way the library has it now.
+                val stored = withContext(Dispatchers.IO) { library.appendChapter(target.id, fetched) ?: library.get(target.id) }
+                val current = book
+                if (stored != null && current?.id == target.id && stored.chapters.size > current.chapters.size) {
+                    val added = stored.chapters.drop(current.chapters.size)
+                    book = current.copy(chapters = stored.chapters)
+                    if (source === growingSource) added.forEach(growingSource::append)
+                    NarrationController.bookUpdated(target.id)
+                    more = stored.chapters.last().nextUrl != null
+                }
+            } catch (error: Exception) {
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                Log.w(TAG, "Next web chapter failed", error)
+                if (book?.id == target.id) publish(state.copy(message = "Не удалось загрузить следующую главу: ${error.message ?: "нет сети"}"))
+            } finally {
+                fetchingChapter = false
+                growingSource.growing = more && autoLoadsChapters()
+                growingSource.onExhausted = { handler.post { book?.let { prefetchNextWebChapter(it, force = true) } } }
+            }
         }
     }
 
@@ -608,15 +860,28 @@ class NarrationService : Service(), NarrationPlayer.Listener {
         }
     }
 
+    /** The open book's cover for the lock screen and the notification; loaded once per book. */
+    private var artwork: Pair<String, android.graphics.Bitmap?>? = null
+
+    private fun coverFor(target: Book?): android.graphics.Bitmap? {
+        if (target == null) return null
+        artwork?.takeIf { it.first == target.id }?.let { return it.second }
+        val bitmap = runCatching { Covers.load(this, target.id, 512) }.getOrNull()
+        artwork = target.id to bitmap
+        return bitmap
+    }
+
     private fun updateSession() {
         val chapterTitle = state.chapterTitle?.takeIf { it.isNotBlank() }
-        mediaSession.setMetadata(
-            MediaMetadata.Builder()
-                .putString(MediaMetadata.METADATA_KEY_TITLE, chapterTitle ?: state.bookTitle ?: "Озвучка")
-                .putString(MediaMetadata.METADATA_KEY_ARTIST, state.bookTitle ?: "Озвучка")
-                .putString(MediaMetadata.METADATA_KEY_ALBUM, book?.author?.takeIf { it.isNotBlank() } ?: "Озвучка")
-                .build()
-        )
+        val metadata = MediaMetadata.Builder()
+            .putString(MediaMetadata.METADATA_KEY_TITLE, chapterTitle ?: state.bookTitle ?: "Озвучка")
+            .putString(MediaMetadata.METADATA_KEY_ARTIST, state.bookTitle ?: "Озвучка")
+            .putString(MediaMetadata.METADATA_KEY_ALBUM, book?.author?.takeIf { it.isNotBlank() } ?: "Озвучка")
+        coverFor(book)?.let { cover ->
+            metadata.putBitmap(MediaMetadata.METADATA_KEY_ART, cover)
+            metadata.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, cover)
+        }
+        mediaSession.setMetadata(metadata.build())
         val playbackState = when (state.phase) {
             NarrationPhase.PREPARING -> PlaybackState.STATE_BUFFERING
             NarrationPhase.PLAYING -> PlaybackState.STATE_PLAYING
@@ -658,7 +923,9 @@ class NarrationService : Service(), NarrationPlayer.Listener {
             NarrationPhase.PAUSED -> "На паузе"
             else -> state.bookTitle ?: "Читает нейроголос"
         }
-        return Notification.Builder(this, CHANNEL_ID)
+        val builder = Notification.Builder(this, CHANNEL_ID)
+        coverFor(book)?.let(builder::setLargeIcon)
+        return builder
             .setSmallIcon(R.drawable.ic_stat_narration)
             .setContentTitle(state.chapterTitle?.takeIf { it.isNotBlank() } ?: state.bookTitle ?: "Озвучка")
             .setContentText(status)
@@ -667,6 +934,7 @@ class NarrationService : Service(), NarrationPlayer.Listener {
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setOngoing(!paused)
             .setDeleteIntent(actionIntent(ACTION_STOP, 5))
+            .addAction(action(android.R.drawable.ic_media_rew, "−15 с", ACTION_REWIND, 6))
             .addAction(action(android.R.drawable.ic_media_previous, "Назад", ACTION_PREVIOUS, 1))
             .addAction(
                 if (paused) {
@@ -680,7 +948,7 @@ class NarrationService : Service(), NarrationPlayer.Listener {
             .setStyle(
                 Notification.MediaStyle()
                     .setMediaSession(mediaSession.sessionToken)
-                    .setShowActionsInCompactView(0, 1, 2)
+                    .setShowActionsInCompactView(0, 2, 3)
             )
             .build()
     }
@@ -709,6 +977,7 @@ class NarrationService : Service(), NarrationPlayer.Listener {
         const val ACTION_PREVIOUS = "com.ozvuchka.app.action.NARRATION_PREVIOUS"
         const val ACTION_SLEEP = "com.ozvuchka.app.action.NARRATION_SLEEP"
         const val ACTION_SETTINGS = "com.ozvuchka.app.action.NARRATION_SETTINGS"
+        const val ACTION_REWIND = "com.ozvuchka.app.action.NARRATION_REWIND"
         const val EXTRA_MINUTES = "com.ozvuchka.app.extra.MINUTES"
         private const val CHANNEL_ID = "ozvuchka_narration"
         private const val NOTIFICATION_ID = 1042

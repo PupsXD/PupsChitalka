@@ -44,6 +44,33 @@ class LibraryStore(context: Context) {
         writePosition(book.id, book.currentChapter, book.chapterProgress, book.lastOpenedAt)
     }
 
+    /**
+     * Adds a chapter at the end unless a chapter from the same page is already there. The saved
+     * reading position is left alone. Returns the updated book, or null when nothing changed.
+     */
+    @Synchronized
+    fun appendChapter(id: String, chapter: Chapter): Book? {
+        val book = get(id) ?: return null
+        if (chapter.sourceUrl != null && book.chapters.any { it.sourceUrl == chapter.sourceUrl }) return null
+        val updated = book.copy(chapters = book.chapters + chapter)
+        val target = AtomicFile(fileFor(id))
+        val stream = target.startWrite()
+        try {
+            stream.write(encode(updated).toString().toByteArray(Charsets.UTF_8))
+            target.finishWrite(stream)
+        } catch (error: Exception) {
+            target.failWrite(stream)
+            throw error
+        }
+        return updated
+    }
+
+    /** The book opened most recently, from the small positions file only. */
+    fun lastOpenedId(): String? = positions.all.entries
+        .mapNotNull { (id, value) -> (value as? String)?.split('|')?.getOrNull(2)?.toLongOrNull()?.let { id to it } }
+        .filter { (id, _) -> runCatching { fileFor(id).exists() }.getOrDefault(false) }
+        .maxByOrNull { it.second }?.first
+
     /** Cheap and safe to call often, from any thread. */
     fun updatePosition(id: String, chapterIndex: Int, chapterProgress: Float, openedAt: Long? = null) {
         val previousOpened = positions.getString(id, null)?.split('|')?.getOrNull(2)?.toLongOrNull() ?: 0L

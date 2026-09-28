@@ -17,27 +17,54 @@ internal interface SegmentSource {
 
     /** The paragraph (or title) text a segment was cut from, for exact splitting. */
     fun sourceText(segment: SpeechSegment): String
+
+    /** True while more text may still arrive (the next web chapter is loading). */
+    fun mayGrow(): Boolean = false
 }
 
 /** Segments of a book from one chapter onward; later chapters are split only when reached. */
 internal class BookSegmentSource(
-    private val chapters: List<Chapter>,
+    chapters: List<Chapter>,
     private val firstChapter: Int,
+    /** Cut characters' lines into their own segments, for dialogue voices. */
+    val splitDialogue: Boolean = false,
 ) : SegmentSource {
+    private val chapters = ArrayList(chapters)
     private val segments = ArrayList<SpeechSegment>()
     private var nextChapter = firstChapter
+
+    /** True while a next web chapter may still come; narration waits at the end instead of stopping. */
+    @Volatile var growing = false
+
+    /** Called once when narration runs out of text while [growing]: time to fetch the next chapter. */
+    @Volatile var onExhausted: (() -> Unit)? = null
+
+    override fun mayGrow(): Boolean {
+        if (growing) onExhausted?.let { callback ->
+            onExhausted = null
+            callback()
+        }
+        return growing
+    }
+
+    /** A chapter fetched while narration runs; it is split when narration reaches it. */
+    @Synchronized
+    fun append(chapter: Chapter) {
+        chapters += chapter
+    }
 
     @Synchronized
     override fun get(index: Int): SpeechSegment? {
         if (index < 0) return null
         while (index >= segments.size && nextChapter < chapters.size) {
             val chapter = chapters[nextChapter]
-            segments += chapterSegments(nextChapter, chapter.title, chapter.paragraphs)
+            segments += chapterSegments(nextChapter, chapter.title, chapter.paragraphs, splitDialogue = splitDialogue)
             nextChapter++
         }
         return segments.getOrNull(index)
     }
 
+    @Synchronized
     override fun sourceText(segment: SpeechSegment): String {
         val chapter = chapters.getOrNull(segment.chapter) ?: return segment.text
         return if (segment.paragraph < 0) chapter.title.trim() else chapter.paragraphs.getOrNull(segment.paragraph) ?: segment.text
@@ -129,10 +156,21 @@ internal class NarrationPlayer(
     val secondsIntoCurrent: Float get() = session?.secondsIntoCurrent() ?: 0f
 
     @Synchronized
-    fun play(source: SegmentSource, startIndex: Int, settings: SpeechSettings, stopAtChapterEnd: Boolean = false) {
+    fun play(
+        source: SegmentSource,
+        startIndex: Int,
+        settings: SpeechSettings,
+        stopAtChapterEnd: Boolean = false,
+        pronunciations: PronunciationDictionary = PronunciationDictionary.EMPTY,
+    ) {
         session?.cancel()
-        session = Session(source = source, startIndex = startIndex, settings = settings, stopAtChapterEnd = stopAtChapterEnd)
-            .also { it.start() }
+        session = Session(
+            source = source,
+            startIndex = startIndex,
+            settings = settings,
+            stopAtChapterEnd = stopAtChapterEnd,
+            pronunciations = pronunciations,
+        ).also { it.start() }
     }
 
     @Synchronized
@@ -155,22 +193,32 @@ internal class NarrationPlayer(
         session?.stopAtChapterEnd = enabled
     }
 
+    @Volatile private var fadeGeneration = 0
+
     /** Lowers the volume over [durationMs], then pauses: used by the sleep timer. */
     fun fadeOutAndPause(durationMs: Long, onPaused: (session: Long) -> Unit) {
         val current = session ?: return
+        val generation = ++fadeGeneration
         thread(name = "narration-fade", isDaemon = true) {
             val steps = 30
             for (step in steps downTo 0) {
-                if (current.cancelled || current.paused) break
+                if (current.cancelled || current.paused || generation != fadeGeneration) break
                 current.setVolume(step.toFloat() / steps)
                 Thread.sleep(durationMs / steps)
             }
+            if (generation != fadeGeneration) return@thread
             if (!current.cancelled) {
                 current.pause()
                 current.setVolume(1f)
                 onPaused(current.id)
             }
         }
+    }
+
+    /** Stops a sleep fade and brings the volume back: the listener shook the phone for more time. */
+    fun cancelFade() {
+        fadeGeneration++
+        session?.setVolume(1f)
     }
 
     private class Rendered(
@@ -190,6 +238,7 @@ internal class NarrationPlayer(
         private val startIndex: Int,
         private val settings: SpeechSettings,
         @Volatile var stopAtChapterEnd: Boolean,
+        private val pronunciations: PronunciationDictionary,
     ) {
         @Volatile var cancelled = false
         @Volatile var paused = false
@@ -260,12 +309,19 @@ internal class NarrationPlayer(
                     splitForQuickStart(first, source.sourceText(first)).forEach { pending.addLast(startIndex to it) }
                     nextIndex = startIndex + 1
                 }
+                fun nextFromSource(): Pair<Int, SpeechSegment>? {
+                    while (!cancelled) {
+                        source.get(nextIndex)?.let { return (nextIndex to it).also { nextIndex++ } }
+                        // The next web chapter is on its way: wait for it rather than end the book.
+                        if (!source.mayGrow()) return null
+                        Thread.sleep(300)
+                    }
+                    return null
+                }
                 while (!cancelled) {
                     waitForRoom()
                     if (cancelled) break
-                    val (index, segment) = pending.removeFirstOrNull()
-                        ?: source.get(nextIndex)?.let { (nextIndex to it).also { nextIndex++ } }
-                        ?: break
+                    val (index, segment) = pending.removeFirstOrNull() ?: nextFromSource() ?: break
                     val rendered = render(index, segment) ?: continue
                     synchronized(lock) {
                         queue.addLast(rendered)
@@ -297,13 +353,17 @@ internal class NarrationPlayer(
         }
 
         private fun render(index: Int, segment: SpeechSegment): Rendered? {
-            var voice = settings.voiceFor(segment.language)
+            var voice = settings.voiceFor(segment.language, segment.role)
             // Kokoro speaks only English; anything else goes to the Russian voice.
-            if (voice.engine == VoiceEngine.KOKORO && segment.language != "en") voice = settings.russianVoice
+            if (voice.engine == VoiceEngine.KOKORO && segment.language != "en") {
+                voice = settings.voiceFor("ru", segment.role).takeIf { it.engine != VoiceEngine.KOKORO } ?: settings.russianVoice
+            }
             if (voice.engine == VoiceEngine.KOKORO && !hub.isAvailable(voice, settings)) voice = fallbackVoice(voice) ?: voice
             if (voice in brokenVoices) voice = fallbackVoice(voice) ?: voice
+            // The reader's pronunciations go in the form each engine understands.
+            var rewrite = pronunciations.apply(segment.text, stressStyleFor(voice))
             val audio = try {
-                hub.synthesize(voice, segment.text, segment.language, settings)
+                hub.synthesize(voice, rewrite.text, segment.language, settings)
             } catch (error: Exception) {
                 if (cancelled) return null
                 val fallback = fallbackVoice(voice) ?: throw error
@@ -311,7 +371,8 @@ internal class NarrationPlayer(
                 brokenVoices += voice
                 listener.onVoiceFallback(id, "${error.message ?: "Голос недоступен"}. Читает встроенный голос.")
                 voice = fallback
-                hub.synthesize(fallback, segment.text, segment.language, settings)
+                rewrite = pronunciations.apply(segment.text, stressStyleFor(fallback))
+                hub.synthesize(fallback, rewrite.text, segment.language, settings)
             }
             if (cancelled) return null
             val rate = synchronized(lock) {
@@ -327,7 +388,11 @@ internal class NarrationPlayer(
                 AudioShaping.applyGain(samples, gain)
                 AudioShaping.fadeEdges(samples, rate)
                 if (audio.words.isNotEmpty()) {
-                    words = placeWords(audio.words, bounds.first, audio.sampleRate, rate, samples.size, source.sourceText(segment), segment)
+                    val spokenWords = audio.words.map { word ->
+                        val range = rewrite.originalRange(word.start, word.end)
+                        WordMark(word.frame, range.first, range.last + 1)
+                    }
+                    words = placeWords(spokenWords, bounds.first, audio.sampleRate, rate, samples.size, source.sourceText(segment), segment)
                 }
             }
             val pauseMs = segment.pause.baseMs * settings.pauseScale / settings.speed.coerceAtLeast(0.5f)

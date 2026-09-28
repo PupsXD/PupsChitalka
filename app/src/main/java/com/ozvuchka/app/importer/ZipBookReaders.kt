@@ -242,3 +242,52 @@ internal fun readDocx(file: File, fallbackTitle: String): Book = SafeZip(file).u
     }
     Book(title = title, author = author, format = "DOCX", chapters = result, warnings = warnings)
 }
+
+private const val MAX_COVER_BYTES = 12_000_000
+
+/**
+ * The cover image of an EPUB: the manifest item marked «cover-image» (EPUB 3), the one named by
+ * `<meta name="cover">` (EPUB 2), or an image whose id or file name says «cover».
+ */
+internal fun readEpubCover(file: File): ByteArray? = SafeZip(file).use { zip ->
+    val container = parseXml(zip.read("META-INF/container.xml", 1_000_000))
+    val packagePath = container.firstByLocalName("rootfile")?.attr("full-path")?.takeIf(String::isNotBlank) ?: return null
+    val href = epubCoverHref(parseXml(zip.read(packagePath, 5_000_000))) ?: return null
+    val path = resolveZipPath(packagePath, href)?.takeIf(zip::has) ?: return null
+    zip.read(path, MAX_COVER_BYTES)
+}
+
+internal fun epubCoverHref(packageDocument: Document): String? {
+    val items = packageDocument.firstByLocalName("manifest")?.childrenByLocalName("item").orEmpty()
+    fun isImage(item: Element) = item.attr("media-type").startsWith("image/")
+    items.firstOrNull { item -> isImage(item) && item.attr("properties").split(Regex("\\s+")).contains("cover-image") }
+        ?.let { return it.attr("href") }
+    val coverId = packageDocument.firstByLocalName("metadata")?.childrenByLocalName("meta")
+        ?.firstOrNull { it.attr("name").equals("cover", ignoreCase = true) }?.attr("content")
+    items.firstOrNull { isImage(it) && coverId != null && it.attr("id") == coverId }?.let { return it.attr("href") }
+    return items.firstOrNull { item ->
+        isImage(item) && (item.attr("id").contains("cover", ignoreCase = true) || item.attr("href").contains("cover", ignoreCase = true))
+    }?.attr("href")
+}
+
+/** The FB2 cover: `<coverpage><image l:href="#id"/>` points at a base64 `<binary>`. */
+internal fun readFb2Cover(file: File): ByteArray? {
+    val bytes = if (file.inputStream().use { it.read() } == 'P'.code) {
+        SafeZip(file).use { zip ->
+            val name = zip.names().firstOrNull { it.endsWith(".fb2", ignoreCase = true) } ?: return null
+            zip.read(name, 40_000_000)
+        }
+    } else {
+        if (file.length() > 40_000_000) return null
+        file.readBytes()
+    }
+    return fb2Cover(parseXml(bytes))
+}
+
+internal fun fb2Cover(document: Document): ByteArray? {
+    val image = document.firstByLocalName("coverpage")?.getAllElements()?.firstOrNull { it.localName() == "image" } ?: return null
+    val reference = image.attributes().firstOrNull { it.key.endsWith("href", ignoreCase = true) }?.value
+        ?.removePrefix("#")?.takeIf(String::isNotBlank) ?: return null
+    val binary = document.getAllElements().firstOrNull { it.localName() == "binary" && it.attr("id") == reference } ?: return null
+    return runCatching { java.util.Base64.getMimeDecoder().decode(binary.text()) }.getOrNull()?.takeIf { it.size in 64..MAX_COVER_BYTES }
+}

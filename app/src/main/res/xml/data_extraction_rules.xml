@@ -2,12 +2,16 @@
 <data-extraction-rules>
     <cloud-backup>
         <include domain="file" path="library/" />
+        <include domain="file" path="annotations/" />
         <include domain="sharedpref" path="reader.xml" />
         <include domain="sharedpref" path="reading_positions.xml" />
+        <include domain="sharedpref" path="pronunciations.xml" />
     </cloud-backup>
     <device-transfer>
         <include domain="file" path="library/" />
+        <include domain="file" path="annotations/" />
         <include domain="sharedpref" path="reader.xml" />
         <include domain="sharedpref" path="reading_positions.xml" />
+        <include domain="sharedpref" path="pronunciations.xml" />
     </device-transfer>
 </data-extraction-rules>

@@ -1,8 +1,11 @@
 package com.ozvuchka.app.ui
 
+import androidx.compose.ui.text.ExperimentalTextApi
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontVariation
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.intl.LocaleList
 import androidx.compose.ui.text.style.Hyphens
@@ -13,6 +16,7 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.ozvuchka.app.R
 
 /** A page remembers the start of its text so a new font size can restore the reading position. */
 internal data class ReaderPage(
@@ -42,13 +46,33 @@ internal data class ReaderBlock(
 
 internal const val SCENE_BREAK = "✦  ✦  ✦"
 
+// Literata is one variable font; each weight is an instance of its «wght» axis.
+@OptIn(ExperimentalTextApi::class)
+private val literata = FontFamily(
+    listOf(400 to FontWeight.Normal, 500 to FontWeight.Medium, 600 to FontWeight.SemiBold, 700 to FontWeight.Bold).map { (weight, fontWeight) ->
+        Font(R.font.literata, fontWeight, variationSettings = FontVariation.Settings(FontVariation.weight(weight)))
+    },
+)
+private val ptSerif = FontFamily(
+    Font(R.font.pt_serif_regular, FontWeight.Normal),
+    Font(R.font.pt_serif_bold, FontWeight.Bold),
+)
+
+internal val ReaderFont.family: FontFamily
+    get() = when (this) {
+        ReaderFont.LITERATA -> literata
+        ReaderFont.PT_SERIF -> ptSerif
+        ReaderFont.SERIF -> FontFamily.Serif
+        ReaderFont.SANS -> FontFamily.SansSerif
+    }
+
 internal fun readerBodyStyle(
     typography: ReaderTypography,
     language: String,
     paragraphStart: Boolean = true,
     centered: Boolean = false,
 ): TextStyle = TextStyle(
-    fontFamily = if (typography.useSerif) FontFamily.Serif else FontFamily.SansSerif,
+    fontFamily = typography.font.family,
     fontSize = typography.fontSizeSp.sp,
     lineHeight = (typography.fontSizeSp * typography.lineSpacing).sp,
     textAlign = when {

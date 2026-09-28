@@ -1,5 +1,6 @@
 package com.ozvuchka.app.ui
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -56,6 +57,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -64,6 +66,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -71,6 +77,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.ozvuchka.app.data.Covers
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 private val libraryFilters = listOf("Все", "Читаю", "Прочитано", "PDF", "EPUB", "FB2", "WEB")
 
@@ -83,6 +92,16 @@ private val coverPalettes = listOf(
 )
 
 private fun coverPalette(id: String) = coverPalettes[id.hashCode().ushr(1) % coverPalettes.size]
+
+/** The book's own cover when the import found one; null keeps the generated art. */
+@Composable
+private fun rememberCover(bookId: String): ImageBitmap? {
+    val context = LocalContext.current
+    val cover by produceState<ImageBitmap?>(null, bookId) {
+        value = withContext(Dispatchers.IO) { runCatching { Covers.load(context, bookId, 600)?.asImageBitmap() }.getOrNull() }
+    }
+    return cover
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -351,12 +370,17 @@ private fun ContinueCard(book: LibraryBookUi, narrating: Boolean, onOpen: () -> 
                     .background(Brush.linearGradient(coverPalette(book.id))),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(
-                    book.title.take(1).uppercase(),
-                    fontFamily = FontFamily.Serif,
-                    fontSize = 44.sp,
-                    color = Color.White.copy(alpha = 0.85f),
-                )
+                val cover = rememberCover(book.id)
+                if (cover != null) {
+                    Image(cover, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                } else {
+                    Text(
+                        book.title.take(1).uppercase(),
+                        fontFamily = FontFamily.Serif,
+                        fontSize = 44.sp,
+                        color = Color.White.copy(alpha = 0.85f),
+                    )
+                }
             }
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
@@ -429,11 +453,15 @@ private fun LibraryBookCard(
                     .clip(RoundedCornerShape(16.dp))
                     .background(Brush.linearGradient(palette)),
             ) {
-                Box(
+                val cover = rememberCover(book.id)
+                if (cover != null) {
+                    Image(cover, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                }
+                if (cover == null) Box(
                     modifier = Modifier.align(Alignment.BottomEnd).size(135.dp)
                         .background(Color.White.copy(alpha = 0.08f), CircleShape),
                 )
-                Text(
+                if (cover == null) Text(
                     book.title.take(1).uppercase(),
                     modifier = Modifier.align(Alignment.BottomEnd).padding(end = 16.dp),
                     fontFamily = FontFamily.Serif,
@@ -441,7 +469,7 @@ private fun LibraryBookCard(
                     lineHeight = 112.sp,
                     color = Color.White.copy(alpha = 0.17f),
                 )
-                Column(
+                if (cover == null) Column(
                     modifier = Modifier.fillMaxSize().padding(15.dp),
                     verticalArrangement = Arrangement.SpaceBetween,
                 ) {

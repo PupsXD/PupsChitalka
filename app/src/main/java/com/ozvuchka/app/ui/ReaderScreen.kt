@@ -8,13 +8,18 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitVerticalTouchSlopOrCancellation
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.verticalDrag
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -35,6 +40,7 @@ import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
@@ -47,10 +53,15 @@ import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.filled.NavigateBefore
 import androidx.compose.material.icons.automirrored.filled.NavigateNext
 import androidx.compose.material.icons.filled.Bedtime
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.BookmarkBorder
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RecordVoiceOver
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Stop
@@ -69,10 +80,12 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -92,12 +105,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
@@ -107,9 +124,11 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -117,6 +136,8 @@ import kotlinx.coroutines.flow.Flow
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import com.ozvuchka.app.data.Annotation
+import com.ozvuchka.app.data.AnnotationKind
 
 internal fun speechSpeedLabel(speed: Float): String =
     String.format(Locale.US, "%.2f", speed).trimEnd('0').trimEnd('.') + "×"
@@ -133,6 +154,8 @@ internal data class ReadingColors(
     val highlight: Color,
     /** Drawn over [highlight] on the word being spoken. */
     val wordHighlight: Color,
+    /** The reader's own highlights. */
+    val marker: Color,
 )
 
 internal fun ReaderTheme.colors(): ReadingColors = when (this) {
@@ -145,6 +168,7 @@ internal fun ReaderTheme.colors(): ReadingColors = when (this) {
         line = Color(0xFFE9E5EC),
         highlight = Color(0x3351449A),
         wordHighlight = Color(0x4751449A),
+        marker = Color(0x66FFD54F),
     )
     ReaderTheme.SEPIA -> ReadingColors(
         background = Color(0xFFF5EFE3),
@@ -155,6 +179,7 @@ internal fun ReaderTheme.colors(): ReadingColors = when (this) {
         line = Color(0xFFE5D9C8),
         highlight = Color(0x33A0663F),
         wordHighlight = Color(0x47A0663F),
+        marker = Color(0x66F2B84B),
     )
     ReaderTheme.DARK -> ReadingColors(
         background = Color(0xFF171821),
@@ -165,6 +190,7 @@ internal fun ReaderTheme.colors(): ReadingColors = when (this) {
         line = Color(0xFF393845),
         highlight = Color(0x40CCBFFF),
         wordHighlight = Color(0x4DCCBFFF),
+        marker = Color(0x4DFFD54F),
     )
     ReaderTheme.BLACK -> ReadingColors(
         background = Color(0xFF000000),
@@ -175,6 +201,7 @@ internal fun ReaderTheme.colors(): ReadingColors = when (this) {
         line = Color(0xFF26262B),
         highlight = Color(0x4DB9A7FF),
         wordHighlight = Color(0x59B9A7FF),
+        marker = Color(0x4DFFC94D),
     )
 }
 
@@ -199,11 +226,26 @@ fun ReaderScreen(
 ) {
     val colors = state.theme.colors()
     val currentActions by rememberUpdatedState(actions)
+    val currentState by rememberUpdatedState(state)
     var chromeVisible by rememberSaveable { mutableStateOf(true) }
     LaunchedEffect(chromeVisible) { currentActions.chromeVisibilityChanged(chromeVisible) }
     DisposableEffect(Unit) { onDispose { currentActions.chromeVisibilityChanged(true) } }
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var showContents by rememberSaveable { mutableStateOf(false) }
+    var showSearch by rememberSaveable { mutableStateOf(false) }
+    var showPronunciations by rememberSaveable { mutableStateOf(false) }
+    var wordTarget by remember { mutableStateOf<WordTarget?>(null) }
+    var pronunciationTarget by remember { mutableStateOf<WordTarget?>(null) }
+    var noteTarget by remember { mutableStateOf<Pair<Annotation, Boolean>?>(null) }
+    var searchMark by remember { mutableStateOf<ReaderJump?>(null) }
+    // Where the visible page starts, and the share of the chapter it covers, for the bookmark button.
+    var pageStart by remember { mutableStateOf(0 to 0) }
+    var pageSpan by remember { mutableStateOf(0f to 0f) }
+    val chapterBookmarks = state.annotations.filter { it.kind == AnnotationKind.BOOKMARK && it.chapter == state.chapterIndex }
+    fun positionOf(paragraph: Int, offset: Int): Float {
+        val length = state.paragraphs.getOrNull(paragraph)?.length?.coerceAtLeast(1) ?: 1
+        return (paragraph + offset.toFloat() / length) / state.paragraphs.size.coerceAtLeast(1)
+    }
     var pageAnchor by remember(state.bookId, state.chapterIndex) { mutableFloatStateOf(state.chapterProgress) }
     var pageIndex by remember { mutableIntStateOf(0) }
     var pageCount by remember { mutableIntStateOf(1) }
@@ -217,7 +259,20 @@ fun ReaderScreen(
     val margin = state.typography.margin.horizontalDp.dp
     val footerHeight = 22.dp
 
-    Box(modifier.fillMaxSize().background(colors.background)) {
+    // Brightness follows a swipe up or down the left third of the page; below the screen's minimum a
+    // veil dims further.
+    var brightnessLevel by remember { mutableFloatStateOf(state.brightness ?: state.systemBrightness) }
+    var brightnessShownUntil by remember { mutableLongStateOf(0L) }
+    val veil = (-(state.brightness ?: 0f)).coerceIn(0f, 0.6f)
+    Box(
+        modifier.fillMaxSize().background(colors.background).drawWithContent {
+            drawContent()
+            if (state.warmLight > 0f) {
+                drawRect(Color(0xFFFF8A3D), alpha = state.warmLight * 0.35f, blendMode = BlendMode.Multiply)
+            }
+            if (veil > 0f) drawRect(Color.Black, alpha = veil)
+        },
+    ) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val horizontalInset = safeInsets.calculateLeftPadding(layoutDirection) + safeInsets.calculateRightPadding(layoutDirection)
             val widthPx = with(density) { (maxWidth - horizontalInset - margin * 2).roundToPx() }
@@ -244,6 +299,8 @@ fun ReaderScreen(
                     pageIndex = pager.currentPage
                     val start = page.startsAt
                     pageAnchor = start
+                    pageStart = page.blocks.firstOrNull()?.let { it.paragraphIndex to it.startOffset } ?: (0 to 0)
+                    pageSpan = start to (pages.getOrNull(pager.currentPage + 1)?.startsAt ?: 1.0001f)
                     charactersLeft = pages.drop(pager.currentPage).sumOf { it.characters }
                     currentActions.readingProgressChanged((state.chapterIndex + start) / state.chapterCount.coerceAtLeast(1))
                 }
@@ -258,6 +315,22 @@ fun ReaderScreen(
                         val target = (pager.currentPage + direction).coerceIn(0, pages.lastIndex)
                         if (target != pager.currentPage) pager.animateScrollToPage(target)
                         else if (direction > 0 && state.chapterIndex + 1 < state.chapterCount) currentActions.changeChapter(state.chapterIndex + 1)
+                    }
+                }
+                // A bookmark, quote or search hit asked to show a place in this chapter.
+                LaunchedEffect(state.jump?.id) {
+                    val jump = state.jump ?: return@LaunchedEffect
+                    if (jump.chapter != state.chapterIndex) return@LaunchedEffect
+                    val position = positionOf(jump.paragraph, jump.offset)
+                    val target = pages.indexOfLast { it.startsAt <= position + 0.0001f }.coerceAtLeast(0)
+                    browsingUntil = System.currentTimeMillis() + 8_000
+                    pager.scrollToPage(target)
+                    searchMark = jump.takeIf { it.mark != null }
+                }
+                LaunchedEffect(searchMark) {
+                    if (searchMark != null) {
+                        kotlinx.coroutines.delay(5_000)
+                        searchMark = null
                     }
                 }
                 // Follow narration, unless the reader is leafing through pages right now.
@@ -288,6 +361,24 @@ fun ReaderScreen(
                             }
                             .background(colors.background)
                             .onGloballyPositioned { geometry.container = it }
+                            .pointerInput(Unit) {
+                                awaitEachGesture {
+                                    val down = awaitFirstDown(requireUnconsumed = false)
+                                    if (down.position.x > size.width * BrightnessZone) return@awaitEachGesture
+                                    val drag = awaitVerticalTouchSlopOrCancellation(down.id) { change, _ -> change.consume() }
+                                        ?: return@awaitEachGesture
+                                    brightnessLevel = currentState.brightness ?: currentState.systemBrightness
+                                    verticalDrag(drag.id) { change ->
+                                        val delta = -change.positionChange().y / size.height * 1.6f
+                                        brightnessLevel = (brightnessLevel + delta).coerceIn(-0.6f, 1f)
+                                        brightnessShownUntil = System.currentTimeMillis() + 1_200
+                                        currentActions.brightnessChanged(brightnessLevel, final = false)
+                                        change.consume()
+                                    }
+                                    currentActions.brightnessChanged(brightnessLevel, final = true)
+                                }
+                            }
+                            .swipesAreNotTaps()
                             .pointerInput(index, pages) {
                                 detectTapGestures(
                                     onTap = { offset ->
@@ -316,7 +407,7 @@ fun ReaderScreen(
                                         }
                                         if (hit != null) {
                                             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                            currentActions.readFrom(hit.first, hit.second)
+                                            wordTarget = wordTargetAt(state.paragraphs, hit.first, hit.second, state.language)
                                         }
                                     },
                                 )
@@ -335,6 +426,7 @@ fun ReaderScreen(
                                         block = block,
                                         state = state,
                                         colors = colors,
+                                        searchMark = searchMark,
                                         onLayout = { coordinates, layout ->
                                             val info = geometry.blocks.getOrPut(blockIndex) { BlockGeometry() }
                                             if (coordinates != null) info.coordinates = coordinates
@@ -347,6 +439,15 @@ fun ReaderScreen(
                                 }
                             }
                             Box(Modifier.fillMaxWidth().height(footerHeight), contentAlignment = Alignment.BottomCenter) {
+                                val until = pages.getOrNull(index + 1)?.startsAt ?: 1.0001f
+                                if (chapterBookmarks.any { positionOf(it.paragraph, it.start) in page.startsAt..until && positionOf(it.paragraph, it.start) < until }) {
+                                    Icon(
+                                        Icons.Filled.Bookmark,
+                                        contentDescription = "Закладка на странице",
+                                        tint = colors.accent,
+                                        modifier = Modifier.align(Alignment.BottomEnd).size(16.dp),
+                                    )
+                                }
                                 Text(
                                     "${index + 1} / ${pages.size}",
                                     color = colors.muted.copy(alpha = 0.8f),
@@ -366,12 +467,34 @@ fun ReaderScreen(
             enter = slideInVertically { -it } + fadeIn(),
             exit = slideOutVertically { -it } + fadeOut(),
         ) {
+            val pageBookmarks = chapterBookmarks.filter { positionOf(it.paragraph, it.start).let { at -> at >= pageSpan.first && at < pageSpan.second } }
             ReaderTopBar(
                 state = state,
                 colors = colors,
+                bookmarked = pageBookmarks.isNotEmpty(),
                 onBack = actions::back,
                 onContents = { showContents = true },
                 onSettings = { showSettings = true },
+                onSearch = { showSearch = true },
+                onBookmark = {
+                    if (pageBookmarks.isNotEmpty()) {
+                        pageBookmarks.forEach { actions.removeAnnotation(it.id) }
+                    } else {
+                        val (paragraph, offset) = pageStart
+                        val text = state.paragraphs.getOrNull(paragraph).orEmpty()
+                        val excerpt = text.substring(offset.coerceIn(0, text.length)).take(120).trim()
+                        actions.addAnnotation(
+                            Annotation(
+                                kind = AnnotationKind.BOOKMARK,
+                                chapter = state.chapterIndex,
+                                paragraph = paragraph,
+                                start = offset,
+                                end = (offset + excerpt.length).coerceAtMost(text.length),
+                                text = excerpt,
+                            ),
+                        )
+                    }
+                },
             )
         }
         AnimatedVisibility(
@@ -399,12 +522,38 @@ fun ReaderScreen(
         ) {
             MiniNarrationButton(state.narration, colors, onClick = actions::playPause)
         }
+        var showBrightness by remember { mutableStateOf(false) }
+        LaunchedEffect(brightnessShownUntil) {
+            showBrightness = brightnessShownUntil > System.currentTimeMillis()
+            if (showBrightness) {
+                kotlinx.coroutines.delay(brightnessShownUntil - System.currentTimeMillis())
+                showBrightness = false
+            }
+        }
+        AnimatedVisibility(
+            visible = showBrightness,
+            modifier = Modifier.align(Alignment.CenterStart).padding(start = 28.dp),
+            enter = fadeIn(),
+            exit = fadeOut(),
+        ) {
+            Text(
+                if (brightnessLevel >= 0f) "☀ ${(brightnessLevel * 100).roundToInt()}%" else "☾ ниже минимума · ${(-brightnessLevel * 100 / 0.6f).roundToInt()}%",
+                color = colors.text,
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.clip(RoundedCornerShape(12.dp)).background(colors.surface.copy(alpha = 0.92f))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            )
+        }
     }
 
     if (showSettings) {
         ReaderSettingsSheet(
             state = state,
             onDismiss = { showSettings = false },
+            onPronunciations = {
+                showSettings = false
+                showPronunciations = true
+            },
             actions = actions,
         )
     }
@@ -416,11 +565,54 @@ fun ReaderScreen(
                 showContents = false
                 actions.changeChapter(chapter)
             },
+            onJump = { annotation ->
+                showContents = false
+                actions.jumpTo(annotation.chapter, annotation.paragraph, annotation.start)
+            },
+            onRemove = { actions.removeAnnotation(it.id) },
+            onEditNote = { annotation ->
+                showContents = false
+                noteTarget = annotation to false
+            },
         )
     }
+    if (showSearch) SearchSheet(state, actions) { showSearch = false }
+    if (showPronunciations) PronunciationListSheet(actions) { showPronunciations = false }
+    wordTarget?.let { target ->
+        WordActionsSheet(
+            target = target,
+            state = state,
+            actions = actions,
+            onPronunciation = { pronunciationTarget = target },
+            onNote = { annotation, isNew -> noteTarget = annotation to isNew },
+            onDismiss = { wordTarget = null },
+        )
+    }
+    pronunciationTarget?.let { target -> PronunciationDialog(target, state.language, actions) { pronunciationTarget = null } }
+    noteTarget?.let { (annotation, isNew) -> NoteDialog(annotation, isNew, actions) { noteTarget = null } }
 }
 
 private val PageVerticalPadding = 18.dp
+
+/** Share of the page width, from the left, where a vertical swipe sets the brightness. */
+private const val BrightnessZone = 1f / 3
+
+/**
+ * A tap is a touch that stays in place. Once the finger travels past the touch slop the gesture is
+ * marked consumed, after the pager and the brightness swipe have seen it, so the page's taps and long
+ * presses ignore it: a vertical swipe never turns the page or toggles the controls.
+ */
+private fun Modifier.swipesAreNotTaps() = pointerInput(Unit) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        var moved = false
+        do {
+            val change = awaitPointerEvent(PointerEventPass.Final).changes.firstOrNull { it.id == down.id } ?: break
+            if ((change.position - down.position).getDistance() > viewConfiguration.touchSlop) moved = true
+            if (moved) change.consume()
+        } while (change.pressed)
+    }
+}
 
 // System bar sizes that do not change when the bars hide, so showing the reader chrome never
 // resizes it mid-animation.
@@ -456,6 +648,7 @@ private fun PageBlock(
     block: ReaderBlock,
     state: ReaderUiState,
     colors: ReadingColors,
+    searchMark: ReaderJump?,
     onLayout: (LayoutCoordinates?, TextLayoutResult?) -> Unit,
 ) {
     val sceneBreak = block.text == SCENE_BREAK
@@ -472,13 +665,32 @@ private fun PageBlock(
     val wordEnd = if (narration.paragraphIndex == block.paragraphIndex && narration.wordOffset >= 0) {
         (narration.wordOffset + narration.wordLength - block.startOffset).coerceIn(0, block.visibleLength)
     } else 0
+    fun local(offset: Int) = (offset - block.startOffset).coerceIn(0, block.visibleLength)
     val marked = buildAnnotatedString {
         append(block.text)
+        state.annotations.forEach { annotation ->
+            if (annotation.kind != AnnotationKind.HIGHLIGHT || annotation.chapter != state.chapterIndex ||
+                annotation.paragraph != block.paragraphIndex
+            ) return@forEach
+            val from = local(annotation.start)
+            val to = local(annotation.end)
+            if (to > from) {
+                // A dotted line hints that the highlight carries a note.
+                val decoration = if (annotation.note.isNotBlank()) TextDecoration.Underline else null
+                addStyle(SpanStyle(background = colors.marker, textDecoration = decoration), from, to)
+            }
+        }
         if (highlightEnd > highlightStart) {
             addStyle(SpanStyle(background = colors.highlight), highlightStart, highlightEnd)
         }
         if (wordEnd > wordStart) {
             addStyle(SpanStyle(background = colors.wordHighlight), wordStart, wordEnd)
+        }
+        val mark = searchMark?.mark
+        if (mark != null && searchMark.chapter == state.chapterIndex && searchMark.paragraph == block.paragraphIndex) {
+            val from = local(mark.first)
+            val to = local(mark.last + 1)
+            if (to > from) addStyle(SpanStyle(background = colors.wordHighlight, fontWeight = FontWeight.SemiBold), from, to)
         }
     }
     Text(
@@ -517,9 +729,12 @@ private fun MiniNarrationButton(narration: ReaderNarrationUi, colors: ReadingCol
 private fun ReaderTopBar(
     state: ReaderUiState,
     colors: ReadingColors,
+    bookmarked: Boolean,
     onBack: () -> Unit,
     onContents: () -> Unit,
     onSettings: () -> Unit,
+    onSearch: () -> Unit,
+    onBookmark: () -> Unit,
 ) {
     Surface(color = colors.surface, shadowElevation = 3.dp) {
         // Padding for the status bar whether or not it is shown: the bar slides in over this band,
@@ -547,6 +762,16 @@ private fun ReaderTopBar(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
+                }
+                IconButton(onClick = onBookmark) {
+                    Icon(
+                        if (bookmarked) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
+                        contentDescription = if (bookmarked) "Убрать закладку" else "Закладка на этой странице",
+                        tint = colors.accent,
+                    )
+                }
+                IconButton(onClick = onSearch) {
+                    Icon(Icons.Filled.Search, contentDescription = "Поиск по книге", tint = colors.accent)
                 }
                 IconButton(onClick = onContents) {
                     Icon(Icons.AutoMirrored.Filled.List, contentDescription = "Оглавление", tint = colors.accent)
@@ -809,41 +1034,110 @@ private fun NarrationControls(state: ReaderUiState, colors: ReadingColors, actio
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ContentsSheet(state: ReaderUiState, onDismiss: () -> Unit, onSelect: (Int) -> Unit) {
+private fun ContentsSheet(
+    state: ReaderUiState,
+    onDismiss: () -> Unit,
+    onSelect: (Int) -> Unit,
+    onJump: (Annotation) -> Unit,
+    onRemove: (Annotation) -> Unit,
+    onEditNote: (Annotation) -> Unit,
+) {
+    var tab by rememberSaveable { mutableIntStateOf(0) }
+    val ordered = state.annotations.sortedWith(compareBy({ it.chapter }, { it.paragraph }, { it.start }))
+    val bookmarks = ordered.filter { it.kind == AnnotationKind.BOOKMARK }
+    val quotes = ordered.filter { it.kind == AnnotationKind.HIGHLIGHT }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
-        Text(
-            "Оглавление",
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(start = 24.dp, end = 24.dp, bottom = 8.dp),
-        )
-        val listState = rememberLazyListState(initialFirstVisibleItemIndex = (state.chapterIndex - 2).coerceAtLeast(0))
-        LazyColumn(state = listState, contentPadding = PaddingValues(bottom = 32.dp)) {
-            itemsIndexed(state.chapterTitles) { index, title ->
-                val current = index == state.chapterIndex
-                Row(
-                    modifier = Modifier.fillMaxWidth()
-                        .clickable { onSelect(index) }
-                        .background(if (current) MaterialTheme.colorScheme.primary.copy(alpha = 0.1f) else Color.Transparent)
-                        .padding(horizontal = 24.dp, vertical = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
+        PrimaryTabRow(selectedTabIndex = tab) {
+            listOf("Главы", "Закладки · ${bookmarks.size}", "Цитаты · ${quotes.size}").forEachIndexed { index, title ->
+                Tab(selected = tab == index, onClick = { tab = index }, text = { Text(title, maxLines = 1) })
+            }
+        }
+        when (tab) {
+            0 -> {
+                val listState = rememberLazyListState(initialFirstVisibleItemIndex = (state.chapterIndex - 2).coerceAtLeast(0))
+                LazyColumn(state = listState, contentPadding = PaddingValues(bottom = 32.dp)) {
+                    itemsIndexed(state.chapterTitles) { index, title ->
+                        val current = index == state.chapterIndex
+                        Row(
+                            modifier = Modifier.fillMaxWidth()
+                                .clickable { onSelect(index) }
+                                .background(if (current) MaterialTheme.colorScheme.primary.copy(alpha = 0.1f) else Color.Transparent)
+                                .padding(horizontal = 24.dp, vertical = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                "${index + 1}",
+                                modifier = Modifier.width(42.dp),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.labelLarge,
+                            )
+                            Text(
+                                title.ifBlank { "Глава ${index + 1}" },
+                                modifier = Modifier.weight(1f),
+                                fontWeight = if (current) FontWeight.SemiBold else FontWeight.Normal,
+                                color = if (current) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            if (index < state.chapterIndex) {
+                                Text("✓", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+            }
+            else -> {
+                val items = if (tab == 1) bookmarks else quotes
+                if (items.isEmpty()) {
                     Text(
-                        "${index + 1}",
-                        modifier = Modifier.width(42.dp),
+                        if (tab == 1) {
+                            "Закладка ставится значком вверху страницы или долгим нажатием на фразу."
+                        } else {
+                            "Выделите фразу долгим нажатием — она появится здесь, можно добавить заметку."
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.padding(24.dp),
                     )
-                    Text(
-                        title.ifBlank { "Глава ${index + 1}" },
-                        modifier = Modifier.weight(1f),
-                        fontWeight = if (current) FontWeight.SemiBold else FontWeight.Normal,
-                        color = if (current) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    if (index < state.chapterIndex) {
-                        Text("✓", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                LazyColumn(contentPadding = PaddingValues(bottom = 32.dp)) {
+                    items(items, key = { it.id }) { annotation ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().clickable { onJump(annotation) }.padding(start = 24.dp, end = 8.dp, top = 12.dp, bottom = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    state.chapterTitles.getOrNull(annotation.chapter)?.ifBlank { null } ?: "Глава ${annotation.chapter + 1}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    if (annotation.kind == AnnotationKind.HIGHLIGHT) "«${annotation.text}»" else annotation.text,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    maxLines = 4,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                if (annotation.note.isNotBlank()) {
+                                    Text(
+                                        annotation.note,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontStyle = FontStyle.Italic,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                            if (annotation.kind == AnnotationKind.HIGHLIGHT) {
+                                IconButton(onClick = { onEditNote(annotation) }) {
+                                    Icon(Icons.Filled.EditNote, contentDescription = "Заметка")
+                                }
+                            }
+                            IconButton(onClick = { onRemove(annotation) }) {
+                                Icon(Icons.Filled.Delete, contentDescription = "Удалить")
+                            }
+                        }
                     }
                 }
             }
@@ -856,6 +1150,7 @@ private fun ContentsSheet(state: ReaderUiState, onDismiss: () -> Unit, onSelect:
 private fun ReaderSettingsSheet(
     state: ReaderUiState,
     onDismiss: () -> Unit,
+    onPronunciations: () -> Unit,
     actions: ReaderActions,
 ) {
     val typography = state.typography
@@ -878,6 +1173,26 @@ private fun ReaderSettingsSheet(
                 }
             }
             item {
+                SettingsLabel(if (state.warmLight > 0f) "Тёплый свет · ${(state.warmLight * 100).roundToInt()}%" else "Тёплый свет · выключен")
+                Slider(
+                    value = state.warmLight,
+                    onValueChange = { actions.warmLightChanged((it * 20).roundToInt() / 20f) },
+                    valueRange = 0f..1f,
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        if (state.brightness == null) "Яркость: как в системе. Проведите вверх или вниз по левой трети страницы"
+                        else "Яркость своя: ${if (state.brightness >= 0f) "${(state.brightness * 100).roundToInt()}%" else "ниже минимума"}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (state.brightness != null) {
+                        TextButton(onClick = { actions.brightnessChanged(null, final = true) }) { Text("Как в системе") }
+                    }
+                }
+            }
+            item {
                 SettingsLabel("Размер текста · ${typography.fontSizeSp.roundToInt()}")
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("А", fontSize = 15.sp)
@@ -893,17 +1208,14 @@ private fun ReaderSettingsSheet(
             }
             item {
                 SettingsLabel("Шрифт")
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    FilterChip(
-                        selected = typography.useSerif,
-                        onClick = { actions.typographyChanged(typography.copy(useSerif = true)) },
-                        label = { Text("С засечками", fontFamily = FontFamily.Serif) },
-                    )
-                    FilterChip(
-                        selected = !typography.useSerif,
-                        onClick = { actions.typographyChanged(typography.copy(useSerif = false)) },
-                        label = { Text("Без засечек", fontFamily = FontFamily.SansSerif) },
-                    )
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    ReaderFont.entries.forEach { font ->
+                        FilterChip(
+                            selected = typography.font == font,
+                            onClick = { actions.typographyChanged(typography.copy(font = font)) },
+                            label = { Text(font.label, fontFamily = font.family) },
+                        )
+                    }
                 }
             }
             item {
@@ -949,6 +1261,14 @@ private fun ReaderSettingsSheet(
                     checked = state.highlightWords,
                     onChange = actions::highlightWordsChanged,
                 )
+                if (state.isWebBook) {
+                    ToggleRow(
+                        title = "Подгружать главы с сайта",
+                        subtitle = "Следующая глава загружается заранее — чтение и озвучка идут без остановки",
+                        checked = state.autoLoadWebChapters,
+                        onChange = actions::autoLoadWebChaptersChanged,
+                    )
+                }
                 ToggleRow(
                     title = "Листать кнопками громкости",
                     subtitle = "Во время озвучки кнопки меняют громкость",
@@ -961,6 +1281,22 @@ private fun ReaderSettingsSheet(
                     checked = state.keepScreenOn,
                     onChange = actions::keepScreenOnChanged,
                 )
+            }
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth().clickable(onClick = onPronunciations).padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Произношение слов", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            if (state.pronunciationCount == 0) "Долгое нажатие на слово → «Как произносить»" else "Сохранено: ${state.pronunciationCount}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Icon(Icons.AutoMirrored.Filled.NavigateNext, contentDescription = null)
+                }
             }
             item {
                 SettingsLabel("Экспорт книги")

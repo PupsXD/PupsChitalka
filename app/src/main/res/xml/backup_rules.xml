@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
     <include domain="file" path="library/" />
+    <include domain="file" path="annotations/" />
     <include domain="sharedpref" path="reader.xml" />
     <include domain="sharedpref" path="reading_positions.xml" />
+    <include domain="sharedpref" path="pronunciations.xml" />
 </full-backup-content>

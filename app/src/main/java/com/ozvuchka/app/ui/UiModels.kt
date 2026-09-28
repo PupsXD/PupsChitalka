@@ -1,5 +1,8 @@
 package com.ozvuchka.app.ui
 
+import com.ozvuchka.app.data.Annotation
+import com.ozvuchka.app.data.SearchHit
+import com.ozvuchka.app.speech.DialogueVoices
 import com.ozvuchka.app.speech.ModelInstallState
 import com.ozvuchka.app.speech.SpeechModel
 import com.ozvuchka.app.speech.SystemEngineInfo
@@ -36,9 +39,17 @@ enum class ReaderMargin(val horizontalDp: Int, val label: String) {
     WIDE(40, "Широкие"),
 }
 
+/** Reading typefaces: Literata and PT Serif ship with the app, the other two are the phone's own. */
+enum class ReaderFont(val label: String) {
+    LITERATA("Literata"),
+    PT_SERIF("PT Serif"),
+    SERIF("С засечками"),
+    SANS("Без засечек"),
+}
+
 data class ReaderTypography(
     val fontSizeSp: Float = 19f,
-    val useSerif: Boolean = true,
+    val font: ReaderFont = ReaderFont.LITERATA,
     val lineSpacing: Float = 1.55f,
     val justify: Boolean = true,
     val paragraphIndent: Boolean = true,
@@ -84,7 +95,31 @@ data class ReaderUiState(
     val volumeKeysTurnPages: Boolean = true,
     val keepScreenOn: Boolean = true,
     val highlightWords: Boolean = true,
+    /** Bookmarks and highlights of the whole book. */
+    val annotations: List<Annotation> = emptyList(),
+    /** A request to show a place in this chapter: a bookmark, a quote or a search hit. */
+    val jump: ReaderJump? = null,
+    /** How many pronunciations the reader saved (for this book and for all books). */
+    val pronunciationCount: Int = 0,
+    /** Chapters come from a website, one by one. */
+    val isWebBook: Boolean = false,
+    val autoLoadWebChapters: Boolean = true,
+    /**
+     * The reader's own brightness: 0..1 sets the screen, below 0 dims further with a veil (night
+     * reading); null follows the system.
+     */
+    val brightness: Float? = null,
+    /** The system brightness as a starting point for the swipe. */
+    val systemBrightness: Float = 0.5f,
+    /** Warm light over the page, from 0 (off) to 1. */
+    val warmLight: Float = 0f,
 )
+
+/** Shows [paragraph] at [offset]; [mark] briefly highlights a search hit. A new [id] repeats a jump. */
+data class ReaderJump(val id: Long, val chapter: Int, val paragraph: Int, val offset: Int, val mark: IntRange? = null)
+
+/** A saved pronunciation as listed in the reader: «замок» → «за́мок», for this book or every book. */
+data class PronunciationUi(val word: String, val spoken: String, val everyBook: Boolean)
 
 interface ReaderActions {
     fun back()
@@ -105,8 +140,31 @@ interface ReaderActions {
     fun volumeKeysChanged(enabled: Boolean)
     fun keepScreenOnChanged(enabled: Boolean)
     fun highlightWordsChanged(enabled: Boolean)
+    fun autoLoadWebChaptersChanged(enabled: Boolean)
+    /** [final] is false while the finger still moves; only the final value is saved. */
+    fun brightnessChanged(level: Float?, final: Boolean)
+    fun warmLightChanged(level: Float)
     fun export(format: String)
     fun importNextChapter()
+
+    // Pronunciation fixes.
+    fun pronunciationOf(word: String): PronunciationUi?
+    fun pronunciations(): List<PronunciationUi>
+    fun savePronunciation(word: String, spoken: String, everyBook: Boolean)
+    fun removePronunciation(word: String)
+    fun previewPronunciation(word: String, spoken: String, sentence: String, language: String)
+
+    // Bookmarks, highlights and notes.
+    fun addAnnotation(annotation: Annotation)
+    fun updateAnnotation(annotation: Annotation)
+    fun removeAnnotation(id: String)
+    fun jumpTo(chapter: Int, paragraph: Int, offset: Int, mark: IntRange? = null)
+    suspend fun search(query: String): List<SearchHit>
+
+    // Text actions.
+    fun translate(text: String)
+    fun copyText(text: String)
+    fun shareQuote(text: String)
 }
 
 /** Voice settings for both languages, downloads and installed system engines. */
@@ -129,6 +187,10 @@ data class VoiceSettingsUi(
     val loadingEngines: Set<String> = emptySet(),
     /** The voice whose sample is playing now. */
     val previewVoice: VoiceChoice? = null,
+    val russianDialogue: DialogueVoices = DialogueVoices(),
+    val englishDialogue: DialogueVoices = DialogueVoices(),
+    /** The sample dialogue is playing. */
+    val dialoguePreviewing: Boolean = false,
 ) {
     val ruVoiceInstalled: Boolean get() = systemEngines.any { it.packageName == VoiceCatalog.RUVOICE_PACKAGE }
 }
@@ -150,4 +212,6 @@ interface VoiceSettingsActions {
     fun openEngineApp(enginePackage: String)
     fun loadEngineVoices(enginePackage: String)
     fun refreshSystemVoices()
+    fun setDialogue(language: String, dialogue: DialogueVoices)
+    fun previewDialogue(language: String)
 }
