@@ -112,6 +112,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.LayoutCoordinates
@@ -258,7 +259,8 @@ fun ReaderScreen(
     val margin = state.typography.margin.horizontalDp.dp
     val footerHeight = 22.dp
 
-    // Brightness follows a swipe along the left edge; below the screen's minimum a veil dims further.
+    // Brightness follows a swipe up or down the left third of the page; below the screen's minimum a
+    // veil dims further.
     var brightnessLevel by remember { mutableFloatStateOf(state.brightness ?: state.systemBrightness) }
     var brightnessShownUntil by remember { mutableLongStateOf(0L) }
     val veil = (-(state.brightness ?: 0f)).coerceIn(0f, 0.6f)
@@ -362,7 +364,7 @@ fun ReaderScreen(
                             .pointerInput(Unit) {
                                 awaitEachGesture {
                                     val down = awaitFirstDown(requireUnconsumed = false)
-                                    if (down.position.x > size.width * 0.12f) return@awaitEachGesture
+                                    if (down.position.x > size.width * BrightnessZone) return@awaitEachGesture
                                     val drag = awaitVerticalTouchSlopOrCancellation(down.id) { change, _ -> change.consume() }
                                         ?: return@awaitEachGesture
                                     brightnessLevel = currentState.brightness ?: currentState.systemBrightness
@@ -376,6 +378,7 @@ fun ReaderScreen(
                                     currentActions.brightnessChanged(brightnessLevel, final = true)
                                 }
                             }
+                            .swipesAreNotTaps()
                             .pointerInput(index, pages) {
                                 detectTapGestures(
                                     onTap = { offset ->
@@ -590,6 +593,26 @@ fun ReaderScreen(
 }
 
 private val PageVerticalPadding = 18.dp
+
+/** Share of the page width, from the left, where a vertical swipe sets the brightness. */
+private const val BrightnessZone = 1f / 3
+
+/**
+ * A tap is a touch that stays in place. Once the finger travels past the touch slop the gesture is
+ * marked consumed, after the pager and the brightness swipe have seen it, so the page's taps and long
+ * presses ignore it: a vertical swipe never turns the page or toggles the controls.
+ */
+private fun Modifier.swipesAreNotTaps() = pointerInput(Unit) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        var moved = false
+        do {
+            val change = awaitPointerEvent(PointerEventPass.Final).changes.firstOrNull { it.id == down.id } ?: break
+            if ((change.position - down.position).getDistance() > viewConfiguration.touchSlop) moved = true
+            if (moved) change.consume()
+        } while (change.pressed)
+    }
+}
 
 // System bar sizes that do not change when the bars hide, so showing the reader chrome never
 // resizes it mid-animation.
@@ -1158,7 +1181,7 @@ private fun ReaderSettingsSheet(
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        if (state.brightness == null) "Яркость: как в системе. Проведите вверх-вниз у левого края страницы"
+                        if (state.brightness == null) "Яркость: как в системе. Проведите вверх или вниз по левой трети страницы"
                         else "Яркость своя: ${if (state.brightness >= 0f) "${(state.brightness * 100).roundToInt()}%" else "ниже минимума"}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
