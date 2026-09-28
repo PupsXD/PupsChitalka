@@ -63,6 +63,10 @@ import com.ozvuchka.app.importer.WebChapter
 import com.ozvuchka.app.importer.WebChapterImporter
 import com.ozvuchka.app.importer.imageExtension
 import com.ozvuchka.app.importer.toBookChapter
+import com.ozvuchka.app.speech.BookCasts
+import com.ozvuchka.app.speech.CastMember
+import com.ozvuchka.app.speech.CastStore
+import com.ozvuchka.app.speech.DialogueMode
 import com.ozvuchka.app.speech.DialogueVoices
 import com.ozvuchka.app.speech.ModelInstallState
 import com.ozvuchka.app.speech.NarrationController
@@ -74,6 +78,7 @@ import com.ozvuchka.app.speech.RuVoiceInstallState
 import com.ozvuchka.app.speech.RuVoiceInstaller
 import com.ozvuchka.app.speech.SpeechModel
 import com.ozvuchka.app.speech.SpeechModels
+import com.ozvuchka.app.speech.SpeechRole
 import com.ozvuchka.app.speech.SpeechSettings
 import com.ozvuchka.app.speech.SynthesisHub
 import com.ozvuchka.app.speech.SystemEngineInfo
@@ -130,6 +135,9 @@ class MainActivity : ComponentActivity() {
     private var annotations by mutableStateOf<List<Annotation>>(emptyList())
     private var readerJump by mutableStateOf<ReaderJump?>(null)
     private var pronunciationCount by mutableIntStateOf(0)
+    /** Characters of the open book with the voices of their lines; null until they are found. */
+    private var castMembers by mutableStateOf<List<CastMember>?>(null)
+    private var castRequest = 0
     private var speech by mutableStateOf<SpeechSettings?>(null)
     private var modelStates by mutableStateOf<Map<SpeechModel, ModelInstallState>>(emptyMap())
     private var installedModels by mutableStateOf<Set<SpeechModel>>(emptySet())
@@ -548,6 +556,8 @@ class MainActivity : ComponentActivity() {
             brightness = readerBrightness,
             systemBrightness = systemBrightness(),
             warmLight = warmLight,
+            characters = castMembers,
+            voicesByGender = settings?.dialogueFor(language)?.mode == DialogueMode.BY_GENDER,
         )
     }
 
@@ -719,6 +729,21 @@ class MainActivity : ComponentActivity() {
             NarrationController.preview(this@MainActivity, voice, language, sentence, PronunciationDictionary(mapOf(word to spoken)))
         }
 
+        override fun loadCharacters() = this@MainActivity.loadCharacters()
+
+        override fun setCharacterGender(name: String, gender: SpeechRole?) {
+            val book = currentBook ?: return
+            CastStore.choose(this@MainActivity, book.id, name, gender)
+            loadCharacters()
+            // Narration in progress voices the character's lines anew from the current sentence.
+            NarrationController.settingsChanged(this@MainActivity)
+            notice = when (gender) {
+                SpeechRole.MALE -> "$name: реплики читает мужской голос"
+                SpeechRole.FEMALE -> "$name: реплики читает женский голос"
+                else -> "$name: голос снова подсказывает текст"
+            }
+        }
+
         override fun addAnnotation(annotation: Annotation) = changeAnnotations { it + annotation }
 
         override fun updateAnnotation(annotation: Annotation) =
@@ -836,8 +861,11 @@ class MainActivity : ComponentActivity() {
 
         override fun loadEngineVoices(enginePackage: String) = this@MainActivity.loadEngineVoices(enginePackage)
 
-        override fun setDialogue(language: String, dialogue: DialogueVoices) =
+        override fun setDialogue(language: String, dialogue: DialogueVoices) {
             updateSpeech { if (language == "en") it.copy(englishDialogue = dialogue) else it.copy(russianDialogue = dialogue) }
+            // The open book's characters are needed now: find them before narration asks.
+            if (dialogue.mode != DialogueMode.OFF && castMembers == null) loadCharacters()
+        }
 
         override fun previewDialogue(language: String) {
             previewVoice = null
@@ -899,10 +927,24 @@ class MainActivity : ComponentActivity() {
         prefetchWebChapter(opened)
         annotations = emptyList()
         readerJump = null
+        castMembers = null
         refreshPronunciationCount()
         lifecycleScope.launch {
             val loaded = withContext(Dispatchers.IO) { runCatching { annotationStore.list(opened.id) }.getOrDefault(emptyList()) }
             if (currentBook?.id == opened.id) annotations = loaded
+        }
+        // Reading the book for names takes a moment: do it now, so narration starts at once.
+        if (speech?.splitsDialogue == true) loadCharacters()
+    }
+
+    /** Finds the open book's characters in the background; the list refreshes with the reader's choices. */
+    private fun loadCharacters() {
+        val book = currentBook ?: return
+        val request = ++castRequest
+        lifecycleScope.launch {
+            val members = withContext(Dispatchers.Default) { BookCasts.forBook(this@MainActivity, book).members() }
+            // Only the latest request counts: a choice made meanwhile is already in it.
+            if (request == castRequest && currentBook?.id == book.id) castMembers = members
         }
     }
 
@@ -1138,6 +1180,8 @@ class MainActivity : ComponentActivity() {
                     runCatching { Covers.delete(this@MainActivity, id) }
                     runCatching { BookImages.delete(this@MainActivity, id) }
                     PronunciationStore.clearBook(this@MainActivity, id)
+                    CastStore.clearBook(this@MainActivity, id)
+                    BookCasts.forget(id)
                     library.delete(id)
                 }
                 if (removed) {

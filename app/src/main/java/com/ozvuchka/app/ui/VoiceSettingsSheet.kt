@@ -52,10 +52,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.ozvuchka.app.speech.DialogueMode
-import com.ozvuchka.app.speech.DialogueVoices
 import com.ozvuchka.app.speech.ModelInstallState
+import com.ozvuchka.app.speech.RoleVoice
 import com.ozvuchka.app.speech.SpeechModel
 import com.ozvuchka.app.speech.SpeechRole
+import com.ozvuchka.app.speech.SystemVoiceInfo
 import com.ozvuchka.app.speech.SystemVoices
 import com.ozvuchka.app.speech.VoiceCatalog
 import com.ozvuchka.app.speech.VoiceChoice
@@ -406,9 +407,11 @@ private fun SystemEngineVoices(state: VoiceSettingsUi, language: String, selecte
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         val engineDefault = VoiceChoice(VoiceEngine.SYSTEM, enginePackage = enginePackage)
+        val heardDefault = engineDefaultVoice(state, language, enginePackage)
         VoiceRow(
             title = "По умолчанию",
-            subtitle = "Голос, выбранный в настройках движка",
+            subtitle = heardDefault?.let { "Сейчас это ${SystemVoices.describe(it)} — голос из настроек движка" }
+                ?: "Голос, выбранный в настройках движка",
             selected = selected == engineDefault,
             enabled = true,
             previewing = state.previewVoice == engineDefault,
@@ -545,14 +548,11 @@ private fun ModelStatusRow(model: SpeechModel, suggested: Boolean, state: VoiceS
     }
 }
 
-/** A voice that can read characters' lines, with its gender when the voice's name tells it. */
-private class CharacterVoice(val choice: VoiceChoice, val title: String, val gender: SpeechRole?)
-
 /** Character voices come from the narrator's engine, so a scene never jumps between synthesizers. */
-private fun characterVoices(state: VoiceSettingsUi, language: String, narrator: VoiceChoice): List<CharacterVoice> =
+private fun characterVoices(state: VoiceSettingsUi, language: String, narrator: VoiceChoice): List<RoleVoice> =
     when (narrator.engine) {
         VoiceEngine.SUPERTONIC -> VoiceCatalog.supertonic.map {
-            CharacterVoice(it.choice, it.title, if (it.choice.speaker < 5) SpeechRole.FEMALE else SpeechRole.MALE)
+            RoleVoice(it.choice, it.title, if (it.choice.speaker < 5) SpeechRole.FEMALE else SpeechRole.MALE)
         }
         VoiceEngine.KOKORO -> VoiceCatalog.kokoro.map {
             val gender = when {
@@ -560,12 +560,12 @@ private fun characterVoices(state: VoiceSettingsUi, language: String, narrator: 
                 "male" in it.description -> SpeechRole.MALE
                 else -> null
             }
-            CharacterVoice(it.choice, "${it.title} · ${it.description}", gender)
+            RoleVoice(it.choice, "${it.title} · ${it.description}", gender)
         }
         VoiceEngine.SYSTEM -> state.engineVoices[narrator.enginePackage].orEmpty()
             .filter { it.language == language && !it.notInstalled }
             .map { voice ->
-                CharacterVoice(
+                RoleVoice(
                     VoiceChoice(VoiceEngine.SYSTEM, enginePackage = voice.enginePackage, voiceName = voice.name),
                     SystemVoices.describe(voice),
                     SystemVoices.gender(voice),
@@ -573,30 +573,28 @@ private fun characterVoices(state: VoiceSettingsUi, language: String, narrator: 
             }
     }
 
-/** Fills in voices for a newly chosen mode, keeping earlier picks that still belong to the engine. */
-private fun withDefaults(dialogue: DialogueVoices, options: List<CharacterVoice>, narrator: VoiceChoice): DialogueVoices {
-    fun valid(choice: VoiceChoice?) = choice?.takeIf { picked -> options.any { it.choice == picked } }
-    fun pick(gender: SpeechRole?) = options.firstOrNull { (gender == null || it.gender == gender) && it.choice != narrator }?.choice
-    return when (dialogue.mode) {
-        DialogueMode.OFF -> dialogue
-        DialogueMode.SINGLE -> dialogue.copy(single = valid(dialogue.single) ?: pick(null))
-        DialogueMode.BY_GENDER -> dialogue.copy(
-            male = valid(dialogue.male) ?: pick(SpeechRole.MALE),
-            female = valid(dialogue.female) ?: pick(SpeechRole.FEMALE),
-        )
-    }
+/** The voice behind an engine's «По умолчанию», when the engine said which it is. */
+private fun engineDefaultVoice(state: VoiceSettingsUi, language: String, enginePackage: String): SystemVoiceInfo? =
+    state.engineVoices[enginePackage].orEmpty().firstOrNull { it.language == language && it.isDefault }
+
+/** The voice narration really sounds with: for «По умолчанию», the engine's own default voice. */
+private fun heardNarrator(state: VoiceSettingsUi, language: String, narrator: VoiceChoice): VoiceChoice {
+    if (narrator.engine != VoiceEngine.SYSTEM || narrator.voiceName.isNotEmpty()) return narrator
+    return engineDefaultVoice(state, language, narrator.enginePackage)?.let { narrator.copy(voiceName = it.name) } ?: narrator
 }
 
 @Composable
 private fun DialogueVoicesCard(state: VoiceSettingsUi, language: String, narrator: VoiceChoice, actions: VoiceSettingsActions) {
     val dialogue = if (language == "en") state.englishDialogue else state.russianDialogue
     val options = characterVoices(state, language, narrator)
+    val heard = heardNarrator(state, language, narrator)
     var picking by remember { mutableStateOf<String?>(null) }
     SheetCard {
         CardTitle("Голоса персонажей", null)
         Text(
-            "Реплики в диалогах читает другой голос. По полу — мужские и женские роли разными голосами: " +
-                "кто говорит, понятно по словам автора («сказала она», «ответил он»).",
+            "Реплики в диалогах звучат не голосом рассказчика. «Свой голос» — все реплики одним голосом. " +
+                "«По ролям» — рассказчик, мужчины и женщины тремя разными голосами: кто говорит, понятно по словам " +
+                "автора («сказала она», «Лань Чжань кивнул»), по самой реплике («я пришла») и по ходу разговора.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -604,29 +602,70 @@ private fun DialogueVoicesCard(state: VoiceSettingsUi, language: String, narrato
             listOf(
                 DialogueMode.OFF to "Как рассказчик",
                 DialogueMode.SINGLE to "Свой голос",
-                DialogueMode.BY_GENDER to "По полу",
+                DialogueMode.BY_GENDER to "По ролям",
             ).forEach { (mode, title) ->
                 FilterChip(
                     selected = dialogue.mode == mode,
-                    onClick = { actions.setDialogue(language, withDefaults(dialogue.copy(mode = mode), options, narrator)) },
+                    onClick = { actions.setDialogue(language, dialogue.copy(mode = mode).withDistinctVoices(options, heard)) },
                     label = { Text(title) },
                 )
             }
         }
         fun titleOf(choice: VoiceChoice?): String =
             choice?.let { picked -> options.firstOrNull { it.choice == picked }?.title } ?: "как у рассказчика"
+        val narratorTitle = when {
+            narrator.engine == VoiceEngine.SYSTEM && narrator.voiceName.isEmpty() ->
+                engineDefaultVoice(state, language, narrator.enginePackage)?.let { "По умолчанию · ${SystemVoices.describe(it)}" }
+                    ?: "По умолчанию"
+            else -> titleOf(narrator)
+        }
+        if (dialogue.mode != DialogueMode.OFF) {
+            VoicePickRow("Рассказчик", narratorTitle) { picking = "narrator" }
+        }
         when (dialogue.mode) {
             DialogueMode.OFF -> Unit
             DialogueMode.SINGLE -> VoicePickRow("Голос реплик", titleOf(dialogue.single)) { picking = "single" }
             DialogueMode.BY_GENDER -> {
                 VoicePickRow("Мужские роли", titleOf(dialogue.male)) { picking = "male" }
                 VoicePickRow("Женские роли", titleOf(dialogue.female)) { picking = "female" }
-                Text(
-                    "Если автор не подсказал, кто говорит, реплику читает рассказчик.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
             }
+        }
+        val sameAsNarrator = dialogue.sameAsNarrator(heard)
+        if (dialogue.mode != DialogueMode.OFF && heard.engine == VoiceEngine.SYSTEM && heard.voiceName.isEmpty() && options.isNotEmpty()) {
+            // The engine did not say which voice «По умолчанию» is, so a role may secretly share it.
+            Text(
+                "Рассказчик читает голосом «По умолчанию» из настроек движка, и какой это голос, неизвестно — " +
+                    "он может совпасть с одной из ролей. Выберите рассказчику голос явно.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        if (sameAsNarrator.isNotEmpty() && options.isNotEmpty()) {
+            val who = when {
+                SpeechRole.MALE in sameAsNarrator && SpeechRole.FEMALE in sameAsNarrator -> "Мужские и женские роли звучат"
+                SpeechRole.MALE in sameAsNarrator -> "Мужские роли звучат"
+                SpeechRole.FEMALE in sameAsNarrator -> "Женские роли звучат"
+                else -> "Реплики звучат"
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "$who голосом рассказчика — переход к диалогу не будет слышен.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = { actions.setDialogue(language, dialogue.withDistinctVoices(options, heard)) }) {
+                    Text("Развести")
+                }
+            }
+        }
+        if (dialogue.mode == DialogueMode.BY_GENDER) {
+            Text(
+                "Если по тексту не понять, кто говорит, реплику читает рассказчик. Перепутанный пол персонажа " +
+                    "исправляется в читалке: долгое нажатие на имя или Тт → «Персонажи».",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
         if (dialogue.mode != DialogueMode.OFF) {
             if (options.isEmpty() && narrator.engine == VoiceEngine.SYSTEM) LoadingRow("Загружаем голоса движка…")
@@ -647,35 +686,64 @@ private fun DialogueVoicesCard(state: VoiceSettingsUi, language: String, narrato
     }
     picking?.let { slot ->
         val current = when (slot) {
+            "narrator" -> narrator
             "male" -> dialogue.male
             "female" -> dialogue.female
             else -> dialogue.single
         }
+        // The narrator may also stay with the engine's own default voice.
+        val pickable = if (slot == "narrator" && narrator.engine == VoiceEngine.SYSTEM) {
+            listOf(RoleVoice(VoiceChoice(VoiceEngine.SYSTEM, enginePackage = narrator.enginePackage), "По умолчанию", null)) + options
+        } else {
+            options
+        }
+        /** Where a voice is already heard, so the reader sees which choices would sound alike. */
+        fun usedBy(choice: VoiceChoice): String? = when {
+            slot != "narrator" && (choice == narrator || choice == heard) -> "у рассказчика"
+            slot != "male" && dialogue.mode == DialogueMode.BY_GENDER && choice == dialogue.male -> "у мужских ролей"
+            slot != "female" && dialogue.mode == DialogueMode.BY_GENDER && choice == dialogue.female -> "у женских ролей"
+            slot != "single" && dialogue.mode == DialogueMode.SINGLE && choice == dialogue.single -> "у реплик"
+            else -> null
+        }
         AlertDialog(
             onDismissRequest = { picking = null },
             confirmButton = { TextButton(onClick = { picking = null }) { Text("Готово") } },
-            title = { Text(if (slot == "male") "Мужские роли" else if (slot == "female") "Женские роли" else "Голос реплик") },
+            title = {
+                Text(
+                    when (slot) {
+                        "narrator" -> "Рассказчик"
+                        "male" -> "Мужские роли"
+                        "female" -> "Женские роли"
+                        else -> "Голос реплик"
+                    },
+                )
+            },
             text = {
                 LazyColumn(Modifier.height(360.dp)) {
-                    items(options.size) { index ->
-                        val option = options[index]
+                    items(pickable.size) { index ->
+                        val option = pickable[index]
+                        val gender = when (option.gender) {
+                            SpeechRole.MALE -> "мужской"
+                            SpeechRole.FEMALE -> "женский"
+                            else -> null
+                        }
                         VoiceRow(
                             title = option.title,
-                            subtitle = when (option.gender) {
-                                SpeechRole.MALE -> "мужской"
-                                SpeechRole.FEMALE -> "женский"
-                                else -> null
-                            },
+                            subtitle = listOfNotNull(gender, usedBy(option.choice)?.let { "уже $it" }).joinToString(" · ").ifEmpty { null },
                             selected = current == option.choice,
                             enabled = true,
                             previewing = state.previewVoice == option.choice,
                             onSelect = {
-                                val updated = when (slot) {
-                                    "male" -> dialogue.copy(male = option.choice)
-                                    "female" -> dialogue.copy(female = option.choice)
-                                    else -> dialogue.copy(single = option.choice)
+                                when (slot) {
+                                    "narrator" -> {
+                                        actions.selectVoice(language, option.choice)
+                                        // A new narrator should not take a character's voice: those move on.
+                                        actions.setDialogue(language, dialogue.withDistinctVoices(options, heardNarrator(state, language, option.choice)))
+                                    }
+                                    "male" -> actions.setDialogue(language, dialogue.copy(male = option.choice))
+                                    "female" -> actions.setDialogue(language, dialogue.copy(female = option.choice))
+                                    else -> actions.setDialogue(language, dialogue.copy(single = option.choice))
                                 }
-                                actions.setDialogue(language, updated)
                             },
                             onPreview = { actions.preview(language, option.choice) },
                             onStop = actions::stopPreview,

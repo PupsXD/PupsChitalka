@@ -3,10 +3,12 @@ package com.ozvuchka.app.ui
 import com.ozvuchka.app.data.Annotation
 import com.ozvuchka.app.data.ParagraphStyle
 import com.ozvuchka.app.data.SearchHit
+import com.ozvuchka.app.speech.CastMember
 import com.ozvuchka.app.speech.DialogueVoices
 import com.ozvuchka.app.speech.ModelInstallState
 import com.ozvuchka.app.speech.RuVoiceInstallState
 import com.ozvuchka.app.speech.SpeechModel
+import com.ozvuchka.app.speech.SpeechRole
 import com.ozvuchka.app.speech.SystemEngineInfo
 import com.ozvuchka.app.speech.SystemVoiceInfo
 import com.ozvuchka.app.speech.VoiceCatalog
@@ -128,6 +130,10 @@ data class ReaderUiState(
     val systemBrightness: Float = 0.5f,
     /** Warm light over the page, from 0 (off) to 1. */
     val warmLight: Float = 0f,
+    /** The book's characters and the voices of their lines; null until the book has been read through for names. */
+    val characters: List<CastMember>? = null,
+    /** Characters' lines are voiced by gender in the book's language, so the characters' genders matter. */
+    val voicesByGender: Boolean = false,
 )
 
 /** Shows [paragraph] at [offset]; [mark] briefly highlights a search hit. A new [id] repeats a jump. */
@@ -170,6 +176,12 @@ interface ReaderActions {
     fun savePronunciation(word: String, spoken: String, everyBook: Boolean)
     fun removePronunciation(word: String)
     fun previewPronunciation(word: String, spoken: String, sentence: String, language: String)
+
+    // Characters' voices.
+    /** Finds the book's characters, if that has not been done yet. */
+    fun loadCharacters()
+    /** Voices [name]'s lines as a man or a woman; null follows the text again. */
+    fun setCharacterGender(name: String, gender: SpeechRole?)
 
     // Bookmarks, highlights and notes.
     fun addAnnotation(annotation: Annotation)

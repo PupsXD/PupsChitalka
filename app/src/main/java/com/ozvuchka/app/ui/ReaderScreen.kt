@@ -157,6 +157,7 @@ import androidx.compose.ui.window.DialogProperties
 import com.ozvuchka.app.data.BookImages
 import com.ozvuchka.app.data.ParagraphKind
 import com.ozvuchka.app.data.ParagraphStyle
+import com.ozvuchka.app.speech.CastMember
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -256,6 +257,8 @@ fun ReaderScreen(
     var showContents by rememberSaveable { mutableStateOf(false) }
     var showSearch by rememberSaveable { mutableStateOf(false) }
     var showPronunciations by rememberSaveable { mutableStateOf(false) }
+    var showCharacters by rememberSaveable { mutableStateOf(false) }
+    var characterTarget by remember { mutableStateOf<CastMember?>(null) }
     var wordTarget by remember { mutableStateOf<WordTarget?>(null) }
     var pronunciationTarget by remember { mutableStateOf<WordTarget?>(null) }
     var noteTarget by remember { mutableStateOf<Pair<Annotation, Boolean>?>(null) }
@@ -667,6 +670,10 @@ fun ReaderScreen(
                 showSettings = false
                 showPronunciations = true
             },
+            onCharacters = {
+                showSettings = false
+                showCharacters = true
+            },
             actions = actions,
         )
     }
@@ -691,6 +698,12 @@ fun ReaderScreen(
     }
     if (showSearch) SearchSheet(state, actions) { showSearch = false }
     if (showPronunciations) PronunciationListSheet(actions) { showPronunciations = false }
+    if (showCharacters) CastSheet(state, actions, onPick = { characterTarget = it }) { showCharacters = false }
+    characterTarget?.let { member ->
+        // The list may have changed since the dialog opened: show the member as it is now.
+        val current = state.characters?.firstOrNull { it.name == member.name } ?: member
+        CharacterVoiceDialog(current, actions) { characterTarget = null }
+    }
     wordTarget?.let { target ->
         WordActionsSheet(
             target = target,
@@ -698,6 +711,7 @@ fun ReaderScreen(
             actions = actions,
             onPronunciation = { pronunciationTarget = target },
             onNote = { annotation, isNew -> noteTarget = annotation to isNew },
+            onCharacter = { characterTarget = it },
             onDismiss = { wordTarget = null },
         )
     }
@@ -1566,6 +1580,7 @@ private fun ReaderSettingsSheet(
     state: ReaderUiState,
     onDismiss: () -> Unit,
     onPronunciations: () -> Unit,
+    onCharacters: () -> Unit,
     actions: ReaderActions,
 ) {
     val typography = state.typography
@@ -1706,6 +1721,20 @@ private fun ReaderSettingsSheet(
                         Text("Произношение слов", style = MaterialTheme.typography.bodyLarge)
                         Text(
                             if (state.pronunciationCount == 0) "Долгое нажатие на слово → «Как произносить»" else "Сохранено: ${state.pronunciationCount}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Icon(Icons.AutoMirrored.Filled.NavigateNext, contentDescription = null)
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth().clickable(onClick = onCharacters).padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Персонажи", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "Кого читать мужским голосом, а кого женским",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

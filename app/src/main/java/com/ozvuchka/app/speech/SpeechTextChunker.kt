@@ -153,6 +153,8 @@ fun chapterSegments(
     splitDialogue: Boolean = false,
     /** Paragraphs after which to pause as after a title: headings. */
     headings: Set<Int> = emptySet(),
+    /** The book's characters, so a name in the author's words tells who speaks. */
+    cast: Cast = Cast.EMPTY,
 ): List<SpeechSegment> {
     val chapterLanguage = dominantLanguage(paragraphs)
     val result = mutableListOf<SpeechSegment>()
@@ -169,7 +171,7 @@ fun chapterSegments(
             pause = SegmentPause.TITLE,
         )
     }
-    val speakers = SpeakerTracker()
+    val speakers = SpeakerTracker(cast)
     paragraphs.forEachIndexed { paragraphIndex, paragraph ->
         if (paragraph.isBlank()) return@forEachIndexed
         val paragraphLanguage = detectSpeechLanguage(paragraph, chapterLanguage)
@@ -195,10 +197,13 @@ fun chapterSegments(
             }
             return@forEachIndexed
         }
-        val parts = if (splitDialogue) dialogueParts(paragraph, paragraphLanguage) else null
+        val heading = paragraphIndex in headings
+        val parts = if (splitDialogue && !heading) dialogueParts(paragraph, paragraphLanguage) else null
         val roles = parts?.let { speakers.rolesFor(paragraph, it, paragraphLanguage) }
             ?: run {
-                speakers.narration(paragraph)
+                if (splitDialogue) {
+                    if (heading) speakers.sceneBreak() else speakers.narration(paragraph, paragraphLanguage)
+                }
                 null
             }
         val spans = parts ?: listOf(VoicePart(0, paragraph.length, speech = false))

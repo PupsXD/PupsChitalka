@@ -108,7 +108,44 @@ data class DialogueVoices(
             else -> narrator
         }
     }
+
+    /**
+     * The same mode with voices that sound apart: a character voice that is the narrator's, or not
+     * one of [options], is replaced by the first voice of the right gender that nobody else uses.
+     * [narrator] is the voice narration really sounds with — for an engine's default, the voice
+     * behind it.
+     */
+    fun withDistinctVoices(options: List<RoleVoice>, narrator: VoiceChoice): DialogueVoices {
+        fun kept(choice: VoiceChoice?, vararg taken: VoiceChoice?) =
+            choice?.takeIf { picked -> options.any { it.choice == picked } && picked !in taken }
+        fun pick(gender: SpeechRole?, vararg taken: VoiceChoice?) =
+            options.firstOrNull { (gender == null || it.gender == gender) && it.choice !in taken }?.choice
+        return when (mode) {
+            DialogueMode.OFF -> this
+            DialogueMode.SINGLE -> copy(single = kept(single, narrator) ?: pick(null, narrator))
+            DialogueMode.BY_GENDER -> {
+                val man = kept(male, narrator) ?: pick(SpeechRole.MALE, narrator)
+                copy(male = man, female = kept(female, narrator, man) ?: pick(SpeechRole.FEMALE, narrator, man))
+            }
+        }
+    }
+
+    /**
+     * Character voices that sound like the narrator, so their lines would not stand out: [SpeechRole.MALE]
+     * and [SpeechRole.FEMALE] by role, [SpeechRole.SPEECH] for the one voice of every line.
+     */
+    fun sameAsNarrator(narrator: VoiceChoice): List<SpeechRole> = when (mode) {
+        DialogueMode.OFF -> emptyList()
+        DialogueMode.SINGLE -> listOfNotNull(SpeechRole.SPEECH.takeIf { single == null || single == narrator })
+        DialogueMode.BY_GENDER -> listOfNotNull(
+            SpeechRole.MALE.takeIf { male == null || male == narrator },
+            SpeechRole.FEMALE.takeIf { female == null || female == narrator },
+        )
+    }
 }
+
+/** A voice that can read characters' lines, with its gender when the voice's name tells it. */
+data class RoleVoice(val choice: VoiceChoice, val title: String, val gender: SpeechRole?)
 
 /** Narration preferences shared by the reader UI and the playback service. */
 data class SpeechSettings(
