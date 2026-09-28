@@ -26,6 +26,7 @@ import android.util.Log
 import com.ozvuchka.app.R
 import com.ozvuchka.app.data.Book
 import com.ozvuchka.app.data.Chapter
+import com.ozvuchka.app.data.Covers
 import com.ozvuchka.app.data.LibraryStore
 import com.ozvuchka.app.data.chapterProgressOf
 import com.ozvuchka.app.importer.WebChapterImporter
@@ -720,15 +721,28 @@ class NarrationService : Service(), NarrationPlayer.Listener {
         }
     }
 
+    /** The open book's cover for the lock screen and the notification; loaded once per book. */
+    private var artwork: Pair<String, android.graphics.Bitmap?>? = null
+
+    private fun coverFor(target: Book?): android.graphics.Bitmap? {
+        if (target == null) return null
+        artwork?.takeIf { it.first == target.id }?.let { return it.second }
+        val bitmap = runCatching { Covers.load(this, target.id, 512) }.getOrNull()
+        artwork = target.id to bitmap
+        return bitmap
+    }
+
     private fun updateSession() {
         val chapterTitle = state.chapterTitle?.takeIf { it.isNotBlank() }
-        mediaSession.setMetadata(
-            MediaMetadata.Builder()
-                .putString(MediaMetadata.METADATA_KEY_TITLE, chapterTitle ?: state.bookTitle ?: "Озвучка")
-                .putString(MediaMetadata.METADATA_KEY_ARTIST, state.bookTitle ?: "Озвучка")
-                .putString(MediaMetadata.METADATA_KEY_ALBUM, book?.author?.takeIf { it.isNotBlank() } ?: "Озвучка")
-                .build()
-        )
+        val metadata = MediaMetadata.Builder()
+            .putString(MediaMetadata.METADATA_KEY_TITLE, chapterTitle ?: state.bookTitle ?: "Озвучка")
+            .putString(MediaMetadata.METADATA_KEY_ARTIST, state.bookTitle ?: "Озвучка")
+            .putString(MediaMetadata.METADATA_KEY_ALBUM, book?.author?.takeIf { it.isNotBlank() } ?: "Озвучка")
+        coverFor(book)?.let { cover ->
+            metadata.putBitmap(MediaMetadata.METADATA_KEY_ART, cover)
+            metadata.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, cover)
+        }
+        mediaSession.setMetadata(metadata.build())
         val playbackState = when (state.phase) {
             NarrationPhase.PREPARING -> PlaybackState.STATE_BUFFERING
             NarrationPhase.PLAYING -> PlaybackState.STATE_PLAYING
@@ -770,7 +784,9 @@ class NarrationService : Service(), NarrationPlayer.Listener {
             NarrationPhase.PAUSED -> "На паузе"
             else -> state.bookTitle ?: "Читает нейроголос"
         }
-        return Notification.Builder(this, CHANNEL_ID)
+        val builder = Notification.Builder(this, CHANNEL_ID)
+        coverFor(book)?.let(builder::setLargeIcon)
+        return builder
             .setSmallIcon(R.drawable.ic_stat_narration)
             .setContentTitle(state.chapterTitle?.takeIf { it.isNotBlank() } ?: state.bookTitle ?: "Озвучка")
             .setContentText(status)

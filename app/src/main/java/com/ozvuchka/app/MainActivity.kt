@@ -46,6 +46,7 @@ import com.ozvuchka.app.data.Annotation
 import com.ozvuchka.app.data.AnnotationStore
 import com.ozvuchka.app.data.Book
 import com.ozvuchka.app.data.Chapter
+import com.ozvuchka.app.data.Covers
 import com.ozvuchka.app.data.LibraryStore
 import com.ozvuchka.app.data.SearchHit
 import com.ozvuchka.app.data.chapterProgressOf
@@ -1031,6 +1032,7 @@ class MainActivity : ComponentActivity() {
             try {
                 val removed = withContext(Dispatchers.IO) {
                     runCatching { annotationStore.delete(id) }
+                    runCatching { Covers.delete(this@MainActivity, id) }
                     PronunciationStore.clearBook(this@MainActivity, id)
                     library.delete(id)
                 }

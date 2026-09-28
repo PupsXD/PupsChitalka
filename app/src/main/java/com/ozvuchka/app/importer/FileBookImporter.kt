@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import com.ozvuchka.app.data.Book
+import com.ozvuchka.app.data.Covers
 import java.io.File
 import java.io.FileInputStream
 import java.io.IOException
@@ -72,6 +73,14 @@ object FileBookImporter {
             if (book.chapters.isEmpty() || book.chapters.all { it.paragraphs.isEmpty() }) {
                 throw IOException("В документе не найден текст для чтения")
             }
+            // A missing or broken cover never stops an import.
+            runCatching {
+                when (format) {
+                    "EPUB" -> readEpubCover(temporaryFile)
+                    "FB2" -> readFb2Cover(temporaryFile)
+                    else -> null
+                }
+            }.getOrNull()?.let { cover -> runCatching { Covers.save(context, book.id, cover) } }
             onProgress("Книга готова")
             book.copy(source = uri.toString())
         } finally {
