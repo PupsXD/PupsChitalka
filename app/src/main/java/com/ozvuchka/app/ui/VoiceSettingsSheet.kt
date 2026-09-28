@@ -631,6 +631,15 @@ private fun DialogueVoicesCard(state: VoiceSettingsUi, language: String, narrato
             }
         }
         val sameAsNarrator = dialogue.sameAsNarrator(heard)
+        if (dialogue.mode != DialogueMode.OFF && heard.engine == VoiceEngine.SYSTEM && heard.voiceName.isEmpty() && options.isNotEmpty()) {
+            // The engine did not say which voice «По умолчанию» is, so a role may secretly share it.
+            Text(
+                "Рассказчик читает голосом «По умолчанию» из настроек движка, и какой это голос, неизвестно — " +
+                    "он может совпасть с одной из ролей. Выберите рассказчику голос явно.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
         if (sameAsNarrator.isNotEmpty() && options.isNotEmpty()) {
             val who = when {
                 SpeechRole.MALE in sameAsNarrator && SpeechRole.FEMALE in sameAsNarrator -> "Мужские и женские роли звучат"
