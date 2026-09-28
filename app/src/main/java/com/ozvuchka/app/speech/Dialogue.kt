@@ -162,6 +162,15 @@ private fun trimPart(text: String, part: VoicePart): VoicePart? {
     return VoicePart(start, end, part.speech)
 }
 
+/**
+ * The author's words go on the sentence of the line before them: «— Нет, — Лань Чжань отвернулся»,
+ * «— Стой! — крикнула она». «— Нет. — Повисла тишина» is a new sentence.
+ */
+internal fun attributes(paragraph: String, line: VoicePart, author: VoicePart): Boolean {
+    val joint = paragraph.substring((line.end - 1).coerceAtLeast(0), author.start)
+    return paragraph[author.start].isLowerCase() || ',' in joint
+}
+
 private fun opensWithQuote(paragraph: String): Boolean = paragraph.trimStart().firstOrNull()?.let { it in "«“\"" } == true
 
 /**
@@ -280,9 +289,7 @@ internal class SpeakerTracker(private val cast: Cast = Cast.EMPTY) {
         val after = parts.indices.firstOrNull { it > 0 && !parts[it].speech && parts[it - 1].speech }
         if (after != null) {
             val words = paragraph.substring(parts[after].start, parts[after].end)
-            val joint = paragraph.substring((parts[after - 1].end - 1).coerceAtLeast(0), parts[after].start)
-            // «— Нет, — Лань Чжань отвернулся» goes on the line's sentence; «— Нет. — Повисла тишина» is a new one.
-            val attribution = words.first().isLowerCase() || ',' in joint
+            val attribution = attributes(paragraph, parts[after - 1], parts[after])
             val clue = subjectClue(words, language, cast, attribution)
             if (attribution) clue?.let { clues += it to Source.ATTRIBUTION } else sentenceAfter = clue
         }

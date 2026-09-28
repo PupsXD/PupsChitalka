@@ -11,6 +11,7 @@ import com.ozvuchka.app.data.ParagraphKind
 import kotlin.concurrent.thread
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 /** Sentences of a book in reading order, addressed by a stable index. */
 internal interface SegmentSource {
@@ -366,8 +367,9 @@ internal class NarrationPlayer(
             if (voice in brokenVoices) voice = fallbackVoice(voice) ?: voice
             // The reader's pronunciations go in the form each engine understands.
             var rewrite = pronunciations.apply(segment.text, stressStyleFor(voice))
+            val prosody = settings.prosodyFor(segment)
             val audio = try {
-                hub.synthesize(voice, rewrite.text, segment.language, settings)
+                hub.synthesize(voice, rewrite.text, segment.language, settings, prosody)
             } catch (error: Exception) {
                 if (cancelled) return null
                 val fallback = fallbackVoice(voice) ?: throw error
@@ -376,7 +378,7 @@ internal class NarrationPlayer(
                 listener.onVoiceFallback(id, "${error.message ?: "Голос недоступен"}. Читает встроенный голос.")
                 voice = fallback
                 rewrite = pronunciations.apply(segment.text, stressStyleFor(fallback))
-                hub.synthesize(fallback, rewrite.text, segment.language, settings)
+                hub.synthesize(fallback, rewrite.text, segment.language, settings, prosody)
             }
             if (cancelled) return null
             val rate = synchronized(lock) {
@@ -387,8 +389,11 @@ internal class NarrationPlayer(
             var samples = if (bounds.isEmpty()) FloatArray(0) else audio.samples.copyOfRange(bounds.first, bounds.last + 1)
             var words = emptyList<WordMark>()
             if (samples.isNotEmpty()) {
-                val gain = loudness.gainFor(voice.encode(), AudioShaping.speechRms(samples, audio.sampleRate))
-                samples = Resampler.resample(samples, audio.sampleRate, rate)
+                // The voice keeps its usual loudness; a shout or a whisper is louder or quieter than that.
+                val gain = loudness.gainFor(voice.encode(), AudioShaping.speechRms(samples, audio.sampleRate)) * prosody.gain
+                // Played faster than it was rendered, a sound rises in pitch: the tone of a voice without a pitch control.
+                val sourceRate = (audio.sampleRate * audio.speedUp).roundToInt()
+                samples = Resampler.resample(samples, sourceRate, rate)
                 AudioShaping.applyGain(samples, gain)
                 AudioShaping.fadeEdges(samples, rate)
                 if (audio.words.isNotEmpty()) {
@@ -396,7 +401,7 @@ internal class NarrationPlayer(
                         val range = rewrite.originalRange(word.start, word.end)
                         WordMark(word.frame, range.first, range.last + 1)
                     }
-                    words = placeWords(spokenWords, bounds.first, audio.sampleRate, rate, samples.size, source.sourceText(segment), segment)
+                    words = placeWords(spokenWords, bounds.first, sourceRate, rate, samples.size, source.sourceText(segment), segment)
                 }
             }
             val pauseMs = segment.pause.baseMs * settings.pauseScale / settings.speed.coerceAtLeast(0.5f)

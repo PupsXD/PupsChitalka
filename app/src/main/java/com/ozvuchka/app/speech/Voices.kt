@@ -147,6 +147,9 @@ data class DialogueVoices(
 /** A voice that can read characters' lines, with its gender when the voice's name tells it. */
 data class RoleVoice(val choice: VoiceChoice, val title: String, val gender: SpeechRole?)
 
+/** How strongly characters' lines show their [SpeechTone]: «Эмоции в репликах». */
+enum class EmotionLevel(val strength: Float) { OFF(0f), SUBTLE(0.5f), VIVID(1f) }
+
 /** Narration preferences shared by the reader UI and the playback service. */
 data class SpeechSettings(
     val russianVoice: VoiceChoice,
@@ -157,6 +160,7 @@ data class SpeechSettings(
     val preferFullModels: Boolean,
     val russianDialogue: DialogueVoices = DialogueVoices(),
     val englishDialogue: DialogueVoices = DialogueVoices(),
+    val emotions: EmotionLevel = EmotionLevel.OFF,
 ) {
     fun voiceFor(language: String): VoiceChoice = if (language == "en") englishVoice else russianVoice
 
@@ -165,9 +169,17 @@ data class SpeechSettings(
     /** The voice for a segment: the narrator, or a character voice when dialogue voices are on. */
     fun voiceFor(language: String, role: SpeechRole): VoiceChoice = dialogueFor(language).voiceFor(role, voiceFor(language))
 
-    /** Characters' lines are cut into their own segments only when some language voices them apart. */
-    val splitsDialogue: Boolean
+    /** How a segment sounds: a character's line with its tone when emotions are on, anything else plainly. */
+    fun prosodyFor(segment: SpeechSegment): Prosody =
+        if (segment.role == SpeechRole.NARRATOR) Prosody.NEUTRAL else segment.tone.prosody(emotions.strength)
+
+    /** Some language reads characters' lines with voices of their own. */
+    val voicesCharacters: Boolean
         get() = russianDialogue.mode != DialogueMode.OFF || englishDialogue.mode != DialogueMode.OFF
+
+    /** Characters' lines are cut into their own segments only when they are voiced apart or show emotions. */
+    val splitsDialogue: Boolean
+        get() = voicesCharacters || emotions != EmotionLevel.OFF
 
     companion object {
         private const val PREFS = "reader"
@@ -195,6 +207,8 @@ data class SpeechSettings(
                 preferFullModels = prefs.getBoolean("preferFullVoice", true),
                 russianDialogue = loadDialogue(prefs, "Ru"),
                 englishDialogue = loadDialogue(prefs, "En"),
+                emotions = runCatching { EmotionLevel.valueOf(prefs.getString("emotions", null) ?: "OFF") }
+                    .getOrDefault(EmotionLevel.OFF),
             )
         }
 
@@ -223,6 +237,7 @@ data class SpeechSettings(
                 .putBoolean("preferFullVoice", settings.preferFullModels)
                 .putDialogue("Ru", settings.russianDialogue)
                 .putDialogue("En", settings.englishDialogue)
+                .putString("emotions", settings.emotions.name)
                 .apply()
         }
     }

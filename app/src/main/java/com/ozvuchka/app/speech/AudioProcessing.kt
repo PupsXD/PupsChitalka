@@ -19,8 +19,17 @@ import kotlin.math.tanh
  */
 data class WordMark(val frame: Int, val start: Int, val end: Int)
 
-/** Mono float audio as produced by every synthesizer, with word starts if the engine reports them. */
-class SynthesizedAudio(val samples: FloatArray, val sampleRate: Int, val words: List<WordMark> = emptyList())
+/**
+ * Mono float audio as produced by every synthesizer, with word starts if the engine reports them.
+ * [speedUp] above 1 asks to play it that much faster than [sampleRate], which raises its pitch: how
+ * a voice without a pitch control sounds a tone.
+ */
+class SynthesizedAudio(
+    val samples: FloatArray,
+    val sampleRate: Int,
+    val words: List<WordMark> = emptyList(),
+    val speedUp: Float = 1f,
+)
 
 /**
  * Band-limited resampler (Kaiser-windowed sinc). Voices come at 22.05, 24, 44.1 or 48 kHz and

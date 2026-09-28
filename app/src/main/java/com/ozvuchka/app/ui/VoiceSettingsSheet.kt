@@ -52,6 +52,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.ozvuchka.app.speech.DialogueMode
+import com.ozvuchka.app.speech.EmotionLevel
 import com.ozvuchka.app.speech.ModelInstallState
 import com.ozvuchka.app.speech.RoleVoice
 import com.ozvuchka.app.speech.SpeechModel
@@ -122,6 +123,7 @@ fun VoiceSettingsSheet(
             item { EnginePicker(state, language, selected, actions) }
             item { EngineVoices(state, language, selected, actions) }
             item { DialogueVoicesCard(state, language, selected, actions) }
+            item { EmotionsCard(state, language, actions) }
             item {
                 SettingsLabel("Темп · ${speechSpeedLabel(state.speed)}")
                 var dragging by remember { mutableStateOf<Float?>(null) }
@@ -752,6 +754,48 @@ private fun DialogueVoicesCard(state: VoiceSettingsUi, language: String, narrato
                 }
             },
         )
+    }
+}
+
+@Composable
+private fun EmotionsCard(state: VoiceSettingsUi, language: String, actions: VoiceSettingsActions) {
+    SheetCard {
+        CardTitle("Эмоции в репликах", null)
+        Text(
+            "Крик звучит громче и быстрее, шёпот — тише, неуверенная речь — медленнее, грустная — ниже. Как сказана " +
+                "реплика, понятно по словам автора («прошептала», «рявкнул», «неуверенно», «сквозь слёзы») и по ней " +
+                "самой: «Стой!», «Я… я не знаю», «П-простите». Вопрос и восклицание голос интонирует сам, по знаку в конце фразы.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(
+                EmotionLevel.OFF to "Нет",
+                EmotionLevel.SUBTLE to "Сдержанно",
+                EmotionLevel.VIVID to "Ярко",
+            ).forEach { (level, title) ->
+                FilterChip(
+                    selected = state.emotions == level,
+                    onClick = { actions.setEmotions(level) },
+                    label = { Text(title) },
+                )
+            }
+        }
+        if (state.emotions != EmotionLevel.OFF) {
+            if (state.emotionsPreviewing) {
+                TextButton(onClick = actions::stopPreview) {
+                    Icon(Icons.Filled.Stop, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Остановить")
+                }
+            } else {
+                TextButton(onClick = { actions.previewEmotions(language) }) {
+                    Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Прослушать пример")
+                }
+            }
+        }
     }
 }
 
