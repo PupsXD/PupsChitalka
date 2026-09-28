@@ -241,7 +241,11 @@ private fun engineOptions(state: VoiceSettingsUi, language: String): List<Engine
             EngineOption(
                 key = "system:${VoiceCatalog.RUVOICE_PACKAGE}",
                 title = "RuVoice · Silero v5",
-                subtitle = if (state.ruVoiceInstalled) "Живая интонация, ударения по контексту" else "Не установлен · нажмите, чтобы скачать",
+                subtitle = when {
+                    state.ruVoiceInstalled -> "Живая интонация, ударения по контексту"
+                    state.ruVoiceSetup.busy -> ruVoiceProgressLabel(state.ruVoiceSetup).orEmpty()
+                    else -> "Не установлен · нажмите, чтобы установить (≈\u00A0230\u00A0МБ)"
+                },
                 installed = state.ruVoiceInstalled,
                 choice = VoiceChoice(VoiceEngine.SYSTEM, enginePackage = VoiceCatalog.RUVOICE_PACKAGE),
                 recommended = true,
@@ -293,7 +297,10 @@ private fun EnginePicker(state: VoiceSettingsUi, language: String, selected: Voi
             val onSelect = {
                 when {
                     isSelected -> Unit
-                    option.choice.enginePackage == VoiceCatalog.RUVOICE_PACKAGE && !option.installed -> actions.openRuVoicePage()
+                    option.choice.enginePackage == VoiceCatalog.RUVOICE_PACKAGE && !option.installed -> {
+                        actions.selectVoice(language, option.choice)
+                        actions.installRuVoice()
+                    }
                     else -> {
                         actions.selectVoice(language, option.choice)
                         if (option.choice.engine == VoiceEngine.SYSTEM) actions.loadEngineVoices(option.choice.enginePackage)
@@ -381,15 +388,11 @@ private fun SystemEngineVoices(state: VoiceSettingsUi, language: String, selecte
     SheetCard {
         CardTitle("Голоса · $title", null)
         if (engine == null) {
-            Text(
-                if (ruVoice) {
-                    "RuVoice ставится отдельным приложением (APK с GitHub). После установки вернитесь сюда — движок появится в списке."
-                } else {
-                    "Этот движок сейчас не установлен. Пока его нет, фразы читает Supertonic."
-                },
-                style = MaterialTheme.typography.bodySmall,
-            )
-            if (ruVoice) Button(onClick = actions::openRuVoicePage) { Text("Скачать RuVoice") }
+            if (ruVoice) {
+                RuVoiceSetupBody(state.ruVoiceSetup, actions)
+            } else {
+                Text("Этот движок сейчас не установлен. Пока его нет, фразы читает Supertonic.", style = MaterialTheme.typography.bodySmall)
+            }
             return@SheetCard
         }
         Text(

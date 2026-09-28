@@ -4,6 +4,7 @@ import com.ozvuchka.app.data.Annotation
 import com.ozvuchka.app.data.SearchHit
 import com.ozvuchka.app.speech.DialogueVoices
 import com.ozvuchka.app.speech.ModelInstallState
+import com.ozvuchka.app.speech.RuVoiceInstallState
 import com.ozvuchka.app.speech.SpeechModel
 import com.ozvuchka.app.speech.SystemEngineInfo
 import com.ozvuchka.app.speech.SystemVoiceInfo
@@ -191,11 +192,13 @@ data class VoiceSettingsUi(
     val englishDialogue: DialogueVoices = DialogueVoices(),
     /** The sample dialogue is playing. */
     val dialoguePreviewing: Boolean = false,
+    /** Getting RuVoice from inside the app. */
+    val ruVoiceSetup: RuVoiceInstallState = RuVoiceInstallState(),
 ) {
     val ruVoiceInstalled: Boolean get() = systemEngines.any { it.packageName == VoiceCatalog.RUVOICE_PACKAGE }
 }
 
-interface VoiceSettingsActions {
+interface VoiceSettingsActions : RuVoiceSetupActions {
     fun selectVoice(language: String, voice: VoiceChoice)
     fun preview(language: String, voice: VoiceChoice)
     fun stopPreview()
@@ -206,7 +209,6 @@ interface VoiceSettingsActions {
     fun setPauseScale(scale: Float)
     fun setSupertonicSteps(steps: Int)
     fun setPreferFullModels(enabled: Boolean)
-    fun openRuVoicePage()
     fun openSystemTtsSettings()
     /** Opens the engine's own app, where RuVoice keeps its voices, stress dictionaries and packs. */
     fun openEngineApp(enginePackage: String)
