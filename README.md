@@ -44,8 +44,12 @@ Android-приложение для чтения и локальной озву�
 
 PDF не хранит однозначный порядок чтения и разметку глав. Для сложных колонок, таблиц, сносок и плохих сканов проверьте текст в читалке перед экспортом. OCR может ошибаться. Текущая текстовая читалка не сохраняет иллюстрации и сложную верстку EPUB/FB2/DOCX. DRM-файлы не поддерживаются. Исходные файлы не меняются: приложение хранит свою текстовую копию в приватном каталоге.
 
+## Установка
+
+Готовый APK — в [последнем релизе](https://github.com/PupsXD/PupsChitalka/releases/latest): каждое слияние в `main` публикует новую версию. Релизы и сборки CI подписаны одним ключом приложения из секретов репозитория `OZVUCHKA_KEYSTORE_BASE64` (keystore в base64) и `OZVUCHKA_KEYSTORE_PASSWORD`, а номер версии растёт с каждой сборкой, поэтому новая версия ставится поверх старой и книги с настройками сохраняются. Ключ терять нельзя: сборку с другим ключом телефон поставит только после удаления приложения.
+
 ## Сборка
 
-Откройте папку проекта в Android Studio с JDK 17 и Android SDK 36. Сборка из командной строки: `gradlew.bat :app:assembleDebug`. APK появляется в `app/build/outputs/apk/debug/app-debug.apk`. Текущая сборка включает arm64-вариант локального движка. Юнит-тесты: `gradlew.bat :app:testDebugUnitTest`.
+Откройте папку проекта в Android Studio с JDK 17 и Android SDK 36. Сборка из командной строки: `gradlew.bat :app:assembleDebug`. APK появляется в `app/build/outputs/apk/debug/app-debug.apk`. Текущая сборка включает arm64-вариант локального движка. Юнит-тесты: `gradlew.bat :app:testDebugUnitTest`. Чтобы подписать сборку ключом приложения, укажите путь к keystore в `OZVUCHKA_KEYSTORE` и пароль в `OZVUCHKA_KEYSTORE_PASSWORD`; без них используется отладочный ключ этого компьютера.
 
 При импорте русских сканов приложение использует языковые данные [tessdata_fast](https://github.com/tesseract-ocr/tessdata_fast). Supertonic 3 (INT8) и Kokoro v1.0 скачиваются из [официального релиза моделей sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models), полноточные веса Supertonic — из [репозитория Supertonic 3](https://huggingface.co/Supertone/supertonic-3/tree/main/onnx). Условия использования весов указаны в карточках моделей [Supertonic 3](https://huggingface.co/Supertone/supertonic-3) и [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M). RuVoice распространяется его автором; модель Silero `v5_5_ru` — под CC BY-NC-SA 4.0, дополнительные голоса `v5_cis_base_nostress` — под MIT.
