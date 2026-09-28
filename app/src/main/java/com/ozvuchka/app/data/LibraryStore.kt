@@ -65,6 +65,12 @@ class LibraryStore(context: Context) {
         return updated
     }
 
+    /** The book opened most recently, from the small positions file only. */
+    fun lastOpenedId(): String? = positions.all.entries
+        .mapNotNull { (id, value) -> (value as? String)?.split('|')?.getOrNull(2)?.toLongOrNull()?.let { id to it } }
+        .filter { (id, _) -> runCatching { fileFor(id).exists() }.getOrDefault(false) }
+        .maxByOrNull { it.second }?.first
+
     /** Cheap and safe to call often, from any thread. */
     fun updatePosition(id: String, chapterIndex: Int, chapterProgress: Float, openedAt: Long? = null) {
         val previousOpened = positions.getString(id, null)?.split('|')?.getOrNull(2)?.toLongOrNull() ?: 0L

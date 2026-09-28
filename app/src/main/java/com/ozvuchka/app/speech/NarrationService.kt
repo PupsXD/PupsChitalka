@@ -11,6 +11,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
@@ -22,6 +26,9 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.util.Log
 import com.ozvuchka.app.R
 import com.ozvuchka.app.data.Book
@@ -223,6 +230,35 @@ class NarrationService : Service(), NarrationPlayer.Listener {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var fetchingChapter = false
 
+    // Shake to extend the sleep timer: listened to only near its end, so the sensor costs nothing otherwise.
+    private var sensorManager: SensorManager? = null
+    private var shakeArmed = false
+    private var shakeWindowEnd = 0L
+    private var lastJoltAt = 0L
+    private var lastShakeAt = 0L
+    private var pausedBySleep = false
+    private val armShake = Runnable { armShakeWindow(SystemClock.elapsedRealtime() + 3 * 60_000L) }
+    private val disarmShake = Runnable { disarmShakeWindow() }
+    private val shakeListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            val (x, y, z) = event.values
+            val force = kotlin.math.sqrt(x * x + y * y + z * z) / SensorManager.GRAVITY_EARTH
+            if (force < 2.2f) return
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastShakeAt < 1_500) return
+            // Two jolts close together make a shake; one bump of the bed does not.
+            if (now - lastJoltAt > 700) {
+                lastJoltAt = now
+                return
+            }
+            lastShakeAt = now
+            lastJoltAt = 0
+            handler.post { onShake() }
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+    }
+
     private val noisyReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) pausePlayback()
@@ -269,8 +305,8 @@ class NarrationService : Service(), NarrationPlayer.Listener {
             override fun onStop() = finish(save = true)
             override fun onSkipToNext() = skip(+1)
             override fun onSkipToPrevious() = skip(-1)
-            override fun onFastForward() = skip(+1)
-            override fun onRewind() = skip(-1)
+            override fun onFastForward() = seekBy(+15f)
+            override fun onRewind() = seekBy(-15f)
         })
         mediaSession.isActive = true
     }
@@ -301,6 +337,7 @@ class NarrationService : Service(), NarrationPlayer.Listener {
             }
             ACTION_NEXT -> skip(+1)
             ACTION_PREVIOUS -> skip(-1)
+            ACTION_REWIND -> seekBy(-15f)
             ACTION_STOP -> finish(save = true)
             ACTION_SLEEP -> setSleep(intent.getIntExtra(EXTRA_MINUTES, 0))
             ACTION_SETTINGS -> restartWithNewSettings()
@@ -313,6 +350,7 @@ class NarrationService : Service(), NarrationPlayer.Listener {
 
     override fun onDestroy() {
         scope.cancel()
+        disarmShakeWindow()
         handler.removeCallbacksAndMessages(null)
         player.stop()
         // Keep the voice warm for a few minutes: pressing play again starts at once.
@@ -423,6 +461,10 @@ class NarrationService : Service(), NarrationPlayer.Listener {
         }
         handler.removeCallbacks(idleStop)
         resumeOnFocusGain = false
+        if (pausedBySleep) {
+            pausedBySleep = false
+            disarmShakeWindow()
+        }
         player.resume()
         publish(state.copy(phase = NarrationPhase.PLAYING, message = null))
         updateSession()
@@ -445,6 +487,81 @@ class NarrationService : Service(), NarrationPlayer.Listener {
         player.play(currentSource, target, activeSettings, stopAtChapterEnd = state.sleepAtChapterEnd, pronunciations = pronunciations)
         publish(state.copy(phase = NarrationPhase.PREPARING))
         updateSession()
+    }
+
+    /**
+     * Moves about [seconds] back or forward, in whole sentences: the length of a sentence's text
+     * and its pause estimate how long it plays at the current speed.
+     */
+    private fun seekBy(seconds: Float) {
+        val currentSource = source ?: return
+        val activeSettings = settings ?: return
+        val current = player.currentIndex ?: lastIndex
+        val charactersPerSecond = 14f * activeSettings.speed
+        fun duration(segment: SpeechSegment) = segment.text.length / charactersPerSecond + segment.pause.baseMs / 1000f
+        var target = current
+        if (seconds < 0) {
+            var remaining = -seconds - player.secondsIntoCurrent
+            while (remaining > 0 && target > 0) {
+                target--
+                remaining -= currentSource.get(target)?.let(::duration) ?: break
+            }
+        } else {
+            var remaining = seconds + player.secondsIntoCurrent
+            while (true) {
+                val here = currentSource.get(target) ?: break
+                if (remaining < duration(here) || currentSource.get(target + 1) == null) break
+                remaining -= duration(here)
+                target++
+            }
+        }
+        if (target == current && seconds > 0) return
+        handler.removeCallbacks(idleStop)
+        requestFocus()
+        lastIndex = target
+        player.play(currentSource, target, activeSettings, stopAtChapterEnd = state.sleepAtChapterEnd, pronunciations = pronunciations)
+        publish(state.copy(phase = NarrationPhase.PREPARING))
+        updateSession()
+    }
+
+    private fun armShakeWindow(until: Long) {
+        shakeWindowEnd = until
+        handler.removeCallbacks(disarmShake)
+        handler.postDelayed(disarmShake, (until - SystemClock.elapsedRealtime()).coerceAtLeast(0L))
+        if (shakeArmed) return
+        val manager = sensorManager ?: getSystemService(SensorManager::class.java).also { sensorManager = it } ?: return
+        val accelerometer = manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) ?: return
+        shakeArmed = manager.registerListener(shakeListener, accelerometer, SensorManager.SENSOR_DELAY_UI)
+    }
+
+    private fun disarmShakeWindow() {
+        handler.removeCallbacks(disarmShake)
+        if (shakeArmed) sensorManager?.unregisterListener(shakeListener)
+        shakeArmed = false
+    }
+
+    /** A shake near the end of the sleep timer, or just after it paused, buys ten more minutes. */
+    private fun onShake() {
+        if (SystemClock.elapsedRealtime() > shakeWindowEnd || !player.isActive) {
+            disarmShakeWindow()
+            return
+        }
+        vibrate()
+        player.cancelFade()
+        if (pausedBySleep && player.isPaused) resumePlayback()
+        pausedBySleep = false
+        setSleep(10)
+        publish(state.copy(message = "Таймер сна продлён на 10 минут"))
+    }
+
+    private fun vibrate() {
+        val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            getSystemService(VibratorManager::class.java)?.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            getSystemService(Vibrator::class.java)
+        }
+        runCatching { vibrator?.vibrate(VibrationEffect.createOneShot(60, VibrationEffect.DEFAULT_AMPLITUDE)) }
     }
 
     private fun restartWithNewSettings() {
@@ -486,12 +603,15 @@ class NarrationService : Service(), NarrationPlayer.Listener {
                         handler.post {
                             if (session != player.sessionId) return@post
                             publish(state.copy(sleepEndsAt = null))
+                            pausedBySleep = true
                             onPaused()
+                            armShakeWindow(SystemClock.elapsedRealtime() + 2 * 60_000L)
                         }
                     }
                 }
                 sleepRunnable = runnable
                 handler.postDelayed(runnable, minutes * 60_000L)
+                handler.postDelayed(armShake, (minutes * 60_000L - 60_000L).coerceAtLeast(0L))
                 publish(state.copy(sleepEndsAt = System.currentTimeMillis() + minutes * 60_000L, sleepAtChapterEnd = false))
             }
             minutes < 0 -> {
@@ -505,6 +625,8 @@ class NarrationService : Service(), NarrationPlayer.Listener {
     private fun cancelSleep(publishState: Boolean) {
         sleepRunnable?.let { handler.removeCallbacks(it) }
         sleepRunnable = null
+        handler.removeCallbacks(armShake)
+        disarmShakeWindow()
         player.setStopAtChapterEnd(false)
         if (publishState) publish(state.copy(sleepEndsAt = null, sleepAtChapterEnd = false))
     }
@@ -795,6 +917,7 @@ class NarrationService : Service(), NarrationPlayer.Listener {
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setOngoing(!paused)
             .setDeleteIntent(actionIntent(ACTION_STOP, 5))
+            .addAction(action(android.R.drawable.ic_media_rew, "−15 с", ACTION_REWIND, 6))
             .addAction(action(android.R.drawable.ic_media_previous, "Назад", ACTION_PREVIOUS, 1))
             .addAction(
                 if (paused) {
@@ -808,7 +931,7 @@ class NarrationService : Service(), NarrationPlayer.Listener {
             .setStyle(
                 Notification.MediaStyle()
                     .setMediaSession(mediaSession.sessionToken)
-                    .setShowActionsInCompactView(0, 1, 2)
+                    .setShowActionsInCompactView(0, 2, 3)
             )
             .build()
     }
@@ -837,6 +960,7 @@ class NarrationService : Service(), NarrationPlayer.Listener {
         const val ACTION_PREVIOUS = "com.ozvuchka.app.action.NARRATION_PREVIOUS"
         const val ACTION_SLEEP = "com.ozvuchka.app.action.NARRATION_SLEEP"
         const val ACTION_SETTINGS = "com.ozvuchka.app.action.NARRATION_SETTINGS"
+        const val ACTION_REWIND = "com.ozvuchka.app.action.NARRATION_REWIND"
         const val EXTRA_MINUTES = "com.ozvuchka.app.extra.MINUTES"
         private const val CHANNEL_ID = "ozvuchka_narration"
         private const val NOTIFICATION_ID = 1042

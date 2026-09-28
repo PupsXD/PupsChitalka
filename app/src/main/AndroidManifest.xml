@@ -5,6 +5,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <!-- Android 11+ hides other apps by default: this lets the reader find installed TTS engines
          such as RuVoice (Silero v5), Google and Samsung and use their voices. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
     <queries>
         <intent>
             <action android:name="android.intent.action.TTS_SERVICE" />
@@ -60,5 +62,15 @@
             android:name=".speech.NarrationService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
+        <service
+            android:name=".speech.NarrationTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_stat_narration"
+            android:label="Озвучка"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

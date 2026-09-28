@@ -184,22 +184,32 @@ internal class NarrationPlayer(
         session?.stopAtChapterEnd = enabled
     }
 
+    @Volatile private var fadeGeneration = 0
+
     /** Lowers the volume over [durationMs], then pauses: used by the sleep timer. */
     fun fadeOutAndPause(durationMs: Long, onPaused: (session: Long) -> Unit) {
         val current = session ?: return
+        val generation = ++fadeGeneration
         thread(name = "narration-fade", isDaemon = true) {
             val steps = 30
             for (step in steps downTo 0) {
-                if (current.cancelled || current.paused) break
+                if (current.cancelled || current.paused || generation != fadeGeneration) break
                 current.setVolume(step.toFloat() / steps)
                 Thread.sleep(durationMs / steps)
             }
+            if (generation != fadeGeneration) return@thread
             if (!current.cancelled) {
                 current.pause()
                 current.setVolume(1f)
                 onPaused(current.id)
             }
         }
+    }
+
+    /** Stops a sleep fade and brings the volume back: the listener shook the phone for more time. */
+    fun cancelFade() {
+        fadeGeneration++
+        session?.setVolume(1f)
     }
 
     private class Rendered(

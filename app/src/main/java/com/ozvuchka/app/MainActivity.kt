@@ -30,6 +30,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -78,6 +79,7 @@ import com.ozvuchka.app.ui.LibraryScreen
 import com.ozvuchka.app.ui.OzvuchkaTheme
 import com.ozvuchka.app.ui.PronunciationUi
 import com.ozvuchka.app.ui.ReaderActions
+import com.ozvuchka.app.ui.ReaderFont
 import com.ozvuchka.app.ui.ReaderJump
 import com.ozvuchka.app.ui.ReaderMargin
 import com.ozvuchka.app.ui.ReaderNarrationUi
@@ -110,6 +112,8 @@ class MainActivity : ComponentActivity() {
     private var keepScreenOn by mutableStateOf(true)
     private var highlightWords by mutableStateOf(true)
     private var autoLoadWebChapters by mutableStateOf(true)
+    private var readerBrightness by mutableStateOf<Float?>(null)
+    private var warmLight by mutableFloatStateOf(0f)
     private var prefetchingChapterOf: String? = null
     private val annotationStore by lazy { AnnotationStore(this) }
     /** Bookmarks and highlights of the open book. */
@@ -196,6 +200,12 @@ class MainActivity : ComponentActivity() {
                         systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                         // In a book the reader shows and hides the bars itself, see chromeVisibilityChanged.
                         if (book == null) show(WindowInsetsCompat.Type.systemBars())
+                    }
+                    // The reader's brightness applies only while a book is open.
+                    val brightness = if (book != null) readerBrightness?.coerceIn(0.01f, 1f) else null
+                    val wanted = brightness ?: WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+                    if (window.attributes.screenBrightness != wanted) {
+                        window.attributes = window.attributes.apply { screenBrightness = wanted }
                     }
                     if (book != null && keepScreenOn) {
                         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -315,7 +325,13 @@ class MainActivity : ComponentActivity() {
     private fun loadPreferences() {
         typography = ReaderTypography(
             fontSizeSp = preferences.getFloat("fontSizeSp", 19f),
-            useSerif = preferences.getBoolean("useSerif", true),
+            // Older builds only knew serif or sans; new installs start with Literata.
+            font = preferences.getString("readerFont", null)?.let { name -> runCatching { ReaderFont.valueOf(name) }.getOrNull() }
+                ?: when {
+                    !preferences.contains("useSerif") -> ReaderFont.LITERATA
+                    preferences.getBoolean("useSerif", true) -> ReaderFont.SERIF
+                    else -> ReaderFont.SANS
+                },
             lineSpacing = preferences.getFloat("lineSpacing", 1.55f),
             justify = preferences.getBoolean("justify", true),
             paragraphIndent = preferences.getBoolean("paragraphIndent", true),
@@ -329,13 +345,15 @@ class MainActivity : ComponentActivity() {
         keepScreenOn = preferences.getBoolean("keepScreenOn", true)
         highlightWords = preferences.getBoolean("highlightWords", true)
         autoLoadWebChapters = preferences.getBoolean("autoLoadWebChapters", true)
+        readerBrightness = preferences.getFloat("readerBrightness", Float.NaN).takeUnless { it.isNaN() }
+        warmLight = preferences.getFloat("warmLight", 0f)
     }
 
     private fun saveTypography(value: ReaderTypography) {
         typography = value
         preferences.edit()
             .putFloat("fontSizeSp", value.fontSizeSp)
-            .putBoolean("useSerif", value.useSerif)
+            .putString("readerFont", value.font.name)
             .putFloat("lineSpacing", value.lineSpacing)
             .putBoolean("justify", value.justify)
             .putBoolean("paragraphIndent", value.paragraphIndent)
@@ -470,6 +488,9 @@ class MainActivity : ComponentActivity() {
             pronunciationCount = pronunciationCount,
             isWebBook = book.chapters.any { it.sourceUrl != null },
             autoLoadWebChapters = autoLoadWebChapters,
+            brightness = readerBrightness,
+            systemBrightness = systemBrightness(),
+            warmLight = warmLight,
         )
     }
 
@@ -568,6 +589,18 @@ class MainActivity : ComponentActivity() {
         override fun volumeKeysChanged(enabled: Boolean) {
             volumeKeysTurnPages = enabled
             preferences.edit().putBoolean("volumeKeysTurnPages", enabled).apply()
+        }
+
+        override fun brightnessChanged(level: Float?, final: Boolean) {
+            readerBrightness = level
+            if (final) {
+                preferences.edit().apply { if (level == null) remove("readerBrightness") else putFloat("readerBrightness", level) }.apply()
+            }
+        }
+
+        override fun warmLightChanged(level: Float) {
+            warmLight = level
+            preferences.edit().putFloat("warmLight", level).apply()
         }
 
         override fun autoLoadWebChaptersChanged(enabled: Boolean) {
@@ -833,6 +866,11 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    /** The system brightness setting, roughly on the window's 0..1 scale. */
+    private fun systemBrightness(): Float =
+        runCatching { android.provider.Settings.System.getInt(contentResolver, android.provider.Settings.System.SCREEN_BRIGHTNESS) / 255f }
+            .getOrDefault(0.5f).coerceIn(0.05f, 1f)
 
     private fun changeAnnotations(change: (List<Annotation>) -> List<Annotation>) {
         val book = currentBook ?: return

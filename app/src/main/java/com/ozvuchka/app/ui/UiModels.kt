@@ -39,9 +39,17 @@ enum class ReaderMargin(val horizontalDp: Int, val label: String) {
     WIDE(40, "Широкие"),
 }
 
+/** Reading typefaces: Literata and PT Serif ship with the app, the other two are the phone's own. */
+enum class ReaderFont(val label: String) {
+    LITERATA("Literata"),
+    PT_SERIF("PT Serif"),
+    SERIF("С засечками"),
+    SANS("Без засечек"),
+}
+
 data class ReaderTypography(
     val fontSizeSp: Float = 19f,
-    val useSerif: Boolean = true,
+    val font: ReaderFont = ReaderFont.LITERATA,
     val lineSpacing: Float = 1.55f,
     val justify: Boolean = true,
     val paragraphIndent: Boolean = true,
@@ -96,6 +104,15 @@ data class ReaderUiState(
     /** Chapters come from a website, one by one. */
     val isWebBook: Boolean = false,
     val autoLoadWebChapters: Boolean = true,
+    /**
+     * The reader's own brightness: 0..1 sets the screen, below 0 dims further with a veil (night
+     * reading); null follows the system.
+     */
+    val brightness: Float? = null,
+    /** The system brightness as a starting point for the swipe. */
+    val systemBrightness: Float = 0.5f,
+    /** Warm light over the page, from 0 (off) to 1. */
+    val warmLight: Float = 0f,
 )
 
 /** Shows [paragraph] at [offset]; [mark] briefly highlights a search hit. A new [id] repeats a jump. */
@@ -124,6 +141,9 @@ interface ReaderActions {
     fun keepScreenOnChanged(enabled: Boolean)
     fun highlightWordsChanged(enabled: Boolean)
     fun autoLoadWebChaptersChanged(enabled: Boolean)
+    /** [final] is false while the finger still moves; only the final value is saved. */
+    fun brightnessChanged(level: Float?, final: Boolean)
+    fun warmLightChanged(level: Float)
     fun export(format: String)
     fun importNextChapter()
 

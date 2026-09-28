@@ -8,13 +8,18 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitVerticalTouchSlopOrCancellation
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.verticalDrag
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -100,12 +105,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
@@ -217,6 +225,7 @@ fun ReaderScreen(
 ) {
     val colors = state.theme.colors()
     val currentActions by rememberUpdatedState(actions)
+    val currentState by rememberUpdatedState(state)
     var chromeVisible by rememberSaveable { mutableStateOf(true) }
     LaunchedEffect(chromeVisible) { currentActions.chromeVisibilityChanged(chromeVisible) }
     DisposableEffect(Unit) { onDispose { currentActions.chromeVisibilityChanged(true) } }
@@ -249,7 +258,19 @@ fun ReaderScreen(
     val margin = state.typography.margin.horizontalDp.dp
     val footerHeight = 22.dp
 
-    Box(modifier.fillMaxSize().background(colors.background)) {
+    // Brightness follows a swipe along the left edge; below the screen's minimum a veil dims further.
+    var brightnessLevel by remember { mutableFloatStateOf(state.brightness ?: state.systemBrightness) }
+    var brightnessShownUntil by remember { mutableLongStateOf(0L) }
+    val veil = (-(state.brightness ?: 0f)).coerceIn(0f, 0.6f)
+    Box(
+        modifier.fillMaxSize().background(colors.background).drawWithContent {
+            drawContent()
+            if (state.warmLight > 0f) {
+                drawRect(Color(0xFFFF8A3D), alpha = state.warmLight * 0.35f, blendMode = BlendMode.Multiply)
+            }
+            if (veil > 0f) drawRect(Color.Black, alpha = veil)
+        },
+    ) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val horizontalInset = safeInsets.calculateLeftPadding(layoutDirection) + safeInsets.calculateRightPadding(layoutDirection)
             val widthPx = with(density) { (maxWidth - horizontalInset - margin * 2).roundToPx() }
@@ -338,6 +359,23 @@ fun ReaderScreen(
                             }
                             .background(colors.background)
                             .onGloballyPositioned { geometry.container = it }
+                            .pointerInput(Unit) {
+                                awaitEachGesture {
+                                    val down = awaitFirstDown(requireUnconsumed = false)
+                                    if (down.position.x > size.width * 0.12f) return@awaitEachGesture
+                                    val drag = awaitVerticalTouchSlopOrCancellation(down.id) { change, _ -> change.consume() }
+                                        ?: return@awaitEachGesture
+                                    brightnessLevel = currentState.brightness ?: currentState.systemBrightness
+                                    verticalDrag(drag.id) { change ->
+                                        val delta = -change.positionChange().y / size.height * 1.6f
+                                        brightnessLevel = (brightnessLevel + delta).coerceIn(-0.6f, 1f)
+                                        brightnessShownUntil = System.currentTimeMillis() + 1_200
+                                        currentActions.brightnessChanged(brightnessLevel, final = false)
+                                        change.consume()
+                                    }
+                                    currentActions.brightnessChanged(brightnessLevel, final = true)
+                                }
+                            }
                             .pointerInput(index, pages) {
                                 detectTapGestures(
                                     onTap = { offset ->
@@ -480,6 +518,28 @@ fun ReaderScreen(
             exit = fadeOut(),
         ) {
             MiniNarrationButton(state.narration, colors, onClick = actions::playPause)
+        }
+        var showBrightness by remember { mutableStateOf(false) }
+        LaunchedEffect(brightnessShownUntil) {
+            showBrightness = brightnessShownUntil > System.currentTimeMillis()
+            if (showBrightness) {
+                kotlinx.coroutines.delay(brightnessShownUntil - System.currentTimeMillis())
+                showBrightness = false
+            }
+        }
+        AnimatedVisibility(
+            visible = showBrightness,
+            modifier = Modifier.align(Alignment.CenterStart).padding(start = 28.dp),
+            enter = fadeIn(),
+            exit = fadeOut(),
+        ) {
+            Text(
+                if (brightnessLevel >= 0f) "☀ ${(brightnessLevel * 100).roundToInt()}%" else "☾ ниже минимума · ${(-brightnessLevel * 100 / 0.6f).roundToInt()}%",
+                color = colors.text,
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.clip(RoundedCornerShape(12.dp)).background(colors.surface.copy(alpha = 0.92f))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            )
         }
     }
 
@@ -1090,6 +1150,26 @@ private fun ReaderSettingsSheet(
                 }
             }
             item {
+                SettingsLabel(if (state.warmLight > 0f) "Тёплый свет · ${(state.warmLight * 100).roundToInt()}%" else "Тёплый свет · выключен")
+                Slider(
+                    value = state.warmLight,
+                    onValueChange = { actions.warmLightChanged((it * 20).roundToInt() / 20f) },
+                    valueRange = 0f..1f,
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        if (state.brightness == null) "Яркость: как в системе. Проведите вверх-вниз у левого края страницы"
+                        else "Яркость своя: ${if (state.brightness >= 0f) "${(state.brightness * 100).roundToInt()}%" else "ниже минимума"}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (state.brightness != null) {
+                        TextButton(onClick = { actions.brightnessChanged(null, final = true) }) { Text("Как в системе") }
+                    }
+                }
+            }
+            item {
                 SettingsLabel("Размер текста · ${typography.fontSizeSp.roundToInt()}")
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("А", fontSize = 15.sp)
@@ -1105,17 +1185,14 @@ private fun ReaderSettingsSheet(
             }
             item {
                 SettingsLabel("Шрифт")
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    FilterChip(
-                        selected = typography.useSerif,
-                        onClick = { actions.typographyChanged(typography.copy(useSerif = true)) },
-                        label = { Text("С засечками", fontFamily = FontFamily.Serif) },
-                    )
-                    FilterChip(
-                        selected = !typography.useSerif,
-                        onClick = { actions.typographyChanged(typography.copy(useSerif = false)) },
-                        label = { Text("Без засечек", fontFamily = FontFamily.SansSerif) },
-                    )
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    ReaderFont.entries.forEach { font ->
+                        FilterChip(
+                            selected = typography.font == font,
+                            onClick = { actions.typographyChanged(typography.copy(font = font)) },
+                            label = { Text(font.label, fontFamily = font.family) },
+                        )
+                    }
                 }
             }
             item {
