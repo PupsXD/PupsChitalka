@@ -23,6 +23,8 @@ data class SpeechSegment(
     val language: String,
     val pause: SegmentPause,
     val role: SpeechRole = SpeechRole.NARRATOR,
+    /** How a character's line is said; the narrator's words are always [SpeechTone.NEUTRAL]. */
+    val tone: SpeechTone = SpeechTone.NEUTRAL,
 )
 
 /** Who says a segment: the narrator, or a character whose gender may be known from the attribution. */
@@ -143,7 +145,8 @@ fun dominantLanguage(paragraphs: List<String>, fallback: String = "ru"): String 
 /**
  * Splits a chapter into narration segments. The chapter title is spoken first unless the text
  * already starts with it. With [splitDialogue], characters' lines become their own segments with a
- * [SpeechRole], so dialogue voices can read them.
+ * [SpeechRole], so dialogue voices can read them, and a [SpeechTone], so they can sound as the text
+ * says they are said.
  */
 fun chapterSegments(
     chapterIndex: Int,
@@ -206,6 +209,7 @@ fun chapterSegments(
                 }
                 null
             }
+        val tones = parts?.let { lineTones(paragraph, it, paragraphLanguage) }
         val spans = parts ?: listOf(VoicePart(0, paragraph.length, speech = false))
         spans.forEachIndexed { partIndex, part ->
             val role = roles?.getOrNull(partIndex) ?: SpeechRole.NARRATOR
@@ -235,6 +239,9 @@ fun chapterSegments(
                         else -> SegmentPause.CLAUSE
                     },
                     role = role,
+                    // The author's words about the line hold for all of it; otherwise each sentence shows its own.
+                    tone = if (!part.speech) SpeechTone.NEUTRAL else tones?.getOrNull(partIndex)
+                        ?: sentenceTone(chunk.text, goesOn = !last) ?: SpeechTone.NEUTRAL,
                 )
             }
         }

@@ -5,6 +5,7 @@ import com.ozvuchka.app.data.ParagraphStyle
 import com.ozvuchka.app.data.SearchHit
 import com.ozvuchka.app.speech.CastMember
 import com.ozvuchka.app.speech.DialogueVoices
+import com.ozvuchka.app.speech.EmotionLevel
 import com.ozvuchka.app.speech.ModelInstallState
 import com.ozvuchka.app.speech.RuVoiceInstallState
 import com.ozvuchka.app.speech.SpeechModel
@@ -220,6 +221,10 @@ data class VoiceSettingsUi(
     val englishDialogue: DialogueVoices = DialogueVoices(),
     /** The sample dialogue is playing. */
     val dialoguePreviewing: Boolean = false,
+    /** How strongly characters' lines show their emotions. */
+    val emotions: EmotionLevel = EmotionLevel.OFF,
+    /** The sample of emotional lines is playing. */
+    val emotionsPreviewing: Boolean = false,
     /** Getting RuVoice from inside the app. */
     val ruVoiceSetup: RuVoiceInstallState = RuVoiceInstallState(),
 ) {
@@ -244,4 +249,6 @@ interface VoiceSettingsActions : RuVoiceSetupActions {
     fun refreshSystemVoices()
     fun setDialogue(language: String, dialogue: DialogueVoices)
     fun previewDialogue(language: String)
+    fun setEmotions(level: EmotionLevel)
+    fun previewEmotions(language: String)
 }

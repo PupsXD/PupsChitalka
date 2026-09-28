@@ -645,7 +645,7 @@ private fun russianSubject(words: List<Word>, cast: Cast, attribution: Boolean):
  * «И когда она кивнула, он спросил», “When she nodded, he asked”: a clause that sets the time comes
  * first and is about someone else; the index of the word after it, or 0.
  */
-private fun skipOpeningClause(words: List<Word>, openers: Set<String>): Int {
+internal fun skipOpeningClause(words: List<Word>, openers: Set<String>): Int {
     var at = 0
     if (words.getOrNull(at)?.key in setOf("и", "а", "но", "and", "but")) at++
     if (words.getOrNull(at)?.key !in openers) return 0
@@ -654,8 +654,8 @@ private fun skipOpeningClause(words: List<Word>, openers: Set<String>): Int {
     return if (end < words.size && words[end].gap.contains(',')) end else 0
 }
 
-private val SUBORDINATE_RU = setOf("когда", "если", "пока", "хотя", "едва", "лишь", "после", "прежде", "раз", "поскольку", "покуда")
-private val SUBORDINATE_EN = setOf("when", "if", "as", "after", "before", "while", "once", "since", "because", "although", "though")
+internal val SUBORDINATE_RU = setOf("когда", "если", "пока", "хотя", "едва", "лишь", "после", "прежде", "раз", "поскольку", "покуда")
+internal val SUBORDINATE_EN = setOf("when", "if", "as", "after", "before", "while", "once", "since", "because", "although", "though")
 
 /** Words that may stand between a verb and its subject: «сказал ему отец», «тихо сказала Маша». */
 private val OBJECT_PRONOUNS = setOf("ему", "ей", "им", "его", "ее", "их", "мне", "тебе", "нам", "вам", "себе", "меня", "тебя", "нас", "вас")

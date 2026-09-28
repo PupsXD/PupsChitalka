@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
@@ -53,8 +54,18 @@ internal class SynthesisHub private constructor(context: Context) {
         VoiceEngine.SYSTEM -> SystemVoices.isEngineInstalled(app, voice.enginePackage)
     }
 
-    fun synthesize(voice: VoiceChoice, text: String, language: String, settings: SpeechSettings): SynthesizedAudio {
-        val speed = settings.speed
+    /** Renders [text]; [prosody] is the line's tone: its pace and pitch come from here, its loudness from the player. */
+    fun synthesize(
+        voice: VoiceChoice,
+        text: String,
+        language: String,
+        settings: SpeechSettings,
+        prosody: Prosody = Prosody.NEUTRAL,
+    ): SynthesizedAudio {
+        val speed = settings.speed * prosody.rate
+        // Supertonic and Kokoro cannot change pitch: they speak slower by as much, and the player plays
+        // the sound that much faster, which brings the pace back and raises the voice.
+        val modelSpeed = speed / prosody.pitch
         return when (voice.engine) {
             VoiceEngine.SUPERTONIC -> {
                 val model = supertonicModel(settings)
@@ -64,11 +75,11 @@ internal class SynthesisHub private constructor(context: Context) {
                 val config = GenerationConfig(
                     sid = voice.speaker.coerceIn(0, 9),
                     // Supertone's own default pace is 1.05; the reader's 1.0 means that pace.
-                    speed = speed * 1.05f,
+                    speed = modelSpeed * 1.05f,
                     numSteps = settings.supertonicSteps,
                     extra = mapOf("lang" to if (language == "en") "en" else "ru", "silence_duration" to "0.15"),
                 )
-                generate(model, spoken, config)
+                generate(model, spoken, config, speedUp = prosody.pitch)
             }
             VoiceEngine.KOKORO -> {
                 val model = kokoroModel(settings)
@@ -77,14 +88,14 @@ internal class SynthesisHub private constructor(context: Context) {
                 if (spoken.isBlank()) return SynthesizedAudio(FloatArray(0), 24_000)
                 val config = GenerationConfig(
                     sid = voice.speaker,
-                    speed = speed,
+                    speed = modelSpeed,
                     extra = mapOf("lang" to VoiceCatalog.kokoroLanguage(voice.speaker)),
                 )
-                generate(model, spoken, config)
+                generate(model, spoken, config, speedUp = prosody.pitch)
             }
             VoiceEngine.SYSTEM -> {
                 val client = systemClients.getOrPut(voice.enginePackage) { SystemTtsClient(app, voice.enginePackage) }
-                client.synthesize(text, voice.voiceName, language, speed)
+                client.synthesize(text, voice.voiceName, language, speed, prosody.pitch)
             }
         }
     }
@@ -141,11 +152,11 @@ internal class SynthesisHub private constructor(context: Context) {
         else -> null
     }
 
-    private fun generate(model: SpeechModel, text: String, config: GenerationConfig): SynthesizedAudio {
+    private fun generate(model: SpeechModel, text: String, config: GenerationConfig, speedUp: Float): SynthesizedAudio {
         val tts = load(model)
         // One native call at a time per model; a cancelled session may still finish its sentence.
         val audio = synchronized(tts) { tts.generateWithConfig(text, config) }
-        return SynthesizedAudio(audio.samples, audio.sampleRate.takeIf { it > 0 } ?: tts.sampleRate())
+        return SynthesizedAudio(audio.samples, audio.sampleRate.takeIf { it > 0 } ?: tts.sampleRate(), speedUp = speedUp)
     }
 
     private fun load(model: SpeechModel): OfflineTts = synchronized(modelLock) {
@@ -237,6 +248,7 @@ internal class SystemTtsClient(context: Context, val enginePackage: String) {
     private var appliedVoice: String? = null
     private var appliedLanguage: String? = null
     private var appliedRate = -1f
+    private var appliedPitch = -1f
     private val directory = File(File(app.cacheDir, "system-tts"), enginePackage.replace(Regex("[^A-Za-z0-9._-]"), "_")).apply {
         mkdirs()
         // Files left behind if the process died in the middle of a sentence.
@@ -273,8 +285,12 @@ internal class SystemTtsClient(context: Context, val enginePackage: String) {
         })
     }
 
+    /**
+     * [pitch] scales the pitch set in Android's speech settings, which the engine uses when nobody asks
+     * for another. RuVoice passes it to the model, so the voice is not distorted.
+     */
     @Synchronized
-    fun synthesize(text: String, voiceName: String, language: String, speed: Float): SynthesizedAudio {
+    fun synthesize(text: String, voiceName: String, language: String, speed: Float, pitch: Float = 1f): SynthesizedAudio {
         if (!ready.await(15, TimeUnit.SECONDS) || initStatus != TextToSpeech.SUCCESS) {
             throw VoiceUnavailableException("Движок синтеза $enginePackage не отвечает")
         }
@@ -282,6 +298,12 @@ internal class SystemTtsClient(context: Context, val enginePackage: String) {
         if (appliedRate != speed) {
             tts.setSpeechRate(speed)
             appliedRate = speed
+        }
+        val systemPitch = Settings.Secure.getInt(app.contentResolver, Settings.Secure.TTS_DEFAULT_PITCH, 100) / 100f
+        val wantedPitch = systemPitch * pitch
+        if (appliedPitch != wantedPitch) {
+            tts.setPitch(wantedPitch)
+            appliedPitch = wantedPitch
         }
         val id = UUID.randomUUID().toString()
         val file = File(directory, "$id.wav")

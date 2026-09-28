@@ -130,18 +130,36 @@ object NarrationController {
         return start(context, NarrationService.ACTION_PLAY)
     }
 
-    /** Plays a short dialogue with the saved narrator and character voices. */
-    fun previewDialogue(context: Context, language: String): Boolean {
+    /**
+     * Plays a short dialogue with the saved narrator and character voices; [emotional] picks one whose
+     * lines are shouted, mumbled, hissed, whispered and laughed.
+     */
+    fun previewDialogue(context: Context, language: String, emotional: Boolean = false): Boolean {
         // The last line has no author's words: the narration before it tells whose it is.
-        val paragraphs = if (language == "en") {
-            listOf(
+        val paragraphs = when {
+            emotional && language == "en" -> listOf(
+                "“Stop!” she shouted. “Where are you going?”",
+                "“I-I don’t know,” he mumbled.",
+                "“Don’t you dare lie to me,” she hissed.",
+                "He lowered his head and said nothing for a long time.",
+                "“I’m sorry,” he whispered at last. “I never meant to hurt you.”",
+                "She suddenly laughed. “Silly! I’m not angry.”",
+            )
+            emotional -> listOf(
+                "— Стой! — крикнула она. — Куда ты собрался?",
+                "— Я… я не знаю, — неуверенно пробормотал он.",
+                "— Не смей мне лгать, — процедила она сквозь зубы.",
+                "Он опустил голову и долго молчал.",
+                "— Прости, — прошептал он наконец. — Я правда не хотел тебя обидеть.",
+                "Она вдруг рассмеялась: — Глупый! Я же не сержусь.",
+            )
+            language == "en" -> listOf(
                 "“Are you coming back?” she whispered.",
                 "“Of course,” he said without turning around. “It will all be over by morning.”",
                 "She watched him go for a long time.",
                 "“I will wait.”",
             )
-        } else {
-            listOf(
+            else -> listOf(
                 "— Ты вернёшься? — спросила она почти шёпотом.",
                 "— Конечно, — ответил он, не оборачиваясь. — К утру всё закончится.",
                 "Она долго смотрела ему вслед.",
@@ -437,7 +455,7 @@ class NarrationService : Service(), NarrationPlayer.Listener {
 
     /** Characters matter only when their lines get their own voices. */
     private fun castFor(book: Book, settings: SpeechSettings): Cast =
-        if (settings.splitsDialogue) BookCasts.forBook(this, book) else Cast.EMPTY
+        if (settings.voicesCharacters) BookCasts.forBook(this, book) else Cast.EMPTY
 
     private fun dominantBookLanguage(): String {
         val target = book ?: return "ru"

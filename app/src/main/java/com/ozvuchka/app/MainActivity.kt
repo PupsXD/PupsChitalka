@@ -68,6 +68,7 @@ import com.ozvuchka.app.speech.CastMember
 import com.ozvuchka.app.speech.CastStore
 import com.ozvuchka.app.speech.DialogueMode
 import com.ozvuchka.app.speech.DialogueVoices
+import com.ozvuchka.app.speech.EmotionLevel
 import com.ozvuchka.app.speech.ModelInstallState
 import com.ozvuchka.app.speech.NarrationController
 import com.ozvuchka.app.speech.NarrationPhase
@@ -153,6 +154,8 @@ class MainActivity : ComponentActivity() {
     private var showVoices by mutableStateOf(false)
     private var voicesLanguage by mutableStateOf("ru")
     private var previewVoice by mutableStateOf<VoiceChoice?>(null)
+    /** The sample dialogue now playing is the one that shows emotions. */
+    private var previewingEmotions by mutableStateOf(false)
     private val pageTurns = MutableSharedFlow<Int>(extraBufferCapacity = 4)
 
     private val openDocument = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -299,7 +302,9 @@ class MainActivity : ComponentActivity() {
                                     previewVoice = previewVoice.takeIf { narration.isPreview && narration.active },
                                     russianDialogue = settings.russianDialogue,
                                     englishDialogue = settings.englishDialogue,
-                                    dialoguePreviewing = narration.isPreview && narration.active && previewVoice == null,
+                                    dialoguePreviewing = narration.isPreview && narration.active && previewVoice == null && !previewingEmotions,
+                                    emotions = settings.emotions,
+                                    emotionsPreviewing = narration.isPreview && narration.active && previewVoice == null && previewingEmotions,
                                     ruVoiceSetup = ruVoiceSetup,
                                 ),
                                 initialLanguage = voicesLanguage,
@@ -467,7 +472,10 @@ class MainActivity : ComponentActivity() {
         val previous = narration
         narration = state
         if (!state.isPreview || !state.active) {
-            if (!state.active) previewVoice = null
+            if (!state.active) {
+                previewVoice = null
+                previewingEmotions = false
+            }
         }
         if (state.message != null && state.messageId != previous.messageId) notice = state.message
         val visible = currentBook ?: return
@@ -869,7 +877,16 @@ class MainActivity : ComponentActivity() {
 
         override fun previewDialogue(language: String) {
             previewVoice = null
+            previewingEmotions = false
             NarrationController.previewDialogue(this@MainActivity, language)
+        }
+
+        override fun setEmotions(level: EmotionLevel) = updateSpeech { it.copy(emotions = level) }
+
+        override fun previewEmotions(language: String) {
+            previewVoice = null
+            previewingEmotions = true
+            NarrationController.previewDialogue(this@MainActivity, language, emotional = true)
         }
 
         override fun refreshSystemVoices() {
