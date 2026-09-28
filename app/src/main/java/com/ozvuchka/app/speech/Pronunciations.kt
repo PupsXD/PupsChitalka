@@ -63,18 +63,24 @@ private class RewriteBuilder(private val sourceLength: Int) {
  * The reader's own pronunciations: a word maps to how it should be said, with «+» before the stressed
  * vowel («з+амок») or as a different spelling. Keys ignore case and «ё».
  */
-class PronunciationDictionary(entries: Map<String, String>) {
+class PronunciationDictionary(
+    entries: Map<String, String>,
+    private val defaultStresses: ((String) -> String?)? = null,
+) {
     private val entries: Map<String, String> = entries.mapKeys { normalizeWord(it.key) }
 
-    val isEmpty: Boolean get() = entries.isEmpty()
+    val isEmpty: Boolean get() = entries.isEmpty() && defaultStresses == null
 
     internal fun apply(text: String, style: StressStyle): Rewrite {
-        if (entries.isEmpty()) return Rewrite.identity(text)
+        if (entries.isEmpty() && (style != StressStyle.PLUS || defaultStresses == null)) return Rewrite.identity(text)
         val builder = RewriteBuilder(text.length)
         var cursor = 0
         var changed = false
         for (match in WORD.findAll(text)) {
-            val spoken = entries[normalizeWord(match.value)] ?: continue
+            val spoken = entries[normalizeWord(match.value)] ?: if (
+                style == StressStyle.PLUS && text.getOrNull(match.range.last + 1) != ACUTE
+            ) defaultStresses?.invoke(match.value.lowercase()) else null
+            if (spoken == null) continue
             builder.copy(text, cursor, match.range.first)
             builder.replace(styled(matchCase(spoken, match.value), style), match.range.first, match.range.last + 1)
             cursor = match.range.last + 1
@@ -153,7 +159,8 @@ object PronunciationStore {
     fun load(context: Context, bookId: String?): PronunciationDictionary {
         val global = entries(context, null)
         val own = if (bookId != null) entries(context, bookId) else emptyMap()
-        return PronunciationDictionary(global + own)
+        val appContext = context.applicationContext
+        return PronunciationDictionary(global + own) { word -> RussianStressLexicon.find(appContext, word) }
     }
 
     /** The saved entry for [word] and whether it belongs to the book (false: every book). */

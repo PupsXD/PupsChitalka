@@ -8,10 +8,10 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-// Each build gets a larger version code (minutes since 2026), so the phone installs every new APK
+// Each build gets a larger version code (seconds since 2026), so the phone installs every new APK
 // as an update of the previous one.
 val buildTime: ZonedDateTime = ZonedDateTime.now(ZoneOffset.UTC)
-val buildNumber = (buildTime.toEpochSecond() / 60 - 29_453_760).toInt()
+val buildNumber = (buildTime.toEpochSecond() - 1_767_225_600).toInt()
 
 android {
     namespace = "com.ozvuchka.app"
@@ -35,8 +35,9 @@ android {
             create("ozvuchka") {
                 storeFile = appKey
                 storePassword = System.getenv("OZVUCHKA_KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("OZVUCHKA_KEY_ALIAS") ?: "ozvuchka"
-                keyPassword = System.getenv("OZVUCHKA_KEY_PASSWORD") ?: System.getenv("OZVUCHKA_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("OZVUCHKA_KEY_ALIAS")?.takeIf { it.isNotBlank() } ?: "ozvuchka"
+                keyPassword = System.getenv("OZVUCHKA_KEY_PASSWORD")?.takeIf { it.isNotBlank() }
+                    ?: System.getenv("OZVUCHKA_KEYSTORE_PASSWORD")
             }
         }
     }
