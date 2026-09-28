@@ -62,7 +62,7 @@ jobs:
           EOF
           gh release create "v${name%% *}.$code" "$apk" \
             --target "$GITHUB_SHA" \
-            --title "Озвучка $name" \
+            --title "PupsChitalka $name" \
             --notes-file "$RUNNER_TEMP/notes.md" \
             --generate-notes \
             --latest

@@ -27,7 +27,7 @@
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
-        android:label="Озвучка"
+        android:label="PupsChitalka"
         android:supportsRtl="true"
         android:enableOnBackInvokedCallback="true"
         android:theme="@style/Theme.Ozvuchka"
@@ -71,7 +71,7 @@
             android:name=".speech.NarrationTileService"
             android:exported="true"
             android:icon="@drawable/ic_stat_narration"
-            android:label="Озвучка"
+            android:label="PupsChitalka"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
             <intent-filter>
                 <action android:name="android.service.quicksettings.action.QS_TILE" />
