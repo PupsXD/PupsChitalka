@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.EditNote
+import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.Highlight
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RecordVoiceOver
@@ -35,6 +36,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -56,7 +58,10 @@ import androidx.compose.ui.unit.dp
 import com.ozvuchka.app.data.Annotation
 import com.ozvuchka.app.data.AnnotationKind
 import com.ozvuchka.app.data.SearchHit
+import com.ozvuchka.app.speech.CastMember
 import com.ozvuchka.app.speech.PronunciationDictionary
+import com.ozvuchka.app.speech.SpeechRole
+import com.ozvuchka.app.speech.memberFor
 import com.ozvuchka.app.speech.splitForSpeech
 import kotlinx.coroutines.delay
 import kotlin.math.abs
@@ -107,9 +112,14 @@ internal fun WordActionsSheet(
     onPronunciation: () -> Unit,
     /** Opens the note editor; the flag tells whether the highlight is new. */
     onNote: (Annotation, Boolean) -> Unit,
+    /** Opens the choice of voice for a character named by the word. */
+    onCharacter: (CastMember) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val chapter = state.chapterIndex
+    val character = remember(target, state.characters) {
+        if (state.voicesByGender) state.characters?.memberFor(target.word, target.sentence) else null
+    }
     val inSentence = { annotation: Annotation ->
         annotation.chapter == chapter && annotation.paragraph == target.paragraph &&
             annotation.start < target.sentenceEnd && annotation.end > target.sentenceStart
@@ -139,6 +149,12 @@ internal fun WordActionsSheet(
                 ActionRow(Icons.Filled.RecordVoiceOver, "Как произносить «${target.word}»") {
                     onDismiss()
                     onPronunciation()
+                }
+            }
+            if (character != null) {
+                ActionRow(Icons.Filled.Face, "Голос персонажа «${character.name}»: ${genderTitle(character.gender)}") {
+                    onDismiss()
+                    onCharacter(character)
                 }
             }
             if (hasLatin(target.word)) {
@@ -398,6 +414,134 @@ internal fun PronunciationListSheet(actions: ReaderActions, onDismiss: () -> Uni
             }
         }
     }
+}
+
+/**
+ * The book's characters and the voice of their lines. The gender comes from the text («сказала
+ * Вэнь Цин», «Лань Чжань кивнул»); a wrong one is fixed with a tap and holds for the whole book.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun CastSheet(state: ReaderUiState, actions: ReaderActions, onPick: (CastMember) -> Unit, onDismiss: () -> Unit) {
+    LaunchedEffect(Unit) { actions.loadCharacters() }
+    val characters = state.characters
+    var showUnclear by remember { mutableStateOf(false) }
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+        LazyColumn(
+            modifier = Modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(start = 24.dp, end = 24.dp, bottom = 32.dp),
+        ) {
+            item {
+                Text("Персонажи", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Кто мужчина, а кто женщина, понятно из текста: «сказала Вэнь Цин», «Лань Чжань кивнул». " +
+                        "Если голос перепутан, нажмите на имя и выберите сами — выбор действует во всей книге.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (!state.voicesByGender) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Сейчас реплики не делятся на мужские и женские. Включите «Голоса персонажей → По ролям» в настройках озвучки.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    TextButton(onClick = {
+                        onDismiss()
+                        actions.openVoices()
+                    }) { Text("Голоса и озвучка") }
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+            when {
+                characters == null -> item {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 16.dp)) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(10.dp))
+                        Text("Ищем имена в книге…", style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+                characters.isEmpty() -> item {
+                    Text("Имён пока не нашлось.", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(vertical = 16.dp))
+                }
+                else -> {
+                    val known = characters.filter { it.gender != null }
+                    // Frequent capitalised words whose gender the text never shows: names in the
+                    // present tense, but also places and titles.
+                    val unclear = characters.filter { it.gender == null && it.mentions >= 5 }
+                    items(known, key = { it.name }) { member -> CastRow(member) { onPick(member) } }
+                    if (unclear.isNotEmpty()) {
+                        item {
+                            TextButton(onClick = { showUnclear = !showUnclear }) {
+                                Text(if (showUnclear) "Скрыть имена без пола" else "Ещё имена, пол не ясен: ${unclear.size}")
+                            }
+                        }
+                        if (showUnclear) items(unclear, key = { "?" + it.name }) { member -> CastRow(member) { onPick(member) } }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CastRow(member: CastMember, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(member.name, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                "Упоминаний: ${member.mentions}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Text(
+            genderTitle(member.gender) + if (member.chosen) " · ваш выбор" else "",
+            style = MaterialTheme.typography.labelLarge,
+            color = if (member.gender == null) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary,
+        )
+    }
+}
+
+internal fun genderTitle(gender: SpeechRole?): String = when (gender) {
+    SpeechRole.MALE -> "мужской"
+    SpeechRole.FEMALE -> "женский"
+    else -> "пол не ясен"
+}
+
+/** A man's voice, a woman's, or back to what the text says. */
+@Composable
+internal fun CharacterVoiceDialog(member: CastMember, actions: ReaderActions, onDismiss: () -> Unit) {
+    fun choose(gender: SpeechRole?) {
+        actions.setCharacterGender(member.name, gender)
+        onDismiss()
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(member.name) },
+        text = {
+            Column {
+                Text("Каким голосом читать реплики этого персонажа?", style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(8.dp))
+                listOf(SpeechRole.MALE to "Мужским", SpeechRole.FEMALE to "Женским").forEach { (gender, title) ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clickable { choose(gender) }.padding(vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = member.gender == gender, onClick = { choose(gender) })
+                        Text(title, style = MaterialTheme.typography.bodyLarge)
+                    }
+                }
+                if (member.chosen) {
+                    TextButton(onClick = { choose(null) }) { Text("Как подсказывает текст") }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Закрыть") } },
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

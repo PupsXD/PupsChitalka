@@ -1,36 +1,33 @@
 package com.ozvuchka.app.ui
 
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.onRoot
-import androidx.compose.ui.test.performTouchInput
-import androidx.compose.ui.test.swipeLeft
-import androidx.compose.ui.test.swipeRight
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performSemanticsAction
 import com.ozvuchka.app.data.Annotation
 import com.ozvuchka.app.data.SearchHit
+import com.ozvuchka.app.speech.CastMember
 import com.ozvuchka.app.speech.SpeechRole
-import kotlinx.coroutines.flow.emptyFlow
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
-/** A swipe past the edge of a chapter turns into the next or the previous chapter. */
+/** A character read with the wrong voice is fixed from the list of the book's characters. */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], qualifiers = "w400dp-h800dp")
-class ReaderSwipeTest {
+class CastSheetTest {
     @get:Rule
     val compose = createComposeRule()
 
-    private val opened = mutableListOf<Pair<Int, Float>>()
+    private val chosen = mutableListOf<Pair<String, SpeechRole?>>()
 
     private val actions = object : ReaderActions {
         override fun back() = Unit
-        override fun changeChapter(index: Int, progress: Float) {
-            opened += index to progress
-        }
+        override fun changeChapter(index: Int, progress: Float) = Unit
         override fun readingProgressChanged(overall: Float) = Unit
         override fun chromeVisibilityChanged(visible: Boolean) = Unit
         override fun playPause() = Unit
@@ -57,7 +54,9 @@ class ReaderSwipeTest {
         override fun removePronunciation(word: String) = Unit
         override fun previewPronunciation(word: String, spoken: String, sentence: String, language: String) = Unit
         override fun loadCharacters() = Unit
-        override fun setCharacterGender(name: String, gender: SpeechRole?) = Unit
+        override fun setCharacterGender(name: String, gender: SpeechRole?) {
+            chosen += name to gender
+        }
         override fun addAnnotation(annotation: Annotation) = Unit
         override fun updateAnnotation(annotation: Annotation) = Unit
         override fun removeAnnotation(id: String) = Unit
@@ -68,50 +67,41 @@ class ReaderSwipeTest {
         override fun shareQuote(text: String) = Unit
     }
 
-    /** The first chapter runs over many pages; the others fit on one. */
-    private fun paragraphs(index: Int) = if (index == 0) {
-        List(60) { "Длинный абзац первой главы номер ${it + 1}, в котором достаточно слов, чтобы занять несколько строк на странице." }
-    } else {
-        listOf("Короткий абзац главы ${index + 1}.")
-    }
-
-    private fun chapter(index: Int) = ChapterContent(index, "Глава ${index + 1}", paragraphs(index))
-
-    private fun state(index: Int) = ReaderUiState(
+    private val state = ReaderUiState(
         bookId = "book",
         title = "Книга",
-        chapterTitle = "Глава ${index + 1}",
-        chapterIndex = index,
-        chapterCount = 3,
-        paragraphs = paragraphs(index),
-        previousChapter = if (index > 0) chapter(index - 1) else null,
-        nextChapter = if (index < 2) chapter(index + 1) else null,
+        chapterTitle = "Глава 1",
+        chapterIndex = 0,
+        chapterCount = 1,
+        paragraphs = listOf("— Вы оба невыносимы, — говорит Вэнь Цин."),
+        characters = listOf(
+            CastMember("Лань Чжань", SpeechRole.MALE, 50),
+            CastMember("Вэнь Цин", SpeechRole.MALE, 30),
+            CastMember("Облачные Глубины", null, 12),
+        ),
+        voicesByGender = true,
     )
 
     @Test
-    fun swipingPastTheLastPageOpensTheNextChapterAtItsStart() {
-        compose.setContent { ReaderScreen(state(1), actions, emptyFlow()) }
-        compose.onRoot().performTouchInput { swipeLeft() }
+    fun theListOpensACharacter() {
+        val picked = mutableListOf<String>()
+        compose.setContent { CastSheet(state, actions, onPick = { picked += it.name }) {} }
+        compose.onNodeWithText("Лань Чжань").assertExists()
+        // Names whose gender the text never showed wait behind a button.
+        compose.onNodeWithText("Облачные Глубины").assertDoesNotExist()
+        // A click through semantics: Robolectric's taps do not reach rows of a sheet that slides in.
+        compose.onNodeWithText("Вэнь Цин").performSemanticsAction(SemanticsActions.OnClick)
         compose.waitForIdle()
-        assertEquals(listOf(2 to 0f), opened)
+        assertEquals(listOf("Вэнь Цин"), picked)
+        compose.onNodeWithText("Ещё имена, пол не ясен: 1").performSemanticsAction(SemanticsActions.OnClick)
+        compose.onNodeWithText("Облачные Глубины").assertExists()
     }
 
     @Test
-    fun swipingBackFromTheFirstPageOpensThePreviousChapterAtItsLastPage() {
-        compose.setContent { ReaderScreen(state(1), actions, emptyFlow()) }
-        compose.onRoot().performTouchInput { swipeRight() }
+    fun theDialogSetsTheVoice() {
+        compose.setContent { CharacterVoiceDialog(CastMember("Вэнь Цин", SpeechRole.MALE, 30), actions) {} }
+        compose.onNodeWithText("Женским").performClick()
         compose.waitForIdle()
-        assertEquals(1, opened.size)
-        assertEquals(0, opened.single().first)
-        // The previous chapter opens where its last page starts, not at its beginning.
-        assertTrue(opened.single().second > 0f)
-    }
-
-    @Test
-    fun theLastChapterStaysPut() {
-        compose.setContent { ReaderScreen(state(2), actions, emptyFlow()) }
-        compose.onRoot().performTouchInput { swipeLeft() }
-        compose.waitForIdle()
-        assertEquals(emptyList<Pair<Int, Float>>(), opened)
+        assertEquals(listOf("Вэнь Цин" to SpeechRole.FEMALE), chosen)
     }
 }

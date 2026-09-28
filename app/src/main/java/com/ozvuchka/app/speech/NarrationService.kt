@@ -132,17 +132,20 @@ object NarrationController {
 
     /** Plays a short dialogue with the saved narrator and character voices. */
     fun previewDialogue(context: Context, language: String): Boolean {
+        // The last line has no author's words: the narration before it tells whose it is.
         val paragraphs = if (language == "en") {
             listOf(
                 "“Are you coming back?” she whispered.",
                 "“Of course,” he said without turning around. “It will all be over by morning.”",
                 "She watched him go for a long time.",
+                "“I will wait.”",
             )
         } else {
             listOf(
                 "— Ты вернёшься? — спросила она почти шёпотом.",
                 "— Конечно, — ответил он, не оборачиваясь. — К утру всё закончится.",
                 "Она долго смотрела ему вслед.",
+                "— Я буду ждать.",
             )
         }
         pending.set(PlayRequest(null, 0, 0, 0, previewParagraphs = paragraphs))
@@ -400,7 +403,7 @@ class NarrationService : Service(), NarrationPlayer.Listener {
             previewSource = null
             settings = loaded
             pronunciations = PronunciationStore.load(this, target.id)
-            val bookSource = BookSegmentSource(target.chapters, request.chapter, splitDialogue = loaded.splitsDialogue)
+            val bookSource = BookSegmentSource(target.chapters, request.chapter, splitDialogue = loaded.splitsDialogue, cast = castFor(target, loaded))
             prepareGrowth(bookSource, target)
             source = bookSource
             lastIndex = bookSource.indexOf(request.chapter, request.paragraph, request.offset)
@@ -431,6 +434,10 @@ class NarrationService : Service(), NarrationPlayer.Listener {
             player.play(source!!, lastIndex, activeSettings, pronunciations = pronunciations)
         }
     }
+
+    /** Characters matter only when their lines get their own voices. */
+    private fun castFor(book: Book, settings: SpeechSettings): Cast =
+        if (settings.splitsDialogue) BookCasts.forBook(this, book) else Cast.EMPTY
 
     private fun dominantBookLanguage(): String {
         val target = book ?: return "ru"
@@ -577,11 +584,13 @@ class NarrationService : Service(), NarrationPlayer.Listener {
         val wasPaused = player.isPaused
         var index = player.currentIndex ?: lastIndex
         val target = book
-        if (target != null && currentSource.splitDialogue != loaded.splitsDialogue) {
-            // Dialogue voices were switched on or off: cut the text again, keeping the place.
+        val cast = target?.let { castFor(it, loaded) } ?: Cast.EMPTY
+        if (target != null && (currentSource.splitDialogue != loaded.splitsDialogue || currentSource.cast.choices != cast.choices)) {
+            // Dialogue voices were switched on or off, or a character's gender was changed: cut
+            // the text again, keeping the place.
             val here = currentSource.get(index)
             val chapter = here?.chapter ?: state.chapterIndex ?: 0
-            val rebuilt = BookSegmentSource(target.chapters, chapter, splitDialogue = loaded.splitsDialogue)
+            val rebuilt = BookSegmentSource(target.chapters, chapter, splitDialogue = loaded.splitsDialogue, cast = cast)
             prepareGrowth(rebuilt, target)
             index = if (here == null) 0 else rebuilt.indexOf(here.chapter, here.paragraph, here.start)
             source = rebuilt

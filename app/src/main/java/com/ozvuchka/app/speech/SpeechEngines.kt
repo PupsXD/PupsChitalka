@@ -338,6 +338,8 @@ data class SystemVoiceInfo(
     val needsNetwork: Boolean,
     val notInstalled: Boolean,
     val quality: Int,
+    /** The engine reads its language with this voice when none is chosen: what «По умолчанию» sounds like. */
+    val isDefault: Boolean = false,
 )
 
 data class SystemEngineInfo(val packageName: String, val label: String)
@@ -372,6 +374,12 @@ object SystemVoices {
         return try {
             if (!latch.await(10, TimeUnit.SECONDS) || status != TextToSpeech.SUCCESS) return emptyList()
             val voices: Set<Voice> = runCatching { tts.voices }.getOrNull().orEmpty()
+            // What «По умолчанию» sounds like: the voice the engine picks when narration sets only the language.
+            val defaults = listOf("ru-RU", "en-US").mapNotNull { tag ->
+                runCatching {
+                    if (tts.setLanguage(Locale.forLanguageTag(tag)) >= TextToSpeech.LANG_AVAILABLE) tts.voice?.name else null
+                }.getOrNull()
+            }.toSet()
             voices.filter { it.locale.language == "ru" || it.locale.language == "en" }
                 .map { voice ->
                     SystemVoiceInfo(
@@ -382,6 +390,7 @@ object SystemVoices {
                         needsNetwork = voice.isNetworkConnectionRequired,
                         notInstalled = voice.features?.contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED) == true,
                         quality = voice.quality,
+                        isDefault = voice.name in defaults,
                     )
                 }
                 .sortedWith(

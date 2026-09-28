@@ -29,6 +29,8 @@ internal class BookSegmentSource(
     private val firstChapter: Int,
     /** Cut characters' lines into their own segments, for dialogue voices. */
     val splitDialogue: Boolean = false,
+    /** The book's characters, so a name next to a line tells who says it. */
+    val cast: Cast = Cast.EMPTY,
 ) : SegmentSource {
     private val chapters = ArrayList(chapters)
     private val segments = ArrayList<SpeechSegment>()
@@ -60,7 +62,7 @@ internal class BookSegmentSource(
         while (index >= segments.size && nextChapter < chapters.size) {
             val chapter = chapters[nextChapter]
             val headings = chapter.styles.filterValues { it.kind == ParagraphKind.HEADING || it.kind == ParagraphKind.SUBHEADING }.keys
-            segments += chapterSegments(nextChapter, chapter.title, chapter.paragraphs, splitDialogue = splitDialogue, headings = headings)
+            segments += chapterSegments(nextChapter, chapter.title, chapter.paragraphs, splitDialogue = splitDialogue, headings = headings, cast = cast)
             nextChapter++
         }
         return segments.getOrNull(index)
