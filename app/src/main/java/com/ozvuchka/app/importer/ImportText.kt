@@ -1,6 +1,8 @@
 package com.ozvuchka.app.importer
 
 import com.ozvuchka.app.data.Chapter
+import com.ozvuchka.app.data.ParagraphKind
+import com.ozvuchka.app.data.ParagraphStyle
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.Node
 import org.jsoup.nodes.TextNode
@@ -22,12 +24,20 @@ internal fun normalizeText(value: String): String = value
     .replace(whiteSpace, " ")
     .trim()
 
-internal fun htmlParagraphs(root: Element): List<String> {
-    val result = mutableListOf<String>()
+internal fun htmlParagraphs(root: Element): List<String> = htmlBlocks(root).map { it.first }
+
+/**
+ * Paragraphs of an HTML or FB2 fragment with their look: headings, captions, table rows, and
+ * pictures that [image] stores (it gets the `img` or `image` element; null leaves the picture out,
+ * then its description is kept as text).
+ */
+internal fun htmlBlocks(root: Element, image: (Element) -> ParagraphStyle? = { null }): List<Pair<String, ParagraphStyle?>> {
+    val result = mutableListOf<Pair<String, ParagraphStyle?>>()
     val current = StringBuilder()
+    var currentKind: ParagraphKind? = null
     fun flush() {
         val paragraph = normalizeText(current.toString())
-        if (paragraph.isNotEmpty()) result += paragraph
+        if (paragraph.isNotEmpty()) result += paragraph to currentKind?.let { ParagraphStyle(it) }
         current.clear()
     }
     fun visit(node: Node) {
@@ -40,18 +50,44 @@ internal fun htmlParagraphs(root: Element): List<String> {
                     flush()
                     return
                 }
-                if (tag == "img") {
-                    val alt = normalizeText(node.attr("alt"))
-                    if (alt.isNotEmpty()) {
-                        flush()
-                        result += "Иллюстрация: $alt"
+                if (tag == "img" || tag == "image") {
+                    val style = runCatching { image(node) }.getOrNull()
+                    flush()
+                    if (style != null) {
+                        result += "" to style
+                    } else {
+                        val alt = normalizeText(node.attr("alt"))
+                        if (alt.isNotEmpty()) result += "Иллюстрация: $alt" to null
                     }
                     return
                 }
-                val block = tag in blockTags
+                if (tag == "tr") {
+                    flush()
+                    val cells = node.children().filter { it.normalName().substringAfterLast(':') in setOf("td", "th") }
+                    val texts = cells.map { cell -> normalizeText(cell.text()).replace('\t', ' ') }
+                    if (texts.any { it.isNotEmpty() }) {
+                        val header = cells.isNotEmpty() && cells.all { it.normalName().endsWith("th") }
+                        result += texts.joinToString("\t") to ParagraphStyle(if (header) ParagraphKind.TABLE_HEADER else ParagraphKind.TABLE_ROW)
+                    }
+                    // Pictures inside cells still show, after the row.
+                    node.select("img, image").forEach(::visit)
+                    return
+                }
+                val classes = node.className().lowercase()
+                val kind = when {
+                    tag == "h1" || tag == "h2" -> ParagraphKind.HEADING
+                    tag in setOf("h3", "h4", "h5", "h6", "subtitle") -> ParagraphKind.SUBHEADING
+                    tag == "figcaption" || tag == "caption" || "caption" in classes -> ParagraphKind.CAPTION
+                    tag in setOf("div", "p", "blockquote", "section") && ("note" in classes || "sidebar" in classes) -> ParagraphKind.NOTE
+                    else -> null
+                }
+                val block = tag in blockTags || kind != null
                 if (block) flush()
+                val outer = currentKind
+                if (kind != null) currentKind = kind
                 node.childNodes().forEach(::visit)
                 if (block) flush()
+                currentKind = outer
             }
             else -> node.childNodes().forEach(::visit)
         }
@@ -59,6 +95,34 @@ internal fun htmlParagraphs(root: Element): List<String> {
     visit(root)
     flush()
     return result
+}
+
+/** A long chapter without headings as parts of about [maxChapterChars] letters; looks stay with their paragraphs. */
+internal fun splitLongChapter(chapter: Chapter, maxChapterChars: Int = 30_000): List<Chapter> {
+    if (chapter.paragraphs.sumOf { it.length } <= maxChapterChars) return listOf(chapter)
+    val parts = ArrayList<Chapter>()
+    var from = 0
+    var size = 0
+    fun cut(until: Int) {
+        val styles = chapter.styles.filterKeys { it in from until until }.mapKeys { it.key - from }
+        val title = if (parts.isEmpty()) chapter.title else "Часть ${parts.size + 1}"
+        parts += Chapter(title, chapter.paragraphs.subList(from, until).toList(), styles = styles)
+        from = until
+        size = 0
+    }
+    chapter.paragraphs.forEachIndexed { index, paragraph ->
+        if (index > from && size >= maxChapterChars) cut(index)
+        size += paragraph.length
+    }
+    if (from < chapter.paragraphs.size) cut(chapter.paragraphs.size)
+    return parts
+}
+
+/** Paragraphs with looks as a chapter: the looks go to the paragraphs' indexes. */
+internal fun chapterOf(title: String, blocks: List<Pair<String, ParagraphStyle?>>): Chapter {
+    val styles = HashMap<Int, ParagraphStyle>()
+    blocks.forEachIndexed { index, (_, style) -> if (style != null) styles[index] = style }
+    return Chapter(title, blocks.map { it.first }, styles = styles)
 }
 
 internal fun plainParagraphs(text: String): List<String> {

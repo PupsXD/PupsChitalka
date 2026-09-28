@@ -2,6 +2,8 @@ package com.ozvuchka.app.importer
 
 import com.ozvuchka.app.data.Book
 import com.ozvuchka.app.data.Chapter
+import com.ozvuchka.app.data.ParagraphKind
+import com.ozvuchka.app.data.ParagraphStyle
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
@@ -16,6 +18,8 @@ import org.jsoup.parser.Parser
 
 private const val MAX_ZIP_ENTRIES = 12_000
 private const val MAX_TOTAL_TEXT_BYTES = 100L * 1024 * 1024
+private const val MAX_PICTURE_BYTES = 30_000_000
+private const val MAX_TOTAL_PICTURE_BYTES = 400L * 1024 * 1024
 
 /** Reads individual ZIP entries in memory; no archive paths are ever extracted to disk. */
 private class SafeZip(file: File) : Closeable {
@@ -39,7 +43,14 @@ private class SafeZip(file: File) : Closeable {
 
     fun names(): List<String> = zip.entries().asSequence().map { it.name }.toList()
 
-    fun read(path: String, maxBytes: Int): ByteArray {
+    fun read(path: String, maxBytes: Int): ByteArray = read(path, maxBytes, picture = false)
+
+    /** A picture: counted apart from the text, so a richly illustrated book still opens. */
+    fun readPicture(path: String): ByteArray = read(path, MAX_PICTURE_BYTES, picture = true)
+
+    private var picturesRead = 0L
+
+    private fun read(path: String, maxBytes: Int, picture: Boolean): ByteArray {
         val entry = zip.getEntry(path) ?: throw IOException("В архиве нет файла: $path")
         if (entry.isDirectory || entry.size > maxBytes) {
             throw IOException("Раздел книги слишком велик: $path")
@@ -50,11 +61,13 @@ private class SafeZip(file: File) : Closeable {
             while (true) {
                 val count = input.read(buffer)
                 if (count < 0) break
-                if (output.size().toLong() + count > maxBytes || totalRead + count > MAX_TOTAL_TEXT_BYTES) {
-                    throw IOException("Слишком большой объём текста в архиве")
+                val total = if (picture) picturesRead else totalRead
+                val limit = if (picture) MAX_TOTAL_PICTURE_BYTES else MAX_TOTAL_TEXT_BYTES
+                if (output.size().toLong() + count > maxBytes || total + count > limit) {
+                    throw IOException(if (picture) "Слишком много иллюстраций в архиве" else "Слишком большой объём текста в архиве")
                 }
                 output.write(buffer, 0, count)
-                totalRead += count
+                if (picture) picturesRead += count else totalRead += count
             }
         }
         return output.toByteArray()
@@ -93,7 +106,7 @@ private fun resolveZipPath(baseFile: String, relative: String): String? {
     return segments.joinToString("/")
 }
 
-internal fun readEpub(file: File, fallbackTitle: String): Book = SafeZip(file).use { zip ->
+internal fun readEpub(file: File, fallbackTitle: String, images: ImageSink = ImageSink.NONE): Book = SafeZip(file).use { zip ->
     val container = parseXml(zip.read("META-INF/container.xml", 1_000_000))
     val packagePath = container.firstByLocalName("rootfile")?.attr("full-path")
         ?.takeIf(String::isNotBlank)
@@ -112,7 +125,7 @@ internal fun readEpub(file: File, fallbackTitle: String): Book = SafeZip(file).u
     val spine = packageDocument.firstByLocalName("spine")
         ?: throw IOException("В EPUB нет порядка чтения")
     val chapters = mutableListOf<Chapter>()
-    var imageCount = 0
+    var skippedImages = 0
     for (reference in spine.childrenByLocalName("itemref")) {
         val item = items[reference.attr("idref")] ?: continue
         if (item.attr("properties").split(Regex("\\s+")).contains("nav") ||
@@ -124,23 +137,29 @@ internal fun readEpub(file: File, fallbackTitle: String): Book = SafeZip(file).u
         if (!zip.has(path)) continue
         val chapterDocument = Jsoup.parse(ByteArrayInputStream(zip.read(path, 10_000_000)), null, "")
         val body = chapterDocument.body()
-        imageCount += body.select("img, image, svg").size
-        val paragraphs = htmlParagraphs(body).toMutableList()
-        if (paragraphs.isEmpty()) continue
+        val blocks = htmlBlocks(body) { element ->
+            // <img src> in XHTML, <image xlink:href> inside SVG covers and plates.
+            val href = element.attr("src").ifBlank { element.attributes().firstOrNull { it.key.endsWith("href", ignoreCase = true) }?.value.orEmpty() }
+            val picture = resolveZipPath(path, href)?.takeIf(zip::has)
+            val style = picture?.let { runCatching { images.store(zip.readPicture(it)) }.getOrNull() }
+            if (style == null && images !== ImageSink.NONE) skippedImages++
+            style
+        }.toMutableList()
+        if (blocks.isEmpty()) continue
         val chapterTitle = body.selectFirst("h1, h2, h3")?.text()?.let(::normalizeText)
             ?.takeIf(String::isNotBlank) ?: "Глава ${chapters.size + 1}"
-        if (paragraphs.firstOrNull() == chapterTitle) paragraphs.removeAt(0)
-        if (paragraphs.isNotEmpty()) chapters += Chapter(chapterTitle, paragraphs)
+        if (blocks.firstOrNull()?.first == chapterTitle) blocks.removeAt(0)
+        if (blocks.isNotEmpty()) chapters += chapterOf(chapterTitle, blocks)
         if (chapters.size > 2_000) throw IOException("В EPUB слишком много разделов")
     }
     if (chapters.isEmpty()) throw IOException("В EPUB не найден читаемый текст; возможно, книга защищена DRM")
     val warnings = buildList {
-        if (imageCount > 0) add("Иллюстрации EPUB не отображаются в текстовой читалке")
+        if (skippedImages > 0) add("Не удалось показать иллюстраций: $skippedImages (например, векторные SVG)")
     }
     Book(title = title, author = author, format = "EPUB", chapters = chapters, warnings = warnings)
 }
 
-internal fun readFb2(file: File, fallbackTitle: String): Book {
+internal fun readFb2(file: File, fallbackTitle: String, images: ImageSink = ImageSink.NONE): Book {
     val bytes = if (file.inputStream().use { it.read() } == 'P'.code) {
         SafeZip(file).use { zip ->
             val fb2Name = zip.names().firstOrNull { it.endsWith(".fb2", ignoreCase = true) }
@@ -161,6 +180,16 @@ internal fun readFb2(file: File, fallbackTitle: String): Book {
         .filter(String::isNotBlank)
         .joinToString(" ")
         .ifBlank { authorNode?.firstByLocalName("nickname")?.text()?.let(::normalizeText).orEmpty() }
+    // Pictures are base64 <binary> elements that <image l:href="#id"/> points at.
+    val binaries by lazy { document.getAllElements().filter { it.localName() == "binary" }.associateBy { it.attr("id") } }
+    var skippedImages = 0
+    val picture = { element: Element ->
+        val id = element.attributes().firstOrNull { it.key.endsWith("href", ignoreCase = true) }?.value?.removePrefix("#")
+        val data = id?.let { binaries[it] }?.let { runCatching { java.util.Base64.getMimeDecoder().decode(it.text()) }.getOrNull() }
+        val style = data?.let { runCatching { images.store(it) }.getOrNull() }
+        if (style == null && images !== ImageSink.NONE) skippedImages++
+        style
+    }
     val chapters = mutableListOf<Chapter>()
     var skippedNotes = false
     fun visitSection(section: Element) {
@@ -169,8 +198,8 @@ internal fun readFb2(file: File, fallbackTitle: String): Book {
         val ownContent = section.clone()
         ownContent.childrenByLocalName("section").forEach { it.remove() }
         ownContent.childrenByLocalName("title").forEach { it.remove() }
-        val paragraphs = htmlParagraphs(ownContent)
-        if (paragraphs.isNotEmpty()) chapters += Chapter(heading, paragraphs)
+        val blocks = htmlBlocks(ownContent, picture)
+        if (blocks.isNotEmpty()) chapters += chapterOf(heading, blocks)
         if (chapters.size > 2_000) throw IOException("В FB2 слишком много разделов")
         section.childrenByLocalName("section").forEach(::visitSection)
     }
@@ -182,63 +211,96 @@ internal fun readFb2(file: File, fallbackTitle: String): Book {
         }
         val intro = body.clone()
         intro.childrenByLocalName("section").forEach { it.remove() }
-        val introParagraphs = htmlParagraphs(intro)
-        if (introParagraphs.isNotEmpty()) chapters += Chapter("Введение", introParagraphs)
+        val introBlocks = htmlBlocks(intro, picture)
+        if (introBlocks.isNotEmpty()) chapters += chapterOf("Введение", introBlocks)
         body.childrenByLocalName("section").forEach(::visitSection)
     }
     if (chapters.isEmpty()) throw IOException("В FB2 не найден читаемый текст")
     val warnings = buildList {
-        if (document.getAllElements().any { it.localName() == "image" }) {
-            add("Иллюстрации FB2 не отображаются в текстовой читалке")
-        }
+        if (skippedImages > 0) add("Не удалось показать иллюстраций: $skippedImages")
         if (skippedNotes) add("Раздел с примечаниями FB2 не импортирован")
     }
     return Book(title = title, author = author, format = "FB2", chapters = chapters, warnings = warnings)
 }
 
-internal fun readDocx(file: File, fallbackTitle: String): Book = SafeZip(file).use { zip ->
+internal fun readDocx(file: File, fallbackTitle: String, images: ImageSink = ImageSink.NONE): Book = SafeZip(file).use { zip ->
     val core = if (zip.has("docProps/core.xml")) parseXml(zip.read("docProps/core.xml", 1_000_000)) else null
     val title = core?.firstByLocalName("title")?.text()?.let(::normalizeText)
         ?.takeIf(String::isNotBlank) ?: fallbackTitle
     val author = core?.firstByLocalName("creator")?.text()?.let(::normalizeText).orEmpty()
     val document = parseXml(zip.read("word/document.xml", 40_000_000))
-    val paragraphs = mutableListOf<String>()
+    // Pictures are named by relationship ids: rId5 → media/image1.png.
+    val relations = if (zip.has("word/_rels/document.xml.rels")) {
+        parseXml(zip.read("word/_rels/document.xml.rels", 5_000_000)).getAllElements()
+            .filter { it.localName().equals("Relationship", ignoreCase = true) }
+            .associate { it.attr("Id") to it.attr("Target") }
+    } else emptyMap()
+    val blocks = mutableListOf<Pair<String, ParagraphStyle?>>()
     val chapters = mutableListOf<Chapter>()
     var chapterTitle = title
     var foundHeading = false
+    var skippedImages = 0
     fun flush() {
-        if (paragraphs.isNotEmpty()) chapters += Chapter(chapterTitle, paragraphs.toList())
-        paragraphs.clear()
+        if (blocks.isNotEmpty()) chapters += chapterOf(chapterTitle, blocks.toList())
+        blocks.clear()
     }
-    for (paragraph in document.getAllElements().filter { it.localName() == "p" }) {
-        val text = buildString {
-            for (child in paragraph.getAllElements().drop(1)) {
-                when (child.localName()) {
-                    "t" -> child.textNodes().forEach { append(it.wholeText) }
-                    "tab" -> append(' ')
-                    "br", "cr" -> append(' ')
-                }
-            }
-        }.let(::normalizeText)
-        if (text.isEmpty()) continue
-        val style = paragraph.firstByLocalName("pStyle")?.let { it.attr("w:val").ifBlank { it.attr("val") } }
-            .orEmpty()
-        val isHeading = style.matches(Regex("(?i)(heading|заголовок)[ _-]*[1-6]")) || isChapterHeading(text)
-        if (isHeading) {
-            flush()
-            chapterTitle = text
-            foundHeading = true
-        } else {
-            paragraphs += text
+    fun pictures(element: Element) {
+        for (blip in element.getAllElements().filter { it.localName() == "blip" }) {
+            val id = blip.attributes().firstOrNull { it.key.endsWith("embed", ignoreCase = true) }?.value ?: continue
+            val path = relations[id]?.let { resolveZipPath("word/document.xml", it) }?.takeIf(zip::has)
+            val style = path?.let { runCatching { images.store(zip.readPicture(it)) }.getOrNull() }
+            if (style != null) blocks += "" to style else if (images !== ImageSink.NONE) skippedImages++
         }
     }
+    fun textOf(paragraph: Element) = buildString {
+        for (child in paragraph.getAllElements().drop(1)) {
+            when (child.localName()) {
+                "t" -> child.textNodes().forEach { append(it.wholeText) }
+                "tab" -> append(' ')
+                "br", "cr" -> append(' ')
+            }
+        }
+    }.let(::normalizeText)
+    fun visit(node: Element) {
+        when (node.localName()) {
+            "p" -> {
+                val text = textOf(node)
+                val style = node.firstByLocalName("pStyle")?.let { it.attr("w:val").ifBlank { it.attr("val") } }.orEmpty()
+                val level = Regex("(?i)(?:heading|заголовок)[ _-]*([1-6])").find(style)?.groupValues?.get(1)?.toInt()
+                    ?: if (style.equals("Title", ignoreCase = true)) 1 else null
+                if (text.isNotEmpty()) {
+                    when {
+                        (level != null && level <= 2) || (level == null && isChapterHeading(text)) -> {
+                            flush()
+                            chapterTitle = text
+                            foundHeading = true
+                        }
+                        level != null -> blocks += text to ParagraphStyle(ParagraphKind.SUBHEADING)
+                        style.contains("caption", ignoreCase = true) -> blocks += text to ParagraphStyle(ParagraphKind.CAPTION)
+                        else -> blocks += text to null
+                    }
+                }
+                pictures(node)
+            }
+            "tbl" -> for (row in node.getAllElements().filter { it.localName() == "tr" }) {
+                val cells = row.children().filter { it.localName() == "tc" }
+                val texts = cells.map { cell ->
+                    normalizeText(cell.getAllElements().filter { it.localName() == "p" }.joinToString(" ") { textOf(it) })
+                }
+                if (texts.any { it.isNotEmpty() }) blocks += texts.joinToString("\t") to ParagraphStyle(ParagraphKind.TABLE_ROW)
+                pictures(row)
+            }
+            // Content controls and similar wrappers hold ordinary paragraphs.
+            else -> node.children().forEach(::visit)
+        }
+    }
+    val body = document.firstByLocalName("body") ?: throw IOException("В DOCX не найден текст")
+    body.children().forEach(::visit)
     flush()
     if (chapters.isEmpty()) throw IOException("В DOCX не найден читаемый текст")
-    val result = if (foundHeading) chapters else chaptersFromParagraphs(title, chapters.flatMap(Chapter::paragraphs))
+    val result = if (foundHeading) chapters else chapters.flatMap { splitLongChapter(it) }
     val warnings = buildList {
-        if (zip.names().any { it.startsWith("word/media/") }) {
-            add("Изображения DOCX не отображаются в текстовой читалке")
-        }
+        if (skippedImages > 0) add("Не удалось показать изображений DOCX: $skippedImages")
     }
     Book(title = title, author = author, format = "DOCX", chapters = result, warnings = warnings)
 }

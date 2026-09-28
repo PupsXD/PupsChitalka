@@ -125,9 +125,44 @@ class LibraryStore(context: Context) {
                     put("paragraphs", JSONArray(chapter.paragraphs))
                     put("sourceUrl", chapter.sourceUrl)
                     put("nextUrl", chapter.nextUrl)
+                    if (chapter.styles.isNotEmpty()) put("styles", encodeStyles(chapter.styles))
                 })
             }
         })
+    }
+
+    internal companion object {
+        /** `{"12": {"kind": "IMAGE", "image": "p24-1.webp", "width": 900, "height": 640}, "15": {"kind": "CAPTION"}}` */
+        fun encodeStyles(styles: Map<Int, ParagraphStyle>) = JSONObject().apply {
+            styles.toSortedMap().forEach { (index, style) ->
+                put(index.toString(), JSONObject().apply {
+                    put("kind", style.kind.name)
+                    if (style.image != null) {
+                        put("image", style.image)
+                        put("width", style.width)
+                        put("height", style.height)
+                    }
+                })
+            }
+        }
+
+        fun decodeStyles(json: JSONObject): Map<Int, ParagraphStyle> = buildMap {
+            json.keys().forEach { key ->
+                val index = key.toIntOrNull() ?: return@forEach
+                val item = json.optJSONObject(key) ?: return@forEach
+                // A kind this version does not know is shown as plain text.
+                val kind = runCatching { ParagraphKind.valueOf(item.getString("kind")) }.getOrNull() ?: return@forEach
+                put(
+                    index,
+                    ParagraphStyle(
+                        kind = kind,
+                        image = item.optString("image").takeUnless { it.isBlank() || it == "null" },
+                        width = item.optInt("width"),
+                        height = item.optInt("height"),
+                    ),
+                )
+            }
+        }
     }
 
     private fun decode(json: JSONObject): Book {
@@ -140,6 +175,7 @@ class LibraryStore(context: Context) {
                     paragraphs = (0 until paragraphs.length()).map(paragraphs::getString),
                     sourceUrl = chapter.optString("sourceUrl").takeUnless { it.isBlank() || it == "null" },
                     nextUrl = chapter.optString("nextUrl").takeUnless { it.isBlank() || it == "null" },
+                    styles = chapter.optJSONObject("styles")?.let(::decodeStyles).orEmpty(),
                 )
             }
         }

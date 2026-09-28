@@ -4,6 +4,8 @@ import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -45,9 +47,11 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.ozvuchka.app.conversion.BookExporter
+import com.ozvuchka.app.conversion.ExportPicture
 import com.ozvuchka.app.data.Annotation
 import com.ozvuchka.app.data.AnnotationStore
 import com.ozvuchka.app.data.Book
+import com.ozvuchka.app.data.BookImages
 import com.ozvuchka.app.data.Chapter
 import com.ozvuchka.app.data.Covers
 import com.ozvuchka.app.data.LibraryStore
@@ -57,6 +61,7 @@ import com.ozvuchka.app.data.searchBook
 import com.ozvuchka.app.importer.FileBookImporter
 import com.ozvuchka.app.importer.WebChapter
 import com.ozvuchka.app.importer.WebChapterImporter
+import com.ozvuchka.app.importer.imageExtension
 import com.ozvuchka.app.importer.toBookChapter
 import com.ozvuchka.app.speech.DialogueVoices
 import com.ozvuchka.app.speech.ModelInstallState
@@ -78,6 +83,7 @@ import com.ozvuchka.app.speech.VoiceCatalog
 import com.ozvuchka.app.speech.VoiceChoice
 import com.ozvuchka.app.speech.VoiceEngine
 import com.ozvuchka.app.speech.dominantLanguage
+import com.ozvuchka.app.ui.ChapterContent
 import com.ozvuchka.app.ui.LibraryBookUi
 import com.ozvuchka.app.ui.LibraryScreen
 import com.ozvuchka.app.ui.OzvuchkaTheme
@@ -507,6 +513,9 @@ class MainActivity : ComponentActivity() {
             chapterCount = book.chapters.size,
             chapterTitles = book.chapters.map { it.title },
             paragraphs = chapter.paragraphs,
+            styles = chapter.styles,
+            previousChapter = book.chapters.getOrNull(chapterIndex - 1)?.let { neighbour(chapterIndex - 1, it) },
+            nextChapter = book.chapters.getOrNull(chapterIndex + 1)?.let { neighbour(chapterIndex + 1, it) },
             language = language,
             overallProgress = book.overallProgress,
             chapterProgress = book.chapterProgress,
@@ -542,6 +551,9 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    private fun neighbour(index: Int, chapter: Chapter) =
+        ChapterContent(index, chapter.title, chapter.paragraphs, chapter.styles, dominantLanguage(chapter.paragraphs))
+
     private fun isUsable(voice: VoiceChoice): Boolean = when (voice.engine) {
         VoiceEngine.SUPERTONIC -> SpeechModel.SUPERTONIC in installedModels || SpeechModel.SUPERTONIC_FULL in installedModels
         VoiceEngine.KOKORO -> SpeechModel.KOKORO in installedModels || SpeechModel.KOKORO_FULL in installedModels
@@ -565,17 +577,19 @@ class MainActivity : ComponentActivity() {
     private val readerActions = object : ReaderActions {
         override fun back() = closeReader()
 
-        override fun changeChapter(index: Int) {
+        override fun changeChapter(index: Int, progress: Float) {
             val book = currentBook ?: return
             if (index !in book.chapters.indices) return
-            val updated = book.copy(currentChapter = index, chapterProgress = 0f)
+            val within = progress.coerceIn(0f, 1f)
+            val updated = book.copy(currentChapter = index, chapterProgress = within)
             currentBook = updated
             replaceBook(updated)
-            library.updatePosition(book.id, index, 0f)
+            library.updatePosition(book.id, index, within)
             prefetchWebChapter(updated)
-            // Listening continues from the chapter the reader jumped to.
+            // Listening continues from the place the reader turned to.
             if (narration.active && narration.bookId == book.id && !narration.isPreview) {
-                NarrationController.playBook(this@MainActivity, updated, index, 0, 0)
+                val (paragraph, offset) = if (within > 0f) updated.position() else 0 to 0
+                NarrationController.playBook(this@MainActivity, updated, index, paragraph, offset)
             }
         }
 
@@ -1065,7 +1079,8 @@ class MainActivity : ComponentActivity() {
     private fun importNextChapter() {
         val book = currentBook ?: return
         val nextUrl = book.chapters.lastOrNull()?.nextUrl ?: return
-        if (importing) return
+        // The chapter is already on its way; the reader moves into it when it arrives.
+        if (importing || prefetchingChapterOf == book.id) return
         importing = true
         importProgressText = "Загружаем следующую главу…"
         lifecycleScope.launch {
@@ -1121,6 +1136,7 @@ class MainActivity : ComponentActivity() {
                 val removed = withContext(Dispatchers.IO) {
                     runCatching { annotationStore.delete(id) }
                     runCatching { Covers.delete(this@MainActivity, id) }
+                    runCatching { BookImages.delete(this@MainActivity, id) }
                     PronunciationStore.clearBook(this@MainActivity, id)
                     library.delete(id)
                 }
@@ -1145,12 +1161,36 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** A stored picture as JPEG, PNG or GIF: WebP pictures cut from PDF pages are converted for other readers. */
+    private fun exportPicture(bookId: String, name: String): ExportPicture? {
+        val bytes = BookImages.bytes(this, bookId, name) ?: return null
+        return when (imageExtension(bytes)) {
+            "png" -> ExportPicture(bytes, "image/png", "png")
+            "jpg" -> ExportPicture(bytes, "image/jpeg", "jpg")
+            "gif" -> ExportPicture(bytes, "image/gif", "gif")
+            else -> {
+                val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+                // JPEG has no transparency: paint the picture on white paper first.
+                val flat = Bitmap.createBitmap(decoded.width, decoded.height, Bitmap.Config.ARGB_8888)
+                android.graphics.Canvas(flat).apply {
+                    drawColor(android.graphics.Color.WHITE)
+                    drawBitmap(decoded, 0f, 0f, null)
+                }
+                decoded.recycle()
+                val output = java.io.ByteArrayOutputStream()
+                flat.compress(Bitmap.CompressFormat.JPEG, 90, output)
+                flat.recycle()
+                ExportPicture(output.toByteArray(), "image/jpeg", "jpg")
+            }
+        }
+    }
+
     private fun exportTo(uri: Uri, format: String) {
         val book = currentBook ?: return
         lifecycleScope.launch {
             try {
                 withContext(Dispatchers.IO) {
-                    contentResolver.openOutputStream(uri)?.use { BookExporter.write(book, format, it) }
+                    contentResolver.openOutputStream(uri)?.use { BookExporter.write(book, format, it) { name -> exportPicture(book.id, name) } }
                         ?: error("Не удалось создать файл")
                 }
                 notice = "Книга сохранена в формате ${format.uppercase()}"
