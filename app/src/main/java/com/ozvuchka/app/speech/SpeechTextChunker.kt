@@ -52,7 +52,8 @@ internal fun splitForSpeech(text: String, language: String, maxChars: Int = 260)
     fun addRange(from: Int, to: Int) {
         var start = from
         var end = to
-        while (start < end && text[start].isWhitespace()) start++
+        // A list bullet is not read aloud.
+        while (start < end && (text[start].isWhitespace() || text[start] in "•◦▪■●")) start++
         while (end > start && text[end - 1].isWhitespace()) end--
         if (end > start) {
             val spoken = text.substring(start, end).replace(Regex("[\\s\\p{Z}]+"), " ")
@@ -150,6 +151,8 @@ fun chapterSegments(
     paragraphs: List<String>,
     maxChars: Int = 260,
     splitDialogue: Boolean = false,
+    /** Paragraphs after which to pause as after a title: headings. */
+    headings: Set<Int> = emptySet(),
 ): List<SpeechSegment> {
     val chapterLanguage = dominantLanguage(paragraphs)
     val result = mutableListOf<SpeechSegment>()
@@ -170,6 +173,28 @@ fun chapterSegments(
     paragraphs.forEachIndexed { paragraphIndex, paragraph ->
         if (paragraph.isBlank()) return@forEachIndexed
         val paragraphLanguage = detectSpeechLanguage(paragraph, chapterLanguage)
+        // A table row is read cell by cell, with a short pause between the cells.
+        if ('\t' in paragraph) {
+            var cellStart = 0
+            val cells = paragraph.split('\t')
+            cells.forEachIndexed { cellIndex, cell ->
+                val chunks = splitForSpeech(cell, paragraphLanguage, maxChars)
+                chunks.forEachIndexed { index, chunk ->
+                    val lastOfRow = cellIndex == cells.lastIndex && index == chunks.lastIndex
+                    result += SpeechSegment(
+                        chapter = chapterIndex,
+                        paragraph = paragraphIndex,
+                        start = cellStart + chunk.start,
+                        end = cellStart + chunk.end,
+                        text = chunk.text,
+                        language = detectSpeechLanguage(chunk.text, paragraphLanguage),
+                        pause = if (lastOfRow) SegmentPause.PARAGRAPH else SegmentPause.TURN,
+                    )
+                }
+                cellStart += cell.length + 1
+            }
+            return@forEachIndexed
+        }
         val parts = if (splitDialogue) dialogueParts(paragraph, paragraphLanguage) else null
         val roles = parts?.let { speakers.rolesFor(paragraph, it, paragraphLanguage) }
             ?: run {
@@ -197,6 +222,7 @@ fun chapterSegments(
                     text = chunk.text,
                     language = detectSpeechLanguage(chunk.text, paragraphLanguage),
                     pause = when {
+                        last && lastPart && paragraphIndex in headings -> SegmentPause.TITLE
                         last && lastPart -> SegmentPause.PARAGRAPH
                         last && attributionNext -> SegmentPause.TURN
                         ending != null && ending in sentenceEnd -> SegmentPause.SENTENCE

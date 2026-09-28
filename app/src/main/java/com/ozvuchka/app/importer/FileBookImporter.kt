@@ -4,11 +4,14 @@ import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import com.ozvuchka.app.data.Book
+import com.ozvuchka.app.data.BookImages
 import com.ozvuchka.app.data.Covers
+import com.ozvuchka.app.data.ParagraphKind
 import java.io.File
 import java.io.FileInputStream
 import java.io.IOException
 import java.util.Locale
+import java.util.UUID
 import java.util.zip.ZipFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -36,6 +39,11 @@ object FileBookImporter {
             .trim()
             .ifBlank { "Без названия" }
         val temporaryFile = File.createTempFile("book-import-", ".tmp", context.cacheDir)
+        // Pictures go straight into the new book's folder; a failed import leaves nothing behind.
+        val bookId = UUID.randomUUID().toString()
+        val imageFolder = BookImages.directory(context, bookId)
+        val images = FolderImageSink(imageFolder)
+        var imported = false
         try {
             onProgress("Читаем выбранный файл…")
             context.contentResolver.openInputStream(uri)?.use { source ->
@@ -63,13 +71,13 @@ object FileBookImporter {
             val format = detectFormat(temporaryFile, displayName, context.contentResolver.getType(uri))
             onProgress("Разбираем формат $format…")
             val book = when (format) {
-                "EPUB" -> readEpub(temporaryFile, fallbackTitle)
-                "FB2" -> readFb2(temporaryFile, fallbackTitle)
-                "PDF" -> readPdf(context, temporaryFile, fallbackTitle, onProgress)
-                "DOCX" -> readDocx(temporaryFile, fallbackTitle)
+                "EPUB" -> readEpub(temporaryFile, fallbackTitle, images)
+                "FB2" -> readFb2(temporaryFile, fallbackTitle, images)
+                "PDF" -> readPdf(context, temporaryFile, fallbackTitle, images, onProgress)
+                "DOCX" -> readDocx(temporaryFile, fallbackTitle, images)
                 "TXT", "HTML", "MD" -> readTextBook(temporaryFile, fallbackTitle, format)
                 else -> throw IOException("Формат файла не поддерживается")
-            }
+            }.copy(id = bookId)
             if (book.chapters.isEmpty() || book.chapters.all { it.paragraphs.isEmpty() }) {
                 throw IOException("В документе не найден текст для чтения")
             }
@@ -78,14 +86,24 @@ object FileBookImporter {
                 when (format) {
                     "EPUB" -> readEpubCover(temporaryFile)
                     "FB2" -> readFb2Cover(temporaryFile)
+                    "PDF" -> firstPicture(book)?.let { name -> BookImages.bytes(context, bookId, name) }
                     else -> null
                 }
             }.getOrNull()?.let { cover -> runCatching { Covers.save(context, book.id, cover) } }
             onProgress("Книга готова")
+            imported = true
             book.copy(source = uri.toString())
         } finally {
             temporaryFile.delete()
+            if (!imported) imageFolder.deleteRecursively()
         }
+    }
+
+    /** A picture that opens the book, like the cover page of a PDF. */
+    private fun firstPicture(book: Book): String? {
+        val chapter = book.chapters.firstOrNull() ?: return null
+        return (0 until minOf(3, chapter.paragraphs.size))
+            .firstNotNullOfOrNull { index -> chapter.styles[index]?.takeIf { it.kind == ParagraphKind.IMAGE }?.image }
     }
 
     private fun displayName(context: Context, uri: Uri): String {

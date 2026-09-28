@@ -1,6 +1,7 @@
 package com.ozvuchka.app.ui
 
 import com.ozvuchka.app.data.Annotation
+import com.ozvuchka.app.data.ParagraphStyle
 import com.ozvuchka.app.data.SearchHit
 import com.ozvuchka.app.speech.DialogueVoices
 import com.ozvuchka.app.speech.ModelInstallState
@@ -76,6 +77,15 @@ data class ReaderNarrationUi(
     val voiceLabel: String = "",
 )
 
+/** A chapter next to the open one, shown at the edge of the pages so a swipe turns into it. */
+data class ChapterContent(
+    val index: Int,
+    val title: String,
+    val paragraphs: List<String>,
+    val styles: Map<Int, ParagraphStyle> = emptyMap(),
+    val language: String = "ru",
+)
+
 /** All reader settings are supplied by the caller so they can be persisted between launches. */
 data class ReaderUiState(
     val bookId: String,
@@ -86,6 +96,10 @@ data class ReaderUiState(
     val chapterCount: Int,
     val chapterTitles: List<String> = emptyList(),
     val paragraphs: List<String>,
+    /** Headings, notes, captions, pictures and tables of the chapter, by paragraph. */
+    val styles: Map<Int, ParagraphStyle> = emptyMap(),
+    val previousChapter: ChapterContent? = null,
+    val nextChapter: ChapterContent? = null,
     val language: String = "ru",
     val overallProgress: Float = 0f,
     val chapterProgress: Float = 0f,
@@ -124,7 +138,9 @@ data class PronunciationUi(val word: String, val spoken: String, val everyBook: 
 
 interface ReaderActions {
     fun back()
-    fun changeChapter(index: Int)
+
+    /** Opens chapter [index] at [progress] of it: 0 is its start, 1 its last page. */
+    fun changeChapter(index: Int, progress: Float = 0f)
     /** Progress across the whole book, from 0f to 1f. */
     fun readingProgressChanged(overall: Float)
     fun chromeVisibilityChanged(visible: Boolean)

@@ -7,6 +7,7 @@ import android.media.AudioTrack
 import android.os.Process
 import android.util.Log
 import com.ozvuchka.app.data.Chapter
+import com.ozvuchka.app.data.ParagraphKind
 import kotlin.concurrent.thread
 import kotlin.math.max
 import kotlin.math.min
@@ -58,7 +59,8 @@ internal class BookSegmentSource(
         if (index < 0) return null
         while (index >= segments.size && nextChapter < chapters.size) {
             val chapter = chapters[nextChapter]
-            segments += chapterSegments(nextChapter, chapter.title, chapter.paragraphs, splitDialogue = splitDialogue)
+            val headings = chapter.styles.filterValues { it.kind == ParagraphKind.HEADING || it.kind == ParagraphKind.SUBHEADING }.keys
+            segments += chapterSegments(nextChapter, chapter.title, chapter.paragraphs, splitDialogue = splitDialogue, headings = headings)
             nextChapter++
         }
         return segments.getOrNull(index)

@@ -3,12 +3,48 @@ package com.ozvuchka.app.data
 import java.util.UUID
 import kotlin.math.roundToInt
 
+/** What a paragraph is when it is not plain running text. */
+enum class ParagraphKind {
+    HEADING,
+    SUBHEADING,
+
+    /** A note, tip or sidebar set apart from the running text. */
+    NOTE,
+
+    /** The caption of a picture or a table. */
+    CAPTION,
+
+    /** A picture; its paragraph text is empty. */
+    IMAGE,
+
+    /** A row of a table, its cells separated by tabs. */
+    TABLE_ROW,
+
+    /** The heading row of a table. */
+    TABLE_HEADER,
+}
+
+/**
+ * The look of a paragraph that is not plain text. A picture names its file in the book's picture
+ * folder and its size in pixels.
+ */
+data class ParagraphStyle(
+    val kind: ParagraphKind,
+    val image: String? = null,
+    val width: Int = 0,
+    val height: Int = 0,
+)
+
 data class Chapter(
     val title: String,
     val paragraphs: List<String>,
     val sourceUrl: String? = null,
     val nextUrl: String? = null,
-)
+    /** Headings, notes, captions and pictures by paragraph index; plain paragraphs are not listed. */
+    val styles: Map<Int, ParagraphStyle> = emptyMap(),
+) {
+    fun kindOf(paragraph: Int): ParagraphKind? = styles[paragraph]?.kind
+}
 
 data class Book(
     val id: String = UUID.randomUUID().toString(),

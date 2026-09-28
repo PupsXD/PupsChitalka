@@ -58,6 +58,8 @@ android {
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
+    // Robolectric tests read PDFs with pdfbox-android, which loads its fonts and glyph lists from assets.
+    testOptions { unitTests.isIncludeAndroidResources = true }
 }
 
 dependencies {
@@ -76,6 +78,12 @@ dependencies {
     implementation("org.apache.commons:commons-compress:1.28.0")
     implementation(files("libs/sherpa-onnx-1.13.8.aar"))
     testImplementation("junit:junit:4.13.2")
+    // Android classes on the JVM, for the PDF reader that runs on pdfbox-android.
+    testImplementation("org.robolectric:robolectric:4.14.1")
+    testImplementation("androidx.test:core:1.6.1")
+    testImplementation(composeBom)
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
     // The real org.json, so storage code can be tested off the device.
     testImplementation("org.json:json:20240303")
     debugImplementation("androidx.compose.ui:ui-tooling")

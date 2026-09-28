@@ -5,6 +5,7 @@ import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontVariation
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.intl.LocaleList
@@ -17,6 +18,8 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ozvuchka.app.R
+import com.ozvuchka.app.data.ParagraphKind
+import com.ozvuchka.app.data.ParagraphStyle
 
 /** A page remembers the start of its text so a new font size can restore the reading position. */
 internal data class ReaderPage(
@@ -42,6 +45,11 @@ internal data class ReaderBlock(
     val maxLines: Int,
     /** Space above the block in pixels, exactly as measured during pagination. */
     val gapPx: Int,
+    /** Headings, notes, captions, pictures and table rows; null for running text. */
+    val style: ParagraphStyle? = null,
+    /** The size of a picture or a table row as laid out, in pixels. */
+    val widthPx: Int = 0,
+    val heightPx: Int = 0,
 )
 
 internal const val SCENE_BREAK = "✦  ✦  ✦"
@@ -91,6 +99,50 @@ internal fun readerBodyStyle(
     },
 )
 
+/** Text styles of headings, notes, captions and table cells, sized from the reader's font size. */
+internal fun readerStyleFor(
+    kind: ParagraphKind?,
+    typography: ReaderTypography,
+    language: String,
+    paragraphStart: Boolean = true,
+    centered: Boolean = false,
+): TextStyle {
+    val size = typography.fontSizeSp
+    val locale = LocaleList(if (language == "en") "en" else "ru")
+    fun plain(scale: Float, lineScale: Float, weight: FontWeight = FontWeight.Normal, italic: Boolean = false) = TextStyle(
+        fontFamily = typography.font.family,
+        fontSize = (size * scale).sp,
+        lineHeight = (size * scale * lineScale).sp,
+        fontWeight = weight,
+        fontStyle = if (italic) FontStyle.Italic else FontStyle.Normal,
+        textAlign = TextAlign.Start,
+        hyphens = Hyphens.Auto,
+        lineBreak = LineBreak.Paragraph,
+        localeList = locale,
+    )
+    return when (kind) {
+        ParagraphKind.HEADING -> plain(1.28f, 1.3f, FontWeight.Bold).copy(lineBreak = LineBreak.Heading)
+        ParagraphKind.SUBHEADING -> plain(1.1f, 1.35f, FontWeight.SemiBold).copy(lineBreak = LineBreak.Heading)
+        ParagraphKind.NOTE -> plain(0.88f, typography.lineSpacing)
+        ParagraphKind.CAPTION -> plain(0.82f, 1.4f, italic = true)
+        ParagraphKind.TABLE_ROW -> plain(0.8f, 1.35f).copy(hyphens = Hyphens.None)
+        ParagraphKind.TABLE_HEADER -> plain(0.8f, 1.35f, FontWeight.SemiBold).copy(hyphens = Hyphens.None)
+        else -> readerBodyStyle(typography, language, paragraphStart, centered)
+    }
+}
+
+/** Space around blocks that are not running text. */
+internal object ReaderInsets {
+    /** A note is set off by a bar on its left and a tint. */
+    val noteStart = 14.dp
+    val noteEnd = 10.dp
+    val noteVertical = 6.dp
+
+    /** Padding inside a table cell. */
+    val cellHorizontal = 5.dp
+    val cellVertical = 4.dp
+}
+
 internal fun readerTitleStyle(fontSizeSp: Float) = TextStyle(
     fontFamily = FontFamily.Serif,
     fontSize = (fontSizeSp + 9f).sp,
@@ -119,6 +171,11 @@ internal object ReaderRhythm {
 
 internal fun chapterLabel(chapterIndex: Int, chapterCount: Int) = "ГЛАВА ${chapterIndex + 1}  /  $chapterCount"
 
+/**
+ * Lays a chapter out in pages of [heightPx]. Running text breaks between lines; pictures, table
+ * rows and headings move to the next page whole, a heading never ends a page, and a picture taller
+ * than the page is scaled to fit. [maxPages] stops early, for a look at a chapter's first page.
+ */
 internal fun paginateChapter(
     paragraphs: List<String>,
     chapterTitle: String,
@@ -129,8 +186,11 @@ internal fun paginateChapter(
     heightPx: Int,
     density: Density,
     measurer: TextMeasurer,
+    styles: Map<Int, ParagraphStyle> = emptyMap(),
+    maxPages: Int = Int.MAX_VALUE,
 ): List<ReaderPage> {
-    val constraints = Constraints(maxWidth = widthPx.coerceAtLeast(1))
+    val width = widthPx.coerceAtLeast(1)
+    val constraints = Constraints(maxWidth = width)
     val available = heightPx.coerceAtLeast(1)
     val paragraphGap = ReaderRhythm.paragraphGapPx(typography, density)
     val headingHeight = with(density) {
@@ -142,7 +202,13 @@ internal fun paginateChapter(
             ReaderRhythm.afterHeading.roundToPx()
     }
     // A sliver of tolerance for rounding between measured and drawn line boxes.
-    val limit = available - with(density) { 2.dp.roundToPx() }
+    val limit = (available - with(density) { 2.dp.roundToPx() }).coerceAtLeast(1)
+    val noteHorizontal = with(density) { (ReaderInsets.noteStart + ReaderInsets.noteEnd).roundToPx() }
+    val noteVertical = with(density) { (ReaderInsets.noteVertical * 2).roundToPx() }
+    val cellHorizontal = with(density) { (ReaderInsets.cellHorizontal * 2).roundToPx() }
+    val cellVertical = with(density) { (ReaderInsets.cellVertical * 2).roundToPx() }
+    val bodyLine = with(density) { (typography.fontSizeSp * typography.lineSpacing).sp.roundToPx() }
+    val hairline = with(density) { 1.dp.roundToPx() }
 
     val result = mutableListOf<ReaderPage>()
     var blocks = mutableListOf<ReaderBlock>()
@@ -168,49 +234,132 @@ internal fun paginateChapter(
         pageStart = position(paragraph, offset)
     }
 
-    paragraphs.forEachIndexed { paragraphIndex, source ->
-        val sceneBreak = source.isBlank()
-        val original = if (sceneBreak) SCENE_BREAK else source.trim()
-        var remaining = original
-        var offset = if (sceneBreak) 0 else source.length - source.trimStart().length
-        var paragraphStart = true
-        while (remaining.isNotEmpty()) {
-            val gap = if (blocks.isNotEmpty()) paragraphGap else 0
-            val style = readerBodyStyle(typography, language, paragraphStart, centered = sceneBreak)
-            val layout = measurer.measure(remaining, style, constraints = constraints)
-            if (usedHeight + gap + layout.size.height <= limit) {
-                blocks += ReaderBlock(
-                    remaining, paragraphIndex, offset, paragraphStart,
-                    visibleLength = remaining.length, maxLines = Int.MAX_VALUE, gapPx = gap,
-                )
-                usedHeight += gap + layout.size.height
-                pageCharacters += remaining.length
-                break
-            }
-            val spaceForText = limit - usedHeight - gap
-            val fittingLines = (0 until layout.lineCount)
-                .takeWhile { layout.getLineBottom(it) <= spaceForText }
-                .size
-            if (fittingLines == 0 && (blocks.isNotEmpty() || showHeading)) {
-                nextPage(paragraphIndex, offset)
-                continue
-            }
-            val lines = fittingLines.coerceAtLeast(1)
-            val splitAt = layout.getLineEnd(lines - 1, visibleEnd = true).coerceIn(1, remaining.length)
-            blocks += ReaderBlock(
-                remaining, paragraphIndex, offset, paragraphStart,
-                visibleLength = splitAt, maxLines = lines, gapPx = gap,
-            )
-            pageCharacters += splitAt
-            val after = remaining.substring(splitAt)
-            val trimmed = after.trimStart()
-            offset += splitAt + (after.length - trimmed.length)
-            remaining = trimmed
-            paragraphStart = false
-            if (remaining.isNotEmpty()) nextPage(paragraphIndex, offset)
+    fun gapBefore(kind: ParagraphKind?): Int {
+        if (blocks.isEmpty()) return 0
+        val previous = blocks.last().style?.kind
+        return when {
+            kind == ParagraphKind.HEADING -> paragraphGap * 2 + bodyLine / 2
+            kind == ParagraphKind.SUBHEADING -> paragraphGap + bodyLine / 2
+            kind == ParagraphKind.IMAGE || previous == ParagraphKind.IMAGE -> maxOf(paragraphGap, bodyLine / 2)
+            (kind == ParagraphKind.TABLE_ROW || kind == ParagraphKind.TABLE_HEADER) &&
+                (previous == ParagraphKind.TABLE_ROW || previous == ParagraphKind.TABLE_HEADER) -> 0
+            kind == ParagraphKind.CAPTION && previous == ParagraphKind.IMAGE -> paragraphGap / 2
+            else -> paragraphGap
         }
     }
-    if (blocks.isNotEmpty() || showHeading || result.isEmpty()) {
+
+    for ((paragraphIndex, source) in paragraphs.withIndex()) {
+        if (result.size >= maxPages) break
+        val style = styles[paragraphIndex]
+        val kind = style?.kind
+        when (kind) {
+            ParagraphKind.IMAGE -> {
+                if (style.image == null || style.width <= 0 || style.height <= 0) continue
+                // As wide as the column at most; small pictures keep their size.
+                var pictureWidth = minOf(width.toFloat(), style.width * density.density)
+                var pictureHeight = pictureWidth * style.height / style.width
+                if (pictureHeight > limit) {
+                    pictureWidth *= limit / pictureHeight
+                    pictureHeight = limit.toFloat()
+                }
+                var gap = gapBefore(kind)
+                val room = limit - usedHeight - gap
+                if (pictureHeight > room) {
+                    // A little smaller still reads well; much smaller goes to the next page.
+                    if (room >= pictureHeight * 0.7f && room >= limit * 0.3f) {
+                        pictureWidth *= room / pictureHeight
+                        pictureHeight = room.toFloat()
+                    } else if (blocks.isNotEmpty() || showHeading) {
+                        nextPage(paragraphIndex, 0)
+                        gap = 0
+                    }
+                }
+                val heightOnPage = pictureHeight.toInt().coerceIn(1, limit)
+                blocks += ReaderBlock(
+                    "", paragraphIndex, 0, paragraphStart = true, visibleLength = 0, maxLines = 1, gapPx = gap,
+                    style = style, widthPx = pictureWidth.toInt().coerceAtLeast(1), heightPx = heightOnPage,
+                )
+                usedHeight += gap + heightOnPage
+            }
+            ParagraphKind.TABLE_ROW, ParagraphKind.TABLE_HEADER -> {
+                val cells = source.split('\t')
+                // Each cell loses its padding and a hairline border to its neighbour.
+                val cellWidth = (width / cells.size.coerceAtLeast(1) - cellHorizontal - hairline).coerceAtLeast(1)
+                val cellStyle = readerStyleFor(kind, typography, language)
+                val rowHeight = cells.maxOf { cell ->
+                    measurer.measure(cell.ifEmpty { " " }, cellStyle, constraints = Constraints(maxWidth = cellWidth)).size.height
+                } + cellVertical
+                var gap = gapBefore(kind)
+                if (usedHeight + gap + rowHeight > limit && (blocks.isNotEmpty() || showHeading)) {
+                    nextPage(paragraphIndex, 0)
+                    gap = 0
+                }
+                val heightOnPage = rowHeight.coerceAtMost(limit)
+                blocks += ReaderBlock(
+                    source, paragraphIndex, 0, paragraphStart = true, visibleLength = source.length, maxLines = Int.MAX_VALUE,
+                    gapPx = gap, style = style, widthPx = width, heightPx = heightOnPage,
+                )
+                usedHeight += gap + heightOnPage
+                pageCharacters += source.length
+            }
+            else -> {
+                val sceneBreak = source.isBlank() && style == null
+                if (source.isBlank() && !sceneBreak) continue
+                val original = if (sceneBreak) SCENE_BREAK else source.trim()
+                var remaining = original
+                var offset = if (sceneBreak) 0 else source.length - source.trimStart().length
+                var paragraphStart = true
+                val inset = if (kind == ParagraphKind.NOTE) noteHorizontal else 0
+                val padding = if (kind == ParagraphKind.NOTE) noteVertical else 0
+                val textConstraints = if (inset > 0) Constraints(maxWidth = (width - inset).coerceAtLeast(1)) else constraints
+                val heading = kind == ParagraphKind.HEADING || kind == ParagraphKind.SUBHEADING
+                while (remaining.isNotEmpty()) {
+                    var gap = if (paragraphStart) gapBefore(kind) else if (blocks.isNotEmpty()) paragraphGap else 0
+                    val textStyle = readerStyleFor(kind, typography, language, paragraphStart, centered = sceneBreak)
+                    val layout = measurer.measure(remaining, textStyle, constraints = textConstraints)
+                    val blockHeight = layout.size.height + padding
+                    // A heading keeps at least two lines of its section below it on the page.
+                    val needed = if (heading) blockHeight + paragraphGap + bodyLine * 2 else blockHeight
+                    if (usedHeight + gap + needed <= limit || (heading && blocks.isEmpty() && !showHeading)) {
+                        blocks += ReaderBlock(
+                            remaining, paragraphIndex, offset, paragraphStart,
+                            visibleLength = remaining.length, maxLines = Int.MAX_VALUE, gapPx = gap, style = style,
+                        )
+                        usedHeight += gap + blockHeight
+                        pageCharacters += remaining.length
+                        break
+                    }
+                    if (heading) {
+                        nextPage(paragraphIndex, offset)
+                        continue
+                    }
+                    val spaceForText = limit - usedHeight - gap - padding
+                    val fittingLines = (0 until layout.lineCount)
+                        .takeWhile { layout.getLineBottom(it) <= spaceForText }
+                        .size
+                    if (fittingLines == 0 && (blocks.isNotEmpty() || showHeading)) {
+                        nextPage(paragraphIndex, offset)
+                        continue
+                    }
+                    val lines = fittingLines.coerceAtLeast(1)
+                    val splitAt = layout.getLineEnd(lines - 1, visibleEnd = true).coerceIn(1, remaining.length)
+                    if (blocks.isEmpty()) gap = 0
+                    blocks += ReaderBlock(
+                        remaining, paragraphIndex, offset, paragraphStart,
+                        visibleLength = splitAt, maxLines = lines, gapPx = gap, style = style,
+                    )
+                    pageCharacters += splitAt
+                    val after = remaining.substring(splitAt)
+                    val trimmed = after.trimStart()
+                    offset += splitAt + (after.length - trimmed.length)
+                    remaining = trimmed
+                    paragraphStart = false
+                    if (remaining.isNotEmpty()) nextPage(paragraphIndex, offset)
+                }
+            }
+        }
+    }
+    if (result.size < maxPages && (blocks.isNotEmpty() || showHeading || result.isEmpty())) {
         result += ReaderPage(blocks.toList(), pageStart, showHeading, pageCharacters)
     }
     return result
