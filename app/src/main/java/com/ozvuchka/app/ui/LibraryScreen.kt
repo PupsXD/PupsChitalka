@@ -78,6 +78,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ozvuchka.app.data.Covers
+import com.ozvuchka.app.speech.RuVoiceInstallState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -116,6 +117,10 @@ fun LibraryScreen(
     onDeleteBook: (String) -> Unit,
     onOpenVoices: () -> Unit,
     modifier: Modifier = Modifier,
+    /** RuVoice offered on a fresh install; null once it is installed or put off. */
+    ruVoiceOffer: RuVoiceInstallState? = null,
+    ruVoiceActions: RuVoiceSetupActions? = null,
+    onDismissRuVoice: () -> Unit = {},
 ) {
     var query by rememberSaveable { mutableStateOf("") }
     var filter by rememberSaveable { mutableStateOf("Все") }
@@ -162,6 +167,11 @@ fun LibraryScreen(
         ) {
             item(span = { GridItemSpan(maxLineSpan) }) {
                 LibraryHeader(bookCount = books.size, onOpenVoices = onOpenVoices)
+            }
+            if (ruVoiceOffer != null && ruVoiceActions != null) {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    RuVoiceOfferCard(ruVoiceOffer, ruVoiceActions, onDismissRuVoice)
+                }
             }
             if (continueBook != null && query.isBlank()) {
                 item(span = { GridItemSpan(maxLineSpan) }) {

@@ -41,7 +41,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import com.ozvuchka.app.conversion.BookExporter
 import com.ozvuchka.app.data.Annotation
 import com.ozvuchka.app.data.AnnotationStore
@@ -63,6 +65,8 @@ import com.ozvuchka.app.speech.NarrationPhase
 import com.ozvuchka.app.speech.NarrationState
 import com.ozvuchka.app.speech.PronunciationDictionary
 import com.ozvuchka.app.speech.PronunciationStore
+import com.ozvuchka.app.speech.RuVoiceInstallState
+import com.ozvuchka.app.speech.RuVoiceInstaller
 import com.ozvuchka.app.speech.SpeechModel
 import com.ozvuchka.app.speech.SpeechModels
 import com.ozvuchka.app.speech.SpeechSettings
@@ -125,6 +129,10 @@ class MainActivity : ComponentActivity() {
     private var installedModels by mutableStateOf<Set<SpeechModel>>(emptySet())
     private var systemEngines by mutableStateOf<List<SystemEngineInfo>>(emptyList())
     private val installedEngines: Set<String> get() = systemEngines.mapTo(HashSet()) { it.packageName }
+    /** The engines were looked up at least once, so a missing RuVoice is really missing. */
+    private var enginesScanned by mutableStateOf(false)
+    private var ruVoiceSetup by mutableStateOf(RuVoiceInstaller.state.value)
+    private var ruVoiceOfferDismissed by mutableStateOf(false)
     /** Voices each Android TTS engine reported, loaded one engine at a time when needed. */
     private var engineVoices by mutableStateOf<Map<String, List<SystemVoiceInfo>>>(emptyMap())
     private var loadingEngines by mutableStateOf<Set<String>>(emptySet())
@@ -153,6 +161,23 @@ class MainActivity : ComponentActivity() {
 
         lifecycleScope.launch {
             NarrationController.state.collect(::onNarrationState)
+        }
+        lifecycleScope.launch {
+            RuVoiceInstaller.state.collect { state ->
+                ruVoiceSetup = state
+                if (state.stage == RuVoiceInstallState.Stage.DONE) onRuVoiceInstalled()
+            }
+        }
+        lifecycleScope.launch {
+            // Android's confirmation for installing RuVoice opens over the visible reader.
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                RuVoiceInstaller.confirmation.collect { pending ->
+                    if (pending == null) return@collect
+                    val confirm = RuVoiceInstaller.takeConfirmation() ?: return@collect
+                    runCatching { startActivity(confirm) }
+                        .onFailure { notice = "Не удалось открыть установку RuVoice: ${it.message}" }
+                }
+            }
         }
         lifecycleScope.launch {
             // Narration fetched the next web chapter: show it in the open book and the library.
@@ -225,6 +250,12 @@ class MainActivity : ComponentActivity() {
                             onImportUrl = ::importUrl,
                             onDeleteBook = ::deleteBook,
                             onOpenVoices = { openVoices("ru") },
+                            ruVoiceOffer = ruVoiceSetup.takeIf {
+                                enginesScanned && VoiceCatalog.RUVOICE_PACKAGE !in installedEngines &&
+                                    (!ruVoiceOfferDismissed || it.busy || it.stage == RuVoiceInstallState.Stage.FAILED)
+                            },
+                            ruVoiceActions = voiceActions,
+                            onDismissRuVoice = ::dismissRuVoiceOffer,
                         )
                     } else {
                         BackHandler { closeReader() }
@@ -255,6 +286,7 @@ class MainActivity : ComponentActivity() {
                                     russianDialogue = settings.russianDialogue,
                                     englishDialogue = settings.englishDialogue,
                                     dialoguePreviewing = narration.isPreview && narration.active && previewVoice == null,
+                                    ruVoiceSetup = ruVoiceSetup,
                                 ),
                                 initialLanguage = voicesLanguage,
                                 actions = voiceActions,
@@ -347,6 +379,7 @@ class MainActivity : ComponentActivity() {
         autoLoadWebChapters = preferences.getBoolean("autoLoadWebChapters", true)
         readerBrightness = preferences.getFloat("readerBrightness", Float.NaN).takeUnless { it.isNaN() }
         warmLight = preferences.getFloat("warmLight", 0f)
+        ruVoiceOfferDismissed = preferences.getBoolean("ruVoiceOfferDismissed", false)
     }
 
     private fun saveTypography(value: ReaderTypography) {
@@ -379,6 +412,7 @@ class MainActivity : ComponentActivity() {
             val found = engines.mapTo(HashSet()) { it.packageName }
             val ruVoiceAppeared = VoiceCatalog.RUVOICE_PACKAGE in found && VoiceCatalog.RUVOICE_PACKAGE !in installedEngines
             systemEngines = engines
+            enginesScanned = true
             engineVoices = engineVoices.filterKeys { it in found }
             // The first time RuVoice is found, Russian books switch to Silero unless a voice was chosen by hand.
             if (ruVoiceAppeared && !preferences.getBoolean("voiceRuChosen", false)) {
@@ -388,6 +422,20 @@ class MainActivity : ComponentActivity() {
             // Back from an engine's settings the voice lists may have changed (a new RuVoice pack).
             if (showVoices) loadSelectedEngineVoices(reload = true)
         }
+    }
+
+    /** RuVoice was installed from the app: Russian text switches to it right away. */
+    private fun onRuVoiceInstalled() {
+        RuVoiceInstaller.acknowledge()
+        preferences.edit().putBoolean("voiceRuChosen", true).apply()
+        updateSpeech { it.copy(russianVoice = VoiceChoice(VoiceEngine.SYSTEM, enginePackage = VoiceCatalog.RUVOICE_PACKAGE)) }
+        refreshEngines()
+        notice = "RuVoice установлен: русский текст читает Silero v5"
+    }
+
+    private fun dismissRuVoiceOffer() {
+        ruVoiceOfferDismissed = true
+        preferences.edit().putBoolean("ruVoiceOfferDismissed", true).apply()
     }
 
     private fun onModelInstalled(model: SpeechModel) {
@@ -756,6 +804,8 @@ class MainActivity : ComponentActivity() {
         override fun setPreferFullModels(enabled: Boolean) = updateSpeech { it.copy(preferFullModels = enabled) }
 
         override fun openRuVoicePage() = openUrl(VoiceCatalog.RUVOICE_RELEASES)
+        override fun installRuVoice() = RuVoiceInstaller.install(this@MainActivity)
+        override fun cancelRuVoice() = RuVoiceInstaller.cancel()
 
         override fun openSystemTtsSettings() {
             try {
