@@ -129,8 +129,12 @@ class NarrationLogicTest {
         val source = BookSegmentSource(listOf(Chapter("Первая", listOf("Раз. Два."))), firstChapter = 0)
         val first = generateSequence(0) { it + 1 }.takeWhile { source.get(it) != null }.count()
         assertNull(source.get(first))
+        var asked = 0
+        source.onExhausted = { asked++ }
         source.growing = true
         assertTrue(source.mayGrow())
+        assertTrue(source.mayGrow())
+        assertEquals("the next chapter is requested once", 1, asked)
         source.append(Chapter("Вторая", listOf("Три.")))
         source.growing = false
         assertEquals(1, source.get(first)?.chapter)

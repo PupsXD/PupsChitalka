@@ -33,10 +33,19 @@ internal class BookSegmentSource(
     private val segments = ArrayList<SpeechSegment>()
     private var nextChapter = firstChapter
 
-    /** Set while the next web chapter is being fetched; narration waits instead of ending. */
+    /** True while a next web chapter may still come; narration waits at the end instead of stopping. */
     @Volatile var growing = false
 
-    override fun mayGrow(): Boolean = growing
+    /** Called once when narration runs out of text while [growing]: time to fetch the next chapter. */
+    @Volatile var onExhausted: (() -> Unit)? = null
+
+    override fun mayGrow(): Boolean {
+        if (growing) onExhausted?.let { callback ->
+            onExhausted = null
+            callback()
+        }
+        return growing
+    }
 
     /** A chapter fetched while narration runs; it is split when narration reaches it. */
     @Synchronized

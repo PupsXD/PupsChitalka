@@ -271,7 +271,7 @@ internal fun PronunciationDialog(
                                     stress = index
                                     written = ""
                                 },
-                                label = { Text(word.substring(0, index).takeLast(2) + word[index].uppercaseChar() + word.substring(index + 1).take(2)) },
+                                label = { Text(word.lowercase().let { it.substring(0, index) + it[index].uppercaseChar() + it.substring(index + 1) }) },
                             )
                         }
                     }

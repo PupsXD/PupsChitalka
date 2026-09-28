@@ -401,6 +401,7 @@ class NarrationService : Service(), NarrationPlayer.Listener {
             settings = loaded
             pronunciations = PronunciationStore.load(this, target.id)
             val bookSource = BookSegmentSource(target.chapters, request.chapter, splitDialogue = loaded.splitsDialogue)
+            prepareGrowth(bookSource, target)
             source = bookSource
             lastIndex = bookSource.indexOf(request.chapter, request.paragraph, request.offset)
             val chapter = target.chapters.getOrNull(request.chapter)
@@ -581,6 +582,7 @@ class NarrationService : Service(), NarrationPlayer.Listener {
             val here = currentSource.get(index)
             val chapter = here?.chapter ?: state.chapterIndex ?: 0
             val rebuilt = BookSegmentSource(target.chapters, chapter, splitDialogue = loaded.splitsDialogue)
+            prepareGrowth(rebuilt, target)
             index = if (here == null) 0 else rebuilt.indexOf(here.chapter, here.paragraph, here.start)
             source = rebuilt
             currentSource = rebuilt
@@ -685,26 +687,40 @@ class NarrationService : Service(), NarrationPlayer.Listener {
         }
     }
 
+    private fun autoLoadsChapters() = getSharedPreferences("reader", MODE_PRIVATE).getBoolean("autoLoadWebChapters", true)
+
+    /** A web book's narration waits at its end for the next chapter, which is fetched when needed. */
+    private fun prepareGrowth(bookSource: BookSegmentSource, target: Book) {
+        bookSource.growing = target.chapters.lastOrNull()?.nextUrl != null && autoLoadsChapters()
+        bookSource.onExhausted = { handler.post { book?.let { prefetchNextWebChapter(it, force = true) } } }
+    }
+
     /**
      * In the last chapter of a web book the next chapter is fetched in the background, so narration
-     * goes on without a stop; the player waits for it if the chapter runs out first.
+     * goes on without a stop; the player waits for it if the text runs out first ([force]).
      */
-    private fun prefetchNextWebChapter(target: Book, chapter: Int) {
-        if (fetchingChapter || chapter < target.chapters.lastIndex) return
-        val nextUrl = target.chapters.last().nextUrl ?: return
-        if (!getSharedPreferences("reader", MODE_PRIVATE).getBoolean("autoLoadWebChapters", true)) return
+    private fun prefetchNextWebChapter(target: Book, chapter: Int = Int.MAX_VALUE, force: Boolean = false) {
+        if (fetchingChapter || (!force && chapter < target.chapters.lastIndex)) return
         val growingSource = source ?: return
+        val nextUrl = target.chapters.last().nextUrl
+        if (nextUrl == null || !autoLoadsChapters()) {
+            growingSource.growing = false
+            return
+        }
         fetchingChapter = true
-        growingSource.growing = true
         scope.launch {
+            var more = false
             try {
                 val fetched = WebChapterImporter.importChapter(nextUrl).toBookChapter()
-                val updated = withContext(Dispatchers.IO) { library.appendChapter(target.id, fetched) }
+                // The reader may have stored this chapter already; either way the library has it now.
+                val stored = withContext(Dispatchers.IO) { library.appendChapter(target.id, fetched) ?: library.get(target.id) }
                 val current = book
-                if (updated != null && current?.id == target.id) {
-                    book = current.copy(chapters = updated.chapters)
-                    if (source === growingSource) growingSource.append(fetched)
+                if (stored != null && current?.id == target.id && stored.chapters.size > current.chapters.size) {
+                    val added = stored.chapters.drop(current.chapters.size)
+                    book = current.copy(chapters = stored.chapters)
+                    if (source === growingSource) added.forEach(growingSource::append)
                     NarrationController.bookUpdated(target.id)
+                    more = stored.chapters.last().nextUrl != null
                 }
             } catch (error: Exception) {
                 if (error is kotlinx.coroutines.CancellationException) throw error
@@ -712,7 +728,8 @@ class NarrationService : Service(), NarrationPlayer.Listener {
                 if (book?.id == target.id) publish(state.copy(message = "Не удалось загрузить следующую главу: ${error.message ?: "нет сети"}"))
             } finally {
                 fetchingChapter = false
-                growingSource.growing = false
+                growingSource.growing = more && autoLoadsChapters()
+                growingSource.onExhausted = { handler.post { book?.let { prefetchNextWebChapter(it, force = true) } } }
             }
         }
     }
