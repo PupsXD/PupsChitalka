@@ -12,7 +12,6 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
-import java.net.URL
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
 
@@ -240,10 +239,7 @@ object SpeechModels {
         }
     }
 
-    /**
-     * Downloads [url] into [file], resuming a previous partial file when the server supports
-     * ranges. Returns the file size. Progress is reported relative to [offset] for multi-file models.
-     */
+    /** Downloads one file of [model]; progress is reported relative to [offset] for multi-file models. */
     private fun download(
         model: SpeechModel,
         url: String,
@@ -251,73 +247,8 @@ object SpeechModels {
         maxBytes: Long,
         progressTotal: Long?,
         offset: Long = 0,
-    ): Long {
-        var existing = if (file.isFile) file.length() else 0L
-        var attempt = 0
-        while (true) {
-            checkCancelled(model)
-            val connection = (URL(url).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 20_000
-                readTimeout = 40_000
-                instanceFollowRedirects = true
-                setRequestProperty("Accept-Encoding", "identity")
-                setRequestProperty("User-Agent", "Ozvuchka-Android/2.0")
-                if (existing > 0) setRequestProperty("Range", "bytes=$existing-")
-            }
-            activeConnection.set(connection)
-            try {
-                connection.connect()
-                val code = connection.responseCode
-                check(connection.url.protocol.equals("https", ignoreCase = true)) { "Небезопасная переадресация" }
-                if (code == 416 && existing > 0) return existing // already complete
-                check(code == HttpURLConnection.HTTP_OK || code == HttpURLConnection.HTTP_PARTIAL) {
-                    "сервер ответил HTTP $code"
-                }
-                val append = code == HttpURLConnection.HTTP_PARTIAL
-                if (!append) existing = 0
-                val remaining = connection.contentLengthLong
-                val total = if (remaining > 0) existing + remaining else 0L
-                check(total <= maxBytes) { "файл слишком велик" }
-                var bytes = existing
-                var lastReport = 0L
-                connection.inputStream.use { input ->
-                    BufferedOutputStream(FileOutputStream(file, append)).use { output ->
-                        val buffer = ByteArray(256 * 1024)
-                        while (true) {
-                            checkCancelled(model)
-                            val count = input.read(buffer)
-                            if (count < 0) break
-                            output.write(buffer, 0, count)
-                            bytes += count
-                            check(bytes <= maxBytes) { "файл слишком велик" }
-                            val now = System.currentTimeMillis()
-                            if (now - lastReport > 250) {
-                                lastReport = now
-                                publish(
-                                    ModelInstallState(
-                                        model, ModelInstallState.Stage.DOWNLOADING,
-                                        offset + bytes, progressTotal ?: total,
-                                    )
-                                )
-                            }
-                        }
-                    }
-                }
-                if (remaining > 0) check(bytes == existing + remaining) { "загрузка прервалась" }
-                check(bytes > 0) { "получен пустой файл" }
-                return bytes
-            } catch (error: IOException) {
-                checkCancelled(model)
-                // A dropped mobile connection is common for large models: retry from where we stopped.
-                attempt++
-                if (attempt >= 4) throw error
-                existing = if (file.isFile) file.length() else 0L
-                Thread.sleep(1_500L * attempt)
-            } finally {
-                connection.disconnect()
-                activeConnection.set(null)
-            }
-        }
+    ): Long = downloadResumable(url, file, maxBytes, activeConnection, checkCancelled = { checkCancelled(model) }) { bytes, total ->
+        publish(ModelInstallState(model, ModelInstallState.Stage.DOWNLOADING, offset + bytes, progressTotal ?: total))
     }
 
     private fun extract(model: SpeechModel, archive: File, staging: File) {
