@@ -26,10 +26,27 @@ jobs:
       # AGP downloads the exact platform and build tools it needs.
       - uses: gradle/actions/setup-gradle@v4
 
+      # The app's permanent signing key, so every APK installs as an update of the previous one.
+      # Without the secrets the APK is signed with the runner's throwaway debug key.
+      - name: Signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.OZVUCHKA_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 --decode --ignore-garbage > "$RUNNER_TEMP/ozvuchka.jks"
+            echo "OZVUCHKA_KEYSTORE=$RUNNER_TEMP/ozvuchka.jks" >> "$GITHUB_ENV"
+          else
+            echo "::warning::No OZVUCHKA_KEYSTORE_BASE64 secret: this APK will not install over earlier builds."
+          fi
+
       - name: Unit tests
+        env:
+          OZVUCHKA_KEYSTORE_PASSWORD: ${{ secrets.OZVUCHKA_KEYSTORE_PASSWORD }}
         run: bash ./gradlew --no-daemon :app:testDebugUnitTest
 
       - name: Debug APK
+        env:
+          OZVUCHKA_KEYSTORE_PASSWORD: ${{ secrets.OZVUCHKA_KEYSTORE_PASSWORD }}
         run: bash ./gradlew --no-daemon :app:assembleDebug
 
       - uses: actions/upload-artifact@v4

@@ -1,8 +1,17 @@
+import java.time.ZoneOffset
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+// Each build gets a larger version code (minutes since 2026), so the phone installs every new APK
+// as an update of the previous one.
+val buildTime: ZonedDateTime = ZonedDateTime.now(ZoneOffset.UTC)
+val buildNumber = (buildTime.toEpochSecond() / 60 - 29_453_760).toInt()
 
 android {
     namespace = "com.ozvuchka.app"
@@ -12,13 +21,32 @@ android {
         applicationId = "com.ozvuchka.app"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = buildNumber
+        versionName = "0.2 (" + buildTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")) + " UTC)"
         ndk { abiFilters += "arm64-v8a" }
     }
 
+    // Android installs a new version over the old one, keeping books and settings, only when both
+    // are signed with the same key. Without a key of its own each CI runner signs with a fresh debug
+    // key, so the app's permanent key comes from the environment (repository secrets on CI).
+    val appKey = System.getenv("OZVUCHKA_KEYSTORE")?.let(::file)?.takeIf { it.isFile }
+    signingConfigs {
+        if (appKey != null) {
+            create("ozvuchka") {
+                storeFile = appKey
+                storePassword = System.getenv("OZVUCHKA_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("OZVUCHKA_KEY_ALIAS") ?: "ozvuchka"
+                keyPassword = System.getenv("OZVUCHKA_KEY_PASSWORD") ?: System.getenv("OZVUCHKA_KEYSTORE_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
-        release { isMinifyEnabled = false }
+        debug { if (appKey != null) signingConfig = signingConfigs.getByName("ozvuchka") }
+        release {
+            isMinifyEnabled = false
+            if (appKey != null) signingConfig = signingConfigs.getByName("ozvuchka")
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
