@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -79,6 +80,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ozvuchka.app.data.Covers
 import com.ozvuchka.app.speech.RuVoiceInstallState
+import com.ozvuchka.app.update.AppUpdateState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -121,6 +123,11 @@ fun LibraryScreen(
     ruVoiceOffer: RuVoiceInstallState? = null,
     ruVoiceActions: RuVoiceSetupActions? = null,
     onDismissRuVoice: () -> Unit = {},
+    /** A new version of the app, or the answer to a check the reader asked for; null shows nothing. */
+    appUpdate: AppUpdateState? = null,
+    appUpdateActions: AppUpdateActions? = null,
+    /** «Версия от …» in the menu; null leaves the line out. */
+    appVersion: String? = null,
 ) {
     var query by rememberSaveable { mutableStateOf("") }
     var filter by rememberSaveable { mutableStateOf("Все") }
@@ -166,7 +173,17 @@ fun LibraryScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             item(span = { GridItemSpan(maxLineSpan) }) {
-                LibraryHeader(bookCount = books.size, onOpenVoices = onOpenVoices)
+                LibraryHeader(
+                    bookCount = books.size,
+                    onOpenVoices = onOpenVoices,
+                    appVersion = appVersion,
+                    onCheckUpdate = appUpdateActions?.let { it::checkUpdate },
+                )
+            }
+            if (appUpdate != null && appUpdateActions != null) {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    AppUpdateCard(appUpdate, appUpdateActions)
+                }
             }
             if (ruVoiceOffer != null && ruVoiceActions != null) {
                 item(span = { GridItemSpan(maxLineSpan) }) {
@@ -334,7 +351,8 @@ fun LibraryScreen(
 }
 
 @Composable
-private fun LibraryHeader(bookCount: Int, onOpenVoices: () -> Unit) {
+private fun LibraryHeader(bookCount: Int, onOpenVoices: () -> Unit, appVersion: String?, onCheckUpdate: (() -> Unit)?) {
+    var showMenu by remember { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -347,6 +365,26 @@ private fun LibraryHeader(bookCount: Int, onOpenVoices: () -> Unit) {
             )
             IconButton(onClick = onOpenVoices) {
                 Icon(Icons.Filled.RecordVoiceOver, contentDescription = "Голоса и озвучка", tint = MaterialTheme.colorScheme.primary)
+            }
+            if (onCheckUpdate != null) {
+                Box {
+                    IconButton(onClick = { showMenu = true }) {
+                        Icon(Icons.Filled.MoreVert, contentDescription = "О приложении", tint = MaterialTheme.colorScheme.primary)
+                    }
+                    DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Проверить обновления") },
+                            leadingIcon = { Icon(Icons.Filled.SystemUpdate, contentDescription = null) },
+                            onClick = {
+                                showMenu = false
+                                onCheckUpdate()
+                            },
+                        )
+                        appVersion?.let { version ->
+                            DropdownMenuItem(text = { Text(version) }, onClick = {}, enabled = false)
+                        }
+                    }
+                }
             }
         }
         Text(
