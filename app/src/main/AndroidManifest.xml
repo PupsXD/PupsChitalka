@@ -6,7 +6,8 @@
     <!-- Android 11+ hides other apps by default: this lets the reader find installed TTS engines
          such as RuVoice (Silero v5), Google and Samsung and use their voices. -->
     <uses-permission android:name="android.permission.VIBRATE" />
-    <!-- Installs RuVoice from its GitHub release on the user's request; Android asks to confirm. -->
+    <!-- Installs RuVoice from its GitHub release, and new versions of this app from its own releases,
+         on the user's request; Android asks to confirm. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <queries>
@@ -66,6 +67,9 @@
             android:foregroundServiceType="mediaPlayback" />
         <receiver
             android:name=".speech.RuVoiceInstallReceiver"
+            android:exported="false" />
+        <receiver
+            android:name=".update.AppUpdateReceiver"
             android:exported="false" />
         <service
             android:name=".speech.NarrationTileService"

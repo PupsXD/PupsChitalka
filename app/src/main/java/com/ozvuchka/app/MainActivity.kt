@@ -34,6 +34,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -106,6 +107,9 @@ import com.ozvuchka.app.ui.ReaderUiState
 import com.ozvuchka.app.ui.VoiceSettingsActions
 import com.ozvuchka.app.ui.VoiceSettingsSheet
 import com.ozvuchka.app.ui.VoiceSettingsUi
+import com.ozvuchka.app.ui.AppUpdateActions
+import com.ozvuchka.app.ui.appUpdateShown
+import com.ozvuchka.app.update.AppUpdater
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
@@ -151,6 +155,11 @@ class MainActivity : ComponentActivity() {
     /** `versionName` of the RuVoice on the phone, null when it is not installed. */
     private var ruVoiceVersion by mutableStateOf<String?>(null)
     private var ruVoiceOfferDismissed by mutableStateOf(false)
+    private var appUpdate by mutableStateOf(AppUpdater.state.value)
+    /** The reader asked to check for a new version: the answer shows even when there is none. */
+    private var appUpdateAsked by mutableStateOf(false)
+    /** The newest version the reader put off with «Не сейчас». */
+    private var appUpdateDismissed by mutableLongStateOf(0L)
     /** Voices each Android TTS engine reported, loaded one engine at a time when needed. */
     private var engineVoices by mutableStateOf<Map<String, List<SystemVoiceInfo>>>(emptyMap())
     private var loadingEngines by mutableStateOf<Set<String>>(emptySet())
@@ -190,6 +199,22 @@ class MainActivity : ComponentActivity() {
         }
         lifecycleScope.launch {
             RuVoiceInstaller.update.collect { ruVoiceUpdate = it }
+        }
+        AppUpdater.start(this)?.let { version -> notice = "PupsChitalka обновлена: версия от ${AppUpdater.versionDate(version)}" }
+        appUpdateDismissed = AppUpdater.dismissed(this)
+        lifecycleScope.launch {
+            AppUpdater.state.collect { appUpdate = it }
+        }
+        lifecycleScope.launch {
+            // Android's confirmation for installing the update opens over the visible screen.
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                AppUpdater.confirmation.collect { pending ->
+                    if (pending == null) return@collect
+                    val confirm = AppUpdater.takeConfirmation() ?: return@collect
+                    runCatching { startActivity(confirm) }
+                        .onFailure { notice = "Не удалось открыть установку обновления: ${it.message}" }
+                }
+            }
         }
         lifecycleScope.launch {
             // Android's confirmation for installing RuVoice opens over the visible reader.
@@ -279,6 +304,9 @@ class MainActivity : ComponentActivity() {
                             },
                             ruVoiceActions = voiceActions,
                             onDismissRuVoice = ::dismissRuVoiceOffer,
+                            appUpdate = appUpdate.takeIf { appUpdateShown(it, appUpdateAsked, appUpdateDismissed) },
+                            appUpdateActions = appUpdateActions,
+                            appVersion = appUpdate.installed.takeIf { it > 0 }?.let { "Версия от ${AppUpdater.versionDate(it)}" },
                         )
                     } else {
                         BackHandler { closeReader() }
@@ -350,6 +378,8 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         refreshEngines()
+        // Asks GitHub at most every few hours, and quietly when there is no network.
+        AppUpdater.checkForUpdate(this)
         if (currentBook != null && !readerChromeShown) readerActions.chromeVisibilityChanged(false)
     }
 
@@ -941,6 +971,23 @@ class MainActivity : ComponentActivity() {
             engineVoices = engineVoices + (enginePackage to voices)
             loadingEngines = loadingEngines - enginePackage
         }
+    }
+
+    private val appUpdateActions = object : AppUpdateActions {
+        override fun installUpdate() = AppUpdater.install(this@MainActivity)
+        override fun cancelUpdate() = AppUpdater.cancel()
+        override fun checkUpdate() {
+            appUpdateAsked = true
+            AppUpdater.checkForUpdate(this@MainActivity, force = true)
+        }
+        override fun dismissUpdate() {
+            appUpdateAsked = false
+            if (appUpdate.latest > appUpdate.installed) {
+                AppUpdater.dismiss(this@MainActivity)
+                appUpdateDismissed = appUpdate.latest
+            }
+        }
+        override fun openReleasesPage() = openUrl(AppUpdater.RELEASES_PAGE)
     }
 
     private fun openUrl(url: String) {
