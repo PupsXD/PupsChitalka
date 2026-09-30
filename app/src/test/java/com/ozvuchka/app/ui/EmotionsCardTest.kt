@@ -58,6 +58,7 @@ class EmotionsCardTest {
         override fun installRuVoice() = Unit
         override fun cancelRuVoice() = Unit
         override fun openRuVoicePage() = Unit
+        override fun checkRuVoiceUpdate() = Unit
     }
 
     private fun state(emotions: EmotionLevel) = VoiceSettingsUi(

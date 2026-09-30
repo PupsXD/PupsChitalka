@@ -33,12 +33,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ozvuchka.app.speech.RuVoiceInstallState
 import com.ozvuchka.app.speech.RuVoiceInstallState.Stage
+import com.ozvuchka.app.speech.RuVoiceUpdateState
+import com.ozvuchka.app.speech.RuVoiceUpdateState.Stage as UpdateStage
 
 /** What the reader can do about getting RuVoice. */
 interface RuVoiceSetupActions {
     fun installRuVoice()
     fun cancelRuVoice()
     fun openRuVoicePage()
+    /** Looks at the releases for a RuVoice newer than the installed one. */
+    fun checkRuVoiceUpdate()
 }
 
 /** The size of the full RuVoice build, shown before its release has been looked up. */
@@ -113,6 +117,67 @@ internal fun RuVoiceSetupBody(state: RuVoiceInstallState, actions: RuVoiceSetupA
                 Stage.IDLE -> {
                     Button(onClick = actions::installRuVoice) { Text("Установить RuVoice") }
                     if (onDismiss != null) TextButton(onClick = onDismiss) { Text("Не сейчас") }
+                }
+            }
+        }
+    }
+}
+
+internal fun ruVoiceVersionLine(version: String?, update: RuVoiceUpdateState): String = when {
+    version == null -> "Версия RuVoice не определена"
+    update.stage == UpdateStage.UP_TO_DATE -> "Версия RuVoice: $version — самая свежая"
+    else -> "Версия RuVoice: $version"
+}
+
+/**
+ * RuVoice that is already on the phone: its version and the way to update it. A newer build is
+ * downloaded and installed over the old one the same way the first install goes; the light build,
+ * whose voices come as a separate pack, is left to the releases page.
+ */
+@Composable
+internal fun RuVoiceUpdateBody(
+    version: String?,
+    update: RuVoiceUpdateState,
+    setup: RuVoiceInstallState,
+    actions: RuVoiceSetupActions,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        if (setup.busy || setup.stage == Stage.FAILED) {
+            RuVoiceSetupBody(setup, actions)
+            return@Column
+        }
+        Text(ruVoiceVersionLine(version, update), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        when (update.stage) {
+            UpdateStage.UNKNOWN -> TextButton(onClick = actions::checkRuVoiceUpdate) { Text("Проверить обновления") }
+            UpdateStage.CHECKING -> {
+                Text("Проверяем, вышла ли новая версия…", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                LinearProgressIndicator(Modifier.fillMaxWidth().height(4.dp).clip(CircleShape))
+            }
+            UpdateStage.UP_TO_DATE -> TextButton(onClick = actions::checkRuVoiceUpdate) { Text("Проверить снова") }
+            UpdateStage.FAILED -> {
+                update.message?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+                TextButton(onClick = actions::checkRuVoiceUpdate) { Text("Повторить") }
+            }
+            UpdateStage.AVAILABLE -> {
+                Text(
+                    "Вышла новая версия ${update.latest}" + if (update.size > 0) " (≈ ${megabytes(update.size)} МБ)" else "",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                )
+                if (update.lite) {
+                    Text(
+                        "У вас облегчённая сборка: голоса к ней ставятся отдельным паком, поэтому обновить её нужно вручную.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Button(onClick = actions::openRuVoicePage) { Text("Открыть страницу релизов") }
+                } else {
+                    Text(
+                        "Скачается по интернету, лучше по Wi-Fi. Android попросит подтвердить установку.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Button(onClick = actions::installRuVoice) { Text("Обновить RuVoice") }
                 }
             }
         }

@@ -8,6 +8,7 @@ import com.ozvuchka.app.speech.DialogueVoices
 import com.ozvuchka.app.speech.EmotionLevel
 import com.ozvuchka.app.speech.ModelInstallState
 import com.ozvuchka.app.speech.RuVoiceInstallState
+import com.ozvuchka.app.speech.RuVoiceUpdateState
 import com.ozvuchka.app.speech.SpeechModel
 import com.ozvuchka.app.speech.SpeechRole
 import com.ozvuchka.app.speech.SystemEngineInfo
@@ -227,6 +228,10 @@ data class VoiceSettingsUi(
     val emotionsPreviewing: Boolean = false,
     /** Getting RuVoice from inside the app. */
     val ruVoiceSetup: RuVoiceInstallState = RuVoiceInstallState(),
+    /** `versionName` of the RuVoice on the phone. */
+    val ruVoiceVersion: String? = null,
+    /** Whether a newer RuVoice is out. */
+    val ruVoiceUpdate: RuVoiceUpdateState = RuVoiceUpdateState(),
 ) {
     val ruVoiceInstalled: Boolean get() = systemEngines.any { it.packageName == VoiceCatalog.RUVOICE_PACKAGE }
 }

@@ -53,6 +53,7 @@ class RoleVoicesTest {
         override fun installRuVoice() = Unit
         override fun cancelRuVoice() = Unit
         override fun openRuVoicePage() = Unit
+        override fun checkRuVoiceUpdate() = Unit
     }
 
     @Test
