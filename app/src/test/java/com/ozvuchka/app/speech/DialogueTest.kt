@@ -167,6 +167,28 @@ class DialogueTest {
         assertEquals(SpeechRole.MALE, cast.withChoices(mapOf("Вэнь Цин" to SpeechRole.MALE)).genderOf("Вэнь Цин"))
     }
 
+    /**
+     * «окинул Нину взглядом», «погладил Нину по голове»: the verb there is someone else's, yet it
+     * taught the cast that «Нину» is a man, and «Глаза Нины расширились» was read in a man's voice.
+     */
+    @Test
+    fun aNameInAnotherCaseIsTheCharacterNamedMostOften() {
+        val cast = Cast.learn(
+            listOf(
+                "Нина улыбнулась.", "— Нет, — сказала Нина.", "Нина поставила чайник.", "Нина кивнула.",
+                "Дядя вздохнул, погладил Нину по голове.", "Он замер, окинул Нину взглядом.",
+                "Дункан кивнул.", "— Иду, — ответил Дункан.", "Дункан вздохнул.", "Она посмотрела на Дункана.",
+            ),
+        )
+        assertEquals(SpeechRole.FEMALE, cast.genderOf("Нину"))
+        assertEquals(SpeechRole.FEMALE, cast.genderOf("Нины"))
+        assertEquals(SpeechRole.MALE, cast.genderOf("Дункана"))
+        assertEquals("нина", cast.canonical("Нину"))
+        assertEquals("дункан", cast.canonical("Дункану"))
+        // The reader's choice for «Нина» holds for «Нины» too.
+        assertEquals(SpeechRole.MALE, cast.withChoices(mapOf("Нина" to SpeechRole.MALE)).genderOf("Нины"))
+    }
+
     @Test
     fun theListOfCharactersJoinsTheCasesOfAName() {
         val cast = Cast.learn(

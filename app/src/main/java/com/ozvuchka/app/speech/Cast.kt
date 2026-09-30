@@ -34,12 +34,21 @@ class Cast internal constructor(
     fun genderOf(name: String): SpeechRole? {
         val key = normalize(name)
         if (key.isEmpty()) return null
+        val variants = nominatives(key)
+        // «Нины», «Нину»: a name in another case is the character the book names more often in the
+        // nominative. What the text says next to the form itself is mostly about someone else —
+        // «окинул Нину взглядом» — and the reader's choice for «Нина» holds for it too.
+        if (key.substringAfterLast(' ').let { last -> OBLIQUE_ENDINGS.any { last.endsWith(it) } }) {
+            val count = mentions[key]?.second ?: 0
+            for (variant in variants) {
+                if ((mentions[variant]?.second ?: 0) > count) lookup(variant)?.let { return it }
+            }
+        }
         lookup(key)?.let { return it }
         val parts = key.split(' ')
         // «госпожа Юй»: the name without the title; Chinese names put the family name first, so the
         // given name at the end tells more.
         for (part in parts.reversed()) lookup(part)?.let { return it }
-        val variants = nominatives(key)
         for (variant in variants) lookup(variant)?.let { return it }
         // What the book does not say, the name may: «Марина Сергеевна», «Галя», «Линь-сюн».
         for (part in parts.reversed()) nameGender(part)?.let { return it }
@@ -48,6 +57,16 @@ class Cast internal constructor(
     }
 
     private fun lookup(key: String): SpeechRole? = chosen[key] ?: learned[key]
+
+    /**
+     * The same character's name in whatever case the text uses: «Дункана» and «Дункану» are
+     * «дункан», the form the book writes most often.
+     */
+    internal fun canonical(name: String): String {
+        val key = normalize(name)
+        val count = mentions[key]?.second ?: 0
+        return nominatives(key).firstOrNull { (mentions[it]?.second ?: 0) > count } ?: key
+    }
 
     /** The genders the reader set, by name; lets narration notice a change. */
     internal val choices: Map<String, SpeechRole> get() = chosen
@@ -266,6 +285,12 @@ class Cast internal constructor(
                 else -> null
             }
         }
+
+        /**
+         * Endings of the other cases: «Нины», «Нину», «Ниной», «Кати», «Ивану». A name that ends so in
+         * the nominative — «Ширли», «Андрей» — has no more frequent form to give way to.
+         */
+        private val OBLIQUE_ENDINGS = listOf("у", "ю", "ы", "и", "е", "ой", "ей", "ом", "ем", "ою")
 
         private val PRONOUN_OBJECTS = setOf("ему", "ей", "им", "его", "ее", "их", "мне", "тебе", "нам", "вам", "себе")
 
