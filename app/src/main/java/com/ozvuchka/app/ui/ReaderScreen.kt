@@ -303,11 +303,16 @@ fun ReaderScreen(
         },
     ) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
-            val horizontalInset = safeInsets.calculateLeftPadding(layoutDirection) + safeInsets.calculateRightPadding(layoutDirection)
-            val widthPx = with(density) { (maxWidth - horizontalInset - margin * 2).roundToPx() }
+            // The page's paddings round each side to whole pixels, so the text box is worked out the
+            // same way. Measured a pixel wider than drawn, a page's last lines hold fewer words on
+            // screen than pagination counted, and those words are on no page at all.
+            val widthPx = with(density) {
+                constraints.maxWidth - safeInsets.calculateLeftPadding(layoutDirection).roundToPx() -
+                    safeInsets.calculateRightPadding(layoutDirection).roundToPx() - margin.roundToPx() * 2
+            }
             val heightPx = with(density) {
-                (maxHeight - safeInsets.calculateTopPadding() - safeInsets.calculateBottomPadding() -
-                    PageVerticalPadding * 2 - footerHeight).roundToPx()
+                constraints.maxHeight - safeInsets.calculateTopPadding().roundToPx() -
+                    safeInsets.calculateBottomPadding().roundToPx() - PageVerticalPadding.roundToPx() * 2 - footerHeight.roundToPx()
             }
             fun layout(view: ChapterView, maxPages: Int = Int.MAX_VALUE): List<ReaderPage> =
                 layouts.pages(view, state.typography, widthPx, heightPx, maxPages) {
