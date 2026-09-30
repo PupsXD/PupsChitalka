@@ -8,6 +8,7 @@ import android.content.pm.PackageInfo
 import android.content.pm.PackageInstaller
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.SystemClock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.getAndUpdate
@@ -33,6 +34,8 @@ data class RuVoiceInstallState(
     val total: Long = 0,
     /** Why the last attempt stopped: a cancel, a refusal or an error. */
     val message: String? = null,
+    /** In a finished install: the version this one replaced; null when RuVoice was not there before. */
+    val previousVersion: String? = null,
 ) {
     enum class Stage { IDLE, LOOKING, DOWNLOADING, PREPARING, CONFIRMING, DONE, FAILED }
 
@@ -40,6 +43,21 @@ data class RuVoiceInstallState(
         get() = stage == Stage.LOOKING || stage == Stage.DOWNLOADING || stage == Stage.PREPARING || stage == Stage.CONFIRMING
 
     val fraction: Float? get() = if (total > 0) (completed.toFloat() / total).coerceIn(0f, 1f) else null
+}
+
+/** What is known about a newer RuVoice than the one on the phone. */
+data class RuVoiceUpdateState(
+    val stage: Stage = Stage.UNKNOWN,
+    /** `versionName` of the installed RuVoice, such as «0.17.1» or «0.17.1-lite». */
+    val installed: String? = null,
+    /** The newest full build in the releases. */
+    val latest: String? = null,
+    val size: Long = 0,
+    /** The installed RuVoice is the «lite» build: the full one the app downloads would replace it. */
+    val lite: Boolean = false,
+    val message: String? = null,
+) {
+    enum class Stage { UNKNOWN, CHECKING, UP_TO_DATE, AVAILABLE, FAILED }
 }
 
 private class RuVoiceCancelled : IOException("cancelled")
@@ -52,6 +70,9 @@ private class RuVoiceProblem(message: String) : Exception(message)
  * releases, downloads it (resuming after a dropped connection), checks it and hands it to Android's
  * package installer. Android always asks the user to confirm installing another app, and the first
  * time also to allow installs from this one; RuVoice's code has no license to ship it inside this APK.
+ *
+ * The same route updates an installed RuVoice: [checkForUpdate] compares its version with the newest
+ * release, and [install] puts the newer build over it.
  */
 object RuVoiceInstaller {
     private const val RELEASES_API = "https://api.github.com/repos/kost-t-human/ruvoice-tts/releases?per_page=20"
@@ -60,6 +81,11 @@ object RuVoiceInstaller {
     private const val MAX_APK_BYTES = 700L * 1024 * 1024
     private val FULL_APK = Regex("ruvoice-tts-(\\d+(?:\\.\\d+)*)\\.apk")
     private val SHA256 = Regex("[0-9a-f]{64}")
+    private val VERSION_NUMBER = Regex("\\d+(?:\\.\\d+)*")
+
+    /** How long a look at the releases stays good, so opening the settings again does not ask GitHub again. */
+    private const val CHECK_FRESH_MS = 6L * 60 * 60 * 1000
+    private const val CHECK_RETRY_MS = 2L * 60 * 1000
 
     private val worker = Executors.newSingleThreadExecutor { task ->
         Thread(task, "ozvuchka-ruvoice").apply { isDaemon = true }
@@ -70,13 +96,23 @@ object RuVoiceInstaller {
 
     /** Android's confirmation screen for the install, waiting for the visible activity to show it. */
     val confirmation: StateFlow<Intent?> = mutableConfirmation
+    private val mutableUpdate = MutableStateFlow(RuVoiceUpdateState())
+
+    /** Whether the installed RuVoice is the newest, as far as the last look at the releases showed. */
+    val update: StateFlow<RuVoiceUpdateState> = mutableUpdate
     private val activeConnection = AtomicReference<HttpURLConnection?>(null)
     @Volatile private var cancelled = false
+
+    /** The version an install in progress replaces; kept here because Android's answer arrives later. */
+    @Volatile private var replacedVersion: String? = null
+    @Volatile private var lastCheckAt = 0L
+    @Volatile private var lastCheckFailed = false
 
     fun install(context: Context) {
         val app = context.applicationContext
         if (state.value.busy) return
         cancelled = false
+        replacedVersion = installedVersion(app)
         mutableState.value = RuVoiceInstallState(RuVoiceInstallState.Stage.LOOKING)
         worker.execute {
             try {
@@ -98,6 +134,58 @@ object RuVoiceInstaller {
         }
     }
 
+    /**
+     * Looks at the releases and tells whether they hold a newer RuVoice than the installed one. Asked
+     * on its own ([force], from a button) it says when it cannot reach GitHub; asked in passing, when
+     * the settings open, it stays quiet about that and asks again only after a while.
+     */
+    fun checkForUpdate(context: Context, force: Boolean = false) {
+        val app = context.applicationContext
+        val previous = mutableUpdate.value
+        if (state.value.busy || previous.stage == RuVoiceUpdateState.Stage.CHECKING) return
+        val installed = installedVersion(app)
+        if (installed == null) {
+            mutableUpdate.value = RuVoiceUpdateState()
+            return
+        }
+        val age = if (lastCheckAt == 0L) null else SystemClock.elapsedRealtime() - lastCheckAt
+        if (!updateCheckDue(previous, installed, age, lastCheckFailed, force)) return
+        cancelled = false
+        mutableUpdate.value = RuVoiceUpdateState(RuVoiceUpdateState.Stage.CHECKING, installed = installed)
+        worker.execute {
+            var failed = false
+            try {
+                mutableUpdate.value = judgeUpdate(installed, findRelease())
+            } catch (_: RuVoiceCancelled) {
+                mutableUpdate.value = RuVoiceUpdateState(installed = installed)
+            } catch (error: Exception) {
+                failed = true
+                mutableUpdate.value = if (force) {
+                    RuVoiceUpdateState(RuVoiceUpdateState.Stage.FAILED, installed = installed, message = describe(error, checking = true))
+                } else {
+                    previous.takeIf { it.installed == installed && it.stage != RuVoiceUpdateState.Stage.CHECKING }
+                        ?: RuVoiceUpdateState(installed = installed)
+                }
+            } finally {
+                lastCheckFailed = failed
+                lastCheckAt = SystemClock.elapsedRealtime()
+                activeConnection.set(null)
+            }
+        }
+    }
+
+    /** `versionName` of the RuVoice on the phone, or null when it is not installed. */
+    internal fun installedVersion(context: Context): String? = runCatching {
+        val manager = context.packageManager
+        val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            manager.getPackageInfo(VoiceCatalog.RUVOICE_PACKAGE, PackageManager.PackageInfoFlags.of(0))
+        } else {
+            @Suppress("DEPRECATION")
+            manager.getPackageInfo(VoiceCatalog.RUVOICE_PACKAGE, 0)
+        }
+        info.versionName
+    }.getOrNull()
+
     /** Stops looking up or downloading; Android's own confirmation screen is the user's to close. */
     fun cancel() {
         if (state.value.stage == RuVoiceInstallState.Stage.CONFIRMING) return
@@ -110,7 +198,10 @@ object RuVoiceInstaller {
 
     /** The app noticed the finished install; the offer goes back to rest. */
     fun acknowledge() {
-        if (state.value.stage == RuVoiceInstallState.Stage.DONE) mutableState.value = RuVoiceInstallState()
+        if (state.value.stage == RuVoiceInstallState.Stage.DONE) {
+            mutableState.value = RuVoiceInstallState()
+            replacedVersion = null
+        }
     }
 
     internal fun onInstallResult(context: Context, intent: Intent) {
@@ -132,7 +223,14 @@ object RuVoiceInstaller {
             }
             PackageInstaller.STATUS_SUCCESS -> {
                 downloads(context).deleteRecursively()
-                mutableState.value = RuVoiceInstallState(RuVoiceInstallState.Stage.DONE, version)
+                // An update restarts RuVoice's process: the connection kept to the old one is dead.
+                SynthesisHub.shared(context).forgetSystemEngine(VoiceCatalog.RUVOICE_PACKAGE)
+                if (version != null) {
+                    mutableUpdate.value = RuVoiceUpdateState(RuVoiceUpdateState.Stage.UP_TO_DATE, installed = version, latest = version)
+                    lastCheckAt = SystemClock.elapsedRealtime()
+                    lastCheckFailed = false
+                }
+                mutableState.value = RuVoiceInstallState(RuVoiceInstallState.Stage.DONE, version, previousVersion = replacedVersion)
             }
             PackageInstaller.STATUS_FAILURE_ABORTED -> {
                 mutableState.value = RuVoiceInstallState(version = version, message = "Установка RuVoice отменена")
@@ -274,11 +372,12 @@ object RuVoiceInstaller {
         }
     }
 
-    private fun describe(error: Exception): String = when (error) {
+    private fun describe(error: Exception, checking: Boolean = false): String = when (error) {
         is RuVoiceProblem -> error.message.orEmpty()
         is UnknownHostException, is ConnectException, is SocketTimeoutException ->
             "Нет связи с GitHub. Проверьте интернет и попробуйте ещё раз."
-        else -> "Не удалось скачать RuVoice: ${error.message ?: error.javaClass.simpleName}"
+        else -> (if (checking) "Не удалось проверить обновления" else "Не удалось скачать RuVoice") +
+            ": ${error.message ?: error.javaClass.simpleName}"
     }
 
     private fun installFailure(status: Int, detail: String?): String = when (status) {
@@ -314,6 +413,32 @@ object RuVoiceInstaller {
             }
         }
         return best
+    }
+
+    /** The number in a `versionName`: «0.17.1» from «0.17.1» and from «0.17.1-lite»; null when there is none. */
+    internal fun versionNumber(versionName: String?): String? = VERSION_NUMBER.find(versionName.orEmpty())?.value
+
+    /** Whether the [latest] full build is newer than the RuVoice [installed]; a version that cannot be read is not called old. */
+    internal fun judgeUpdate(installed: String?, latest: RuVoiceRelease): RuVoiceUpdateState {
+        val number = versionNumber(installed)
+        val newer = number != null && compareVersions(latest.version, number) > 0
+        return RuVoiceUpdateState(
+            stage = if (newer) RuVoiceUpdateState.Stage.AVAILABLE else RuVoiceUpdateState.Stage.UP_TO_DATE,
+            installed = installed,
+            latest = latest.version,
+            size = latest.size,
+            lite = installed?.contains("lite", ignoreCase = true) == true,
+        )
+    }
+
+    /**
+     * Whether a look at the releases is worth making: a recent one ([ageMs] since the last) still
+     * stands, unless it failed, RuVoice changed since, or the reader asked ([force]).
+     */
+    internal fun updateCheckDue(previous: RuVoiceUpdateState, installed: String?, ageMs: Long?, lastFailed: Boolean, force: Boolean): Boolean = when {
+        installed == null -> false
+        force || ageMs == null || previous.installed != installed -> true
+        else -> ageMs >= if (lastFailed) CHECK_RETRY_MS else CHECK_FRESH_MS
     }
 
     internal fun compareVersions(first: String, second: String): Int {

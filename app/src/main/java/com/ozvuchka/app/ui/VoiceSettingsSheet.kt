@@ -55,6 +55,7 @@ import com.ozvuchka.app.speech.DialogueMode
 import com.ozvuchka.app.speech.EmotionLevel
 import com.ozvuchka.app.speech.ModelInstallState
 import com.ozvuchka.app.speech.RoleVoice
+import com.ozvuchka.app.speech.RuVoiceUpdateState
 import com.ozvuchka.app.speech.SpeechModel
 import com.ozvuchka.app.speech.SpeechRole
 import com.ozvuchka.app.speech.SystemVoiceInfo
@@ -245,6 +246,8 @@ private fun engineOptions(state: VoiceSettingsUi, language: String): List<Engine
                 key = "system:${VoiceCatalog.RUVOICE_PACKAGE}",
                 title = "RuVoice · Silero v5",
                 subtitle = when {
+                    state.ruVoiceInstalled && state.ruVoiceUpdate.stage == RuVoiceUpdateState.Stage.AVAILABLE ->
+                        "Живая интонация · вышла новая версия ${state.ruVoiceUpdate.latest}"
                     state.ruVoiceInstalled -> "Живая интонация, ударения по контексту"
                     state.ruVoiceSetup.busy -> ruVoiceProgressLabel(state.ruVoiceSetup).orEmpty()
                     else -> "Не установлен · нажмите, чтобы установить (≈\u00A0230\u00A0МБ)"
@@ -398,6 +401,7 @@ private fun SystemEngineVoices(state: VoiceSettingsUi, language: String, selecte
             }
             return@SheetCard
         }
+        if (ruVoice) RuVoiceUpdateBody(state.ruVoiceVersion, state.ruVoiceUpdate, state.ruVoiceSetup, actions)
         Text(
             if (ruVoice) {
                 "Нейросеть Silero v5: интонация, ударения и омографы по контексту, числа и сокращения. " +

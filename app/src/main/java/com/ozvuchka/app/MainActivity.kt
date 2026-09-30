@@ -147,6 +147,9 @@ class MainActivity : ComponentActivity() {
     /** The engines were looked up at least once, so a missing RuVoice is really missing. */
     private var enginesScanned by mutableStateOf(false)
     private var ruVoiceSetup by mutableStateOf(RuVoiceInstaller.state.value)
+    private var ruVoiceUpdate by mutableStateOf(RuVoiceInstaller.update.value)
+    /** `versionName` of the RuVoice on the phone, null when it is not installed. */
+    private var ruVoiceVersion by mutableStateOf<String?>(null)
     private var ruVoiceOfferDismissed by mutableStateOf(false)
     /** Voices each Android TTS engine reported, loaded one engine at a time when needed. */
     private var engineVoices by mutableStateOf<Map<String, List<SystemVoiceInfo>>>(emptyMap())
@@ -182,8 +185,11 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             RuVoiceInstaller.state.collect { state ->
                 ruVoiceSetup = state
-                if (state.stage == RuVoiceInstallState.Stage.DONE) onRuVoiceInstalled()
+                if (state.stage == RuVoiceInstallState.Stage.DONE) onRuVoiceInstalled(state)
             }
+        }
+        lifecycleScope.launch {
+            RuVoiceInstaller.update.collect { ruVoiceUpdate = it }
         }
         lifecycleScope.launch {
             // Android's confirmation for installing RuVoice opens over the visible reader.
@@ -306,6 +312,8 @@ class MainActivity : ComponentActivity() {
                                     emotions = settings.emotions,
                                     emotionsPreviewing = narration.isPreview && narration.active && previewVoice == null && previewingEmotions,
                                     ruVoiceSetup = ruVoiceSetup,
+                                    ruVoiceVersion = ruVoiceVersion,
+                                    ruVoiceUpdate = ruVoiceUpdate,
                                 ),
                                 initialLanguage = voicesLanguage,
                                 actions = voiceActions,
@@ -427,10 +435,13 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshEngines() {
         lifecycleScope.launch {
-            val engines = withContext(Dispatchers.IO) { SystemVoices.engines(this@MainActivity) }
+            val (engines, version) = withContext(Dispatchers.IO) {
+                SystemVoices.engines(this@MainActivity) to RuVoiceInstaller.installedVersion(this@MainActivity)
+            }
             val found = engines.mapTo(HashSet()) { it.packageName }
             val ruVoiceAppeared = VoiceCatalog.RUVOICE_PACKAGE in found && VoiceCatalog.RUVOICE_PACKAGE !in installedEngines
             systemEngines = engines
+            ruVoiceVersion = version
             enginesScanned = true
             engineVoices = engineVoices.filterKeys { it in found }
             // The first time RuVoice is found, Russian books switch to Silero unless a voice was chosen by hand.
@@ -443,9 +454,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** RuVoice was installed from the app: Russian text switches to it right away. */
-    private fun onRuVoiceInstalled() {
+    /** RuVoice was installed from the app: Russian text switches to it right away; an update keeps the chosen voice. */
+    private fun onRuVoiceInstalled(finished: RuVoiceInstallState) {
         RuVoiceInstaller.acknowledge()
+        if (finished.previousVersion != null) {
+            refreshEngines()
+            notice = "RuVoice обновлён" + (finished.version?.let { " до версии $it" } ?: "")
+            return
+        }
         preferences.edit().putBoolean("voiceRuChosen", true).apply()
         updateSpeech { it.copy(russianVoice = VoiceChoice(VoiceEngine.SYSTEM, enginePackage = VoiceCatalog.RUVOICE_PACKAGE)) }
         refreshEngines()
@@ -807,6 +823,8 @@ class MainActivity : ComponentActivity() {
         voicesLanguage = language
         showVoices = true
         loadSelectedEngineVoices(reload = true)
+        // Asks GitHub only when RuVoice is installed, at most every few hours, and quietly if there is no network.
+        RuVoiceInstaller.checkForUpdate(this)
     }
 
     // ---------------------------------------------------------------- voice actions
@@ -853,6 +871,7 @@ class MainActivity : ComponentActivity() {
         override fun openRuVoicePage() = openUrl(VoiceCatalog.RUVOICE_RELEASES)
         override fun installRuVoice() = RuVoiceInstaller.install(this@MainActivity)
         override fun cancelRuVoice() = RuVoiceInstaller.cancel()
+        override fun checkRuVoiceUpdate() = RuVoiceInstaller.checkForUpdate(this@MainActivity, force = true)
 
         override fun openSystemTtsSettings() {
             try {

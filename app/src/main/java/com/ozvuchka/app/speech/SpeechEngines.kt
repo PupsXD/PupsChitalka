@@ -213,6 +213,11 @@ internal class SynthesisHub private constructor(context: Context) {
         OfflineTts(config = config).also { models[model] = it }
     }
 
+    /** An engine was replaced by a newer build: its process restarted, so the connection kept to it is dead. */
+    fun forgetSystemEngine(enginePackage: String) {
+        systemClients.remove(enginePackage)?.shutdown()
+    }
+
     private fun releaseAll() {
         synchronized(modelLock) {
             models.values.forEach { tts -> synchronized(tts) { tts.release() } }
