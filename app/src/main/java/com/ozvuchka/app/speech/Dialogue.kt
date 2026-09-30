@@ -245,9 +245,43 @@ internal class SpeakerTracker(private val cast: Cast = Cast.EMPTY) {
         silent = null
         still = null
         mentioned.clear()
+        afterLine(paragraph, parts.last(), speaker, language)
         val role = speaker?.gender ?: SpeechRole.SPEECH
         return parts.map { part -> if (part.speech) role else SpeechRole.NARRATOR }
     }
+
+    /**
+     * The author's words that end a line's paragraph may go on past the attribution. When they lead
+     * into the next line with a colon — «— У тебя был тяжёлый день, — сказал Дункан. Он отцепил датчик,
+     * успокаивающе сказав:» — or tell what the speaker did after the line — «— Боюсь, что так. — Кивнула
+     * леди. Затем она нервно взглянула на Дункана.» — the next line with no words of its own is likely
+     * the same speaker's. Someone else who acts there is likely to speak next, and one who keeps silent
+     * there is not: «— Ты знала? — спросил он. Она промолчала.»
+     */
+    private fun afterLine(paragraph: String, last: VoicePart, speaker: Speaker?, language: String) {
+        if (last.speech) return
+        val text = paragraph.substring(last.start, last.end)
+        val leads = text.trimEnd().endsWith(':')
+        // A short gesture after the attribution is a pause in the exchange: “It always rains here,”
+        // John replied. He folded the newspaper. — “Then why did we come?” is hers.
+        val beyond = sentencesOf(text).drop(1).sumOf { words(it).size }
+        if (!leads && beyond < SCENE_OF_THEIR_OWN) return
+        val clue = beatClue(text, language, cast)
+        silent = clue?.takeIf { it.silent }?.gender
+        still = clue?.takeIf { it.still }?.gender
+        val lead = clue?.takeIf { it.gender != null && !it.silent && !it.still }
+        val gender = speaker?.gender
+        val name = speaker?.name
+        beat = when {
+            gender == null -> lead
+            lead == null -> if (leads) Clue(gender, name, continues = true) else null
+            lead.gender == gender && (lead.name == null || name == null || sameName(lead.name, name)) ->
+                Clue(gender, name ?: lead.name, continues = true)
+            else -> lead
+        }
+    }
+
+    private fun sameName(a: String?, b: String?) = a != null && b != null && cast.canonical(a) == cast.canonical(b)
 
     /** Narration between lines: who acts in it may speak next; a long stretch ends the conversation. */
     fun narration(paragraph: String, language: String) {
@@ -309,7 +343,7 @@ internal class SpeakerTracker(private val cast: Cast = Cast.EMPTY) {
         // names are two people: «Выглянула Света. — Галь Петровна, отпустите его».
         beat?.takeIf { clue ->
             calls.none { call ->
-                val otherPerson = call.proper && clue.name != null && clue.name !in PERSONS && call.name != clue.name
+                val otherPerson = call.proper && clue.name != null && clue.name !in PERSONS && !sameName(call.name, clue.name)
                 call.gender != null && call.gender == clue.gender && !otherPerson
             }
         }?.let { clues += it to Source.BEAT }
@@ -342,7 +376,9 @@ internal class SpeakerTracker(private val cast: Cast = Cast.EMPTY) {
         }
         val previous = turns.lastOrNull()
         clue.name?.let { name ->
-            turns.lastOrNull { it?.name == name }?.let { known ->
+            // A name taken from words that were about someone else once must not carry their voice
+            // on: «Ширли торопливо замахала руками» is hers, whoever was called Ширли before.
+            turns.lastOrNull { it != null && sameName(it.name, name) && (it.gender == null || clue.gender == null || it.gender == clue.gender) }?.let { known ->
                 if (known.gender == null) known.gender = clue.gender
                 return known
             }
@@ -380,8 +416,8 @@ internal class SpeakerTracker(private val cast: Cast = Cast.EMPTY) {
         // Otherwise the one who spoke before the last speaker.
         alternation(previous)?.let(candidates::add)
         // The one the line calls by name is not the one speaking: «Вэнь Цин! Ты тоже пришла?»
-        val called = calls.mapNotNull { it.name }.toSet()
-        return candidates.firstOrNull { it.name == null || it.name !in called }
+        val calledNames = calls.mapNotNull { it.name?.let(cast::canonical) }.toSet()
+        return candidates.firstOrNull { it.name?.let(cast::canonical) !in calledNames }
     }
 
     /**
@@ -407,5 +443,7 @@ internal class SpeakerTracker(private val cast: Cast = Cast.EMPTY) {
         const val LONG_LINE = 150
         /** How far back the people taking part in a conversation are counted. */
         const val RECENT_TURNS = 6
+        /** Words of narration after the attribution that make a scene of the speaker's own rather than a pause. */
+        const val SCENE_OF_THEIR_OWN = 8
     }
 }

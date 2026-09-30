@@ -224,7 +224,11 @@ private val PREPOSITIONS = setOf(
 private val CLAUSE_WORDS = setOf(
     "и", "а", "но", "да", "или", "когда", "пока", "что", "чтобы", "как", "если", "хотя", "потому", "поэтому",
     "где", "куда", "откуда", "словно", "будто", "точно", "пусть", "ибо", "раз", "едва", "чем", "отчего",
+    // «Ширли уже мало волновало, какие тайны он хранит».
+    "какой", "какая", "какое", "какие", "каких", "каким", "какую", "каков", "сколько", "почему", "зачем", "кто",
 )
+
+private val COORDINATING = setOf("и", "а", "но", "да", "или")
 
 private val RELATIVE = setOf(
     "который", "которая", "которое", "которые", "которого", "которой", "которому", "которым", "которую",
@@ -255,7 +259,8 @@ internal val PERSONS: Map<String, SpeechRole> = run {
         "разбойник атаман вождь шаман паж шут шисюн шиди гэгэ диди дагэ эргэ гунцзы ванье даочжан надзиратель " +
         "городовой полицейский урядник исправник пристав унтер фельдфебель ефрейтор прапорщик поручик ротмистр " +
         "есаул казак помещик лакей кучер извозчик дворник писарь чиновник портной сапожник мельник лавочник " +
-        "трактирщик дьячок дьякон послушник игумен студент школьник певец актер танцор юнкер кадет гусар"
+        "трактирщик дьячок дьякон послушник игумен студент школьник певец актер танцор юнкер кадет гусар " +
+        "джентльмен епископ архиепископ боцман матрос моряк"
     female.split(' ').associateWith { SpeechRole.FEMALE } + male.split(' ').associateWith { SpeechRole.MALE }
 }
 
@@ -273,7 +278,7 @@ internal val VOICE_NOUNS = setOf(
     "голос", "голосок", "голосе", "голосом", "тон", "тоне", "шепот", "крик", "вскрик", "возглас", "смех", "смешок",
     "хохот", "вздох", "всхлип", "рык", "рев", "окрик", "оклик", "взгляд", "взор", "лицо", "улыбка", "усмешка",
     "губы", "глаза", "рука", "руки", "ладонь", "пальцы", "плечи", "брови", "голова", "сердце", "слова", "ответ",
-    "речь", "интонация", "интонации",
+    "речь", "интонация", "интонации", "вопль", "визг", "писк", "стон", "плач",
 )
 
 /** Kinship and voices before a name: «брат Цзян Яньли», «голос Маши» — the name is someone else's. */
@@ -417,6 +422,7 @@ internal fun subjectClue(text: String, language: String, cast: Cast, attribution
 internal fun beatClue(narration: String, language: String, cast: Cast): Clue? {
     val text = narration.trimEnd()
     val last = lastSentence(text)
+    if (text.endsWith(':')) introduction(last, language, cast)?.let { return it }
     val found = subjectClue(last, language, cast, attribution = false) ?: return null
     // «…сидела прямо и слушала, как старейшина Хоу…»: the one listening is not the one to speak.
     val clue = if (words(last).any { it.key in LISTENING }) found.copy(silent = true) else found
@@ -427,6 +433,54 @@ internal fun beatClue(narration: String, language: String, cast: Cast): Clue? {
     if (clue.name == null && before.name != null && before.gender == clue.gender) return clue.copy(name = before.name)
     return clue
 }
+
+/**
+ * A sentence that leads into a line with a colon says who speaks, whoever acted in the sentences
+ * before it. The last part of it with a verb in the past tells, read like the author's words after a
+ * line: «Уголки губ Тириана дрогнули, прежде чем он услышал, как сестра продолжила:», «Дункан
+ * встал и пошёл к выходу, а Ширли воскликнула:», «Молодая кондуктор распахнула окно и закричала:».
+ * A part about someone else is passed over — «взглянул на Нину, которая ела напротив него:»,
+ * «вспоминала, что говорил учитель:», «прежде чем она успела закончить:», «отчего Ширли вздрогнула:»
+ * — and so is a verb that may agree with a thing, «к нему пришла смелая идея:», unless it speaks or
+ * a name before it agrees: «и Элис, хотя и чувствовала свою неправоту, могла лишь кивнуть:».
+ * Otherwise the subject of the sentence tells. «Дункан не сдержался и улыбнулся:» is no silence.
+ */
+private fun introduction(sentence: String, language: String, cast: Cast): Clue? {
+    fun usable(clue: Clue?) = clue?.takeIf { it.gender != null && !it.silent && !it.still }
+    if (language != "en") {
+        val parts = sentence.split(',', ';')
+        for (index in parts.indices.reversed()) {
+            val part = words(parts[index])
+            if (part.none { pastGender(it.key) != null } || part.first().key in ABOUT_SOMEONE_ELSE) continue
+            val found = subjectClue(parts[index], language, cast, attribution = true) ?: continue
+            // «…а затем снизу донёсся девичий голос:», «…как вдруг услышал слабый голос:»: someone new.
+            if (found.anonymous) return found
+            val clue = usable(found) ?: continue
+            if (!clue.weak) return clue
+            // Only a verb tells. Its subject may stand in a part before it — «Пёс несколько секунд
+            // колебался, а затем, наконец, сказал:», «и он, не удержавшись, вопросил:» — and a verb of
+            // speaking has a speaker for its subject; any other may agree with a thing: «висевшая над
+            // дверью вывеска перекосилась».
+            val subject = (index - 1 downTo 0).firstNotNullOfOrNull { before ->
+                subjectClue(parts[before], language, cast, attribution = false)?.takeIf { it.gender != null || it.name != null }
+            }
+            if (subject?.gender == clue.gender) return clue.copy(name = subject?.name, weak = false)
+            if (part.any { word -> pastGender(word.key) != null && SPEAKING_STEMS.any { word.key.startsWith(it) } }) return clue
+        }
+    }
+    return usable(subjectClue(sentence, language, cast, attribution = false))
+}
+
+/** Parts of a sentence about someone other than who speaks next. */
+private val ABOUT_SOMEONE_ELSE = RELATIVE + setOf("что", "чтобы", "чем", "прежде", "отчего", "хотя")
+
+/** Verbs of speaking: the speaker is whoever does them. */
+private val SPEAKING_STEMS = listOf(
+    "сказ", "говор", "спрос", "вопрос", "ответ", "отвеч", "крикн", "крич", "произн", "прошепт", "шепн", "шепта", "воскликн",
+    "бормот", "пробормот", "позва", "окликн", "отозва", "добав", "продолж", "повтор", "выдохн", "рявкн", "прорыч",
+    "взмол", "попрос", "объясн", "заяв", "усмехн", "фыркн", "выпал", "пискн", "буркн", "огрызн", "возраз",
+    "перебил", "прервал", "вздохн", "молв", "пропел", "протянул", "заговор", "проговор",
+)
 
 /** The sentences of a text, split after «.», «!», «?» and «…» followed by a space. */
 internal fun sentencesOf(text: String): List<String> {
@@ -498,6 +552,9 @@ private fun List<Word>.spelled(): String = joinToString(" ") { it.key }
 
 private fun russianSubject(words: List<Word>, cast: Cast, attribution: Boolean): Clue? {
     var name: String? = null
+    // Every name before the verb, in order, and where the last of them ends.
+    val names = ArrayList<String>()
+    var afterNames = 0
     // Someone named before the verb: a pronoun, a noun for a person or a name.
     var subjectGender: SpeechRole? = null
     var subject = false
@@ -581,7 +638,11 @@ private fun russianSubject(words: List<Word>, cast: Cast, attribution: Boolean):
             word.capital && isName(word, cast, COMMON_RU) -> {
                 val found = nameAt(words, index, cast, COMMON_RU)
                 // «госпожа Юй Цзыюань» is her; in «брат Цзян Яньли» the name is someone else's.
-                if (name == null && words.getOrNull(index - 1)?.key !in BEFORE_OTHERS_NAME) name = found.spelled()
+                if (words.getOrNull(index - 1)?.key !in BEFORE_OTHERS_NAME) {
+                    if (name == null) name = found.spelled()
+                    names += found.spelled()
+                    afterNames = index + found.size
+                }
                 subject = true
                 index += found.size
                 continue
@@ -611,22 +672,42 @@ private fun russianSubject(words: List<Word>, cast: Cast, attribution: Boolean):
                         val agreesWithFollowing = !subject && (following?.key in VOICE_NOUNS || following?.key in INDEFINITE ||
                             following?.key in VOICE_ADJECTIVES || following?.key == "один" || following?.key == "одна")
                         if (!agreesWithFollowing && (attribution || subject || followingSubject)) {
+                            var verbGender: SpeechRole = gender
+                            if (subjectGender == null) {
+                                // The verb agrees with its subject: «В Соборе Ванна протянула», «Дункана
+                                // окликнула Нина». A verb that agrees with none of the names agrees with a
+                                // thing, and the one name tells who: «В голове Дункана всплыла догадка».
+                                val after = followingName.takeIf { it.isNotEmpty() }?.spelled()
+                                val known = names.filter { cast.genderOf(it) != null }
+                                val agreeing = names.lastOrNull { cast.genderOf(it) == gender }
+                                    ?: after?.takeIf { cast.genderOf(it) == gender }
+                                // «…на плече Дункана и немного удивилась»: a verb joined on by «и» has its subject further back.
+                                val joined = words.subList(afterNames, index).any { it.key in COORDINATING }
+                                when {
+                                    agreeing != null -> name = agreeing
+                                    known.size == 1 && after == null && !joined -> {
+                                        name = known.single()
+                                        verbGender = cast.genderOf(known.single()) ?: gender
+                                    }
+                                }
+                                // «— …, — сказал старушка»: a word for a person tells more than a misprinted verb.
+                                if (name == null && after == null) following?.key?.let { PERSONS[it] }?.let { verbGender = it }
+                            }
                             if (name == null && followingName.isNotEmpty() && subjectGender == null) name = followingName.spelled()
                             val negated = index > 0 && words[index - 1].key == "не"
                             // «Артём не двинулся с места»: whether he speaks next is not said, only that he did not react.
                             if (negated && !attribution && SPEECH_STEMS.none { key.startsWith(it) }) {
-                                return Clue(subjectGender ?: gender, name ?: personNoun, still = true)
+                                return Clue(subjectGender ?: verbGender, name ?: personNoun, still = true)
                             }
                             return Clue(
-                                gender = subjectGender ?: gender,
+                                gender = subjectGender ?: verbGender,
                                 name = name ?: personNoun ?: following?.key?.takeIf { it in PERSONS },
                                 // «ничего не ответила», «промолчал»: this person does not answer.
                                 silent = key in SILENCE || negated,
                                 reply = REPLY_STEMS.any { key.startsWith(it) },
                                 continues = CONTINUE_STEMS.any { key.startsWith(it) },
-                                // Only the verb tells, and its subject is some word: «пожаловалась жертва».
-                                weak = subjectGender == null && name == null && !subject && !followingSubject &&
-                                    following != null && following.key !in PERSONS,
+                                // Only the verb tells: its subject is some word, «пожаловалась жертва», or none is given.
+                                weak = subjectGender == null && name == null && !subject && !followingSubject,
                             )
                         }
                     }
@@ -930,14 +1011,15 @@ private val ADDRESS_EN: Map<String, SpeechRole> = mapOf(
 
 /** A line that carries on a story: «Во-вторых…», «А потом…», “And then…”. */
 internal fun continuesStory(speech: String, language: String): Boolean {
-    val start = words(speech).take(3).joinToString(" ") { it.key }
+    // «В—шестых»: some books join the words with a dash instead of a hyphen.
+    val start = words(speech.replace(Regex("(?<=\\p{L})[—–](?=\\p{L})"), "-")).take(3).joinToString(" ") { it.key }
     val markers = if (language == "en") CONTINUE_MARKERS_EN else CONTINUE_MARKERS_RU
     return markers.any { start == it || start.startsWith("$it ") }
 }
 
 private val CONTINUE_MARKERS_RU = listOf(
-    "во-вторых", "в-третьих", "в-четвертых", "в-пятых", "кроме того", "более того", "к тому же", "а потом",
-    "и потом", "после этого", "так вот", "итак", "а еще", "и еще", "а главное", "и главное", "а дальше",
+    "во-вторых", "в-третьих", "в-четвертых", "в-пятых", "в-шестых", "в-седьмых", "в-восьмых", "кроме того",
+    "более того", "к тому же", "а потом", "и потом", "после этого", "так вот", "итак", "а еще", "и еще", "а главное", "и главное", "а дальше",
     "и тогда", "и вот",
 )
 
