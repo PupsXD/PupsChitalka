@@ -79,6 +79,20 @@ private class SafeZip(file: File) : Closeable {
 private fun parseXml(bytes: ByteArray): Document =
     Jsoup.parse(ByteArrayInputStream(bytes), null, "", Parser.xmlParser())
 
+// XHTML writes an empty title as <title/>. An HTML parser ignores that slash for elements whose content
+// is raw text, so the rest of the chapter became the title's text and only its last paragraphs were left.
+private val selfClosedTextElement = Regex(
+    "<(title|script|style|textarea|noscript|iframe|noembed|noframes|xmp)(\\s[^<>]*?)?/\\s*>",
+    RegexOption.IGNORE_CASE,
+)
+
+/** A chapter file read as HTML, with its empty raw-text elements spelled out as `<title></title>`. */
+private fun parseChapterHtml(bytes: ByteArray): Document {
+    // ISO-8859-1 maps bytes one to one, so the encoding the file declares still applies to the parser.
+    val fixed = selfClosedTextElement.replace(String(bytes, Charsets.ISO_8859_1), "<$1$2></$1>")
+    return Jsoup.parse(ByteArrayInputStream(fixed.toByteArray(Charsets.ISO_8859_1)), null, "")
+}
+
 private fun Element.localName(): String = normalName().substringAfterLast(':')
 
 private fun Element.firstByLocalName(name: String): Element? =
@@ -135,7 +149,7 @@ internal fun readEpub(file: File, fallbackTitle: String, images: ImageSink = Ima
         if (mediaType != "application/xhtml+xml" && mediaType != "text/html") continue
         val path = resolveZipPath(packagePath, item.attr("href")) ?: continue
         if (!zip.has(path)) continue
-        val chapterDocument = Jsoup.parse(ByteArrayInputStream(zip.read(path, 10_000_000)), null, "")
+        val chapterDocument = parseChapterHtml(zip.read(path, 10_000_000))
         val body = chapterDocument.body()
         val blocks = htmlBlocks(body) { element ->
             // <img src> in XHTML, <image xlink:href> inside SVG covers and plates.
