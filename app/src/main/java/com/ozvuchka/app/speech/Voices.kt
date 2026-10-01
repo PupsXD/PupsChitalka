@@ -2,10 +2,10 @@ package com.ozvuchka.app.speech
 
 import android.content.Context
 
-enum class VoiceEngine { SUPERTONIC, KOKORO, SYSTEM }
+enum class VoiceEngine { SUPERTONIC, KOKORO, SYSTEM, VOSK }
 
 /**
- * A voice as stored in preferences: `supertonic:3`, `kokoro:3` or
+ * A voice as stored in preferences: `supertonic:3`, `kokoro:3`, `vosk:28` or
  * `system:<engine package>:<voice name>`.
  */
 data class VoiceChoice(
@@ -17,6 +17,7 @@ data class VoiceChoice(
     fun encode(): String = when (engine) {
         VoiceEngine.SUPERTONIC -> "supertonic:$speaker"
         VoiceEngine.KOKORO -> "kokoro:$speaker"
+        VoiceEngine.VOSK -> "vosk:$speaker"
         VoiceEngine.SYSTEM -> "system:$enginePackage:$voiceName"
     }
 
@@ -27,6 +28,7 @@ data class VoiceChoice(
             return when (parts[0]) {
                 "supertonic" -> parts.getOrNull(1)?.toIntOrNull()?.let { VoiceChoice(VoiceEngine.SUPERTONIC, it.coerceIn(0, 9)) }
                 "kokoro" -> parts.getOrNull(1)?.toIntOrNull()?.let { VoiceChoice(VoiceEngine.KOKORO, it.coerceAtLeast(0)) }
+                "vosk" -> parts.getOrNull(1)?.toIntOrNull()?.let { VoiceChoice(VoiceEngine.VOSK, it.coerceIn(0, VoiceCatalog.VOSK_SPEAKERS - 1)) }
                 "system" -> if (parts.size == 3 && parts[1].isNotBlank()) {
                     VoiceChoice(VoiceEngine.SYSTEM, enginePackage = parts[1], voiceName = parts[2])
                 } else null
@@ -78,11 +80,42 @@ object VoiceCatalog {
     /** British Kokoro voices are trained on en-gb phonemes. */
     fun kokoroLanguage(speaker: Int): String = if (speaker in 20..27) "en-gb" else "en-us"
 
+    const val VOSK_SPEAKERS = 57
+
+    /**
+     * Vosk TTS 0.10 speakers that are men, by speaker id; the rest are women. The model names its
+     * speakers after the people recorded, so the reader sees numbers only. Gender comes from those
+     * names and, for three without one, from the measured pitch (tools/voices, 2026-10-01).
+     */
+    private val voskMen = setOf(
+        0, 3, 7, 8, 10, 12, 13, 14, 17, 20, 21, 23, 25, 26, 27, 28, 30, 31, 32, 34, 35, 37, 39, 40, 41,
+        43, 45, 47, 50, 52, 54, 55, 56,
+    )
+
+    /** The most natural voices of each gender by UTMOS on the test passage. */
+    private val voskRecommended = setOf(28, 47, 34, 21, 49, 2, 48, 15)
+
+    fun voskIsMale(speaker: Int): Boolean = speaker in voskMen
+
+    /** Recommended voices first, then men and women by number. */
+    val vosk: List<VoicePreset> = (0 until VOSK_SPEAKERS)
+        .sortedWith(compareBy({ it !in voskRecommended }, { it !in voskMen }, { it }))
+        .map { sid ->
+            val male = sid in voskMen
+            VoicePreset(
+                choice = VoiceChoice(VoiceEngine.VOSK, sid),
+                title = "${if (male) "Мужской" else "Женский"} №$sid",
+                description = "Vosk · ${if (male) "мужской" else "женский"}",
+                recommended = sid in voskRecommended,
+            )
+        }
+
     fun presetTitle(choice: VoiceChoice): String? =
-        (supertonic + kokoro).firstOrNull { it.choice == choice }?.let {
+        (supertonic + kokoro + vosk).firstOrNull { it.choice == choice }?.let {
             when (choice.engine) {
                 VoiceEngine.SUPERTONIC -> "Supertonic · ${it.title}"
                 VoiceEngine.KOKORO -> "Kokoro · ${it.title}"
+                VoiceEngine.VOSK -> "Vosk · ${it.title}"
                 VoiceEngine.SYSTEM -> it.title
             }
         }

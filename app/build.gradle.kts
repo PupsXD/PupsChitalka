@@ -24,6 +24,8 @@ android {
         versionCode = buildNumber
         versionName = "0.2 (" + buildTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")) + " UTC)"
         ndk { abiFilters += "arm64-v8a" }
+        manifestPlaceholders["appLabel"] = "PupsChitalka"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     // Android installs a new version over the old one, keeping books and settings, only when both
@@ -43,7 +45,15 @@ android {
     }
 
     buildTypes {
-        debug { if (appKey != null) signingConfig = signingConfigs.getByName("ozvuchka") }
+        debug {
+            if (appKey != null) signingConfig = signingConfigs.getByName("ozvuchka")
+            // `-Pdev`: a copy that installs next to the released app instead of over it, since a local
+            // build is not signed with the release key and Android would refuse it as an update.
+            if (project.hasProperty("dev")) {
+                applicationIdSuffix = ".dev"
+                manifestPlaceholders["appLabel"] = "PupsChitalka dev"
+            }
+        }
         release {
             isMinifyEnabled = false
             if (appKey != null) signingConfig = signingConfigs.getByName("ozvuchka")
@@ -77,6 +87,10 @@ dependencies {
     implementation("cz.adaptech.tesseract4android:tesseract4android:4.9.0")
     implementation("org.apache.commons:commons-compress:1.28.0")
     implementation(files("libs/sherpa-onnx-1.13.8.aar"))
+    // Vosk TTS runs its own ONNX models (a BERT and the acoustic model), which sherpa-onnx cannot load.
+    // onnxruntime-android 1.28.0's Java API, patched to use the ONNX Runtime inside sherpa-onnx:
+    // tools/patch-onnxruntime-aar.py explains why and rebuilds it.
+    implementation(files("libs/onnxruntime-android-1.28.0-sherpa.aar"))
     testImplementation("junit:junit:4.13.2")
     // Android classes on the JVM, for the PDF reader that runs on pdfbox-android.
     testImplementation("org.robolectric:robolectric:4.14.1")
@@ -87,4 +101,6 @@ dependencies {
     // The real org.json, so storage code can be tested off the device.
     testImplementation("org.json:json:20240303")
     debugImplementation("androidx.compose.ui:ui-tooling")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }

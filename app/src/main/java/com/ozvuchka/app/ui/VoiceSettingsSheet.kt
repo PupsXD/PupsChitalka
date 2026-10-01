@@ -235,6 +235,7 @@ private class EngineOption(
 private fun engineKey(voice: VoiceChoice): String = when (voice.engine) {
     VoiceEngine.SUPERTONIC -> "supertonic"
     VoiceEngine.KOKORO -> "kokoro"
+    VoiceEngine.VOSK -> "vosk"
     VoiceEngine.SYSTEM -> "system:${voice.enginePackage}"
 }
 
@@ -255,6 +256,16 @@ private fun engineOptions(state: VoiceSettingsUi, language: String): List<Engine
                 installed = state.ruVoiceInstalled,
                 choice = VoiceChoice(VoiceEngine.SYSTEM, enginePackage = VoiceCatalog.RUVOICE_PACKAGE),
                 recommended = true,
+            ),
+        )
+        val vosk = SpeechModel.VOSK in models
+        add(
+            EngineOption(
+                key = "vosk",
+                title = "Vosk TTS 0.10 · тест",
+                subtitle = if (vosk) "57 голосов: 33 мужских и 24 женских" else "Нужно скачать модель, ≈ 830 МБ",
+                installed = vosk,
+                choice = VoiceChoice(VoiceEngine.VOSK, 28),
             ),
         )
     } else {
@@ -375,6 +386,19 @@ private fun EngineVoices(state: VoiceSettingsUi, language: String, selected: Voi
                 "и в замерах синтезирует в 2,5 раза быстрее компактной; компактная занимает меньше места.",
             models = listOf(SpeechModel.KOKORO_FULL, SpeechModel.KOKORO),
             presets = VoiceCatalog.kokoro,
+            language = language,
+            selected = selected,
+            state = state,
+            actions = actions,
+        )
+        VoiceEngine.VOSK -> ModelCard(
+            title = "Голоса Vosk TTS",
+            badge = "тест",
+            description = "57 голосов одной модели, ударения по словарю на 2 млн слов. Первая загрузка голоса " +
+                "занимает 15–20 секунд, в памяти около 1,2 ГБ: для мощных телефонов. Звёздочкой отмечены самые " +
+                "естественные по замерам.",
+            models = listOf(SpeechModel.VOSK),
+            presets = VoiceCatalog.vosk,
             language = language,
             selected = selected,
             state = state,
@@ -503,7 +527,7 @@ private fun ModelStatusRow(model: SpeechModel, suggested: Boolean, state: VoiceS
     val busy = install?.stage in setOf(
         ModelInstallState.Stage.QUEUED, ModelInstallState.Stage.DOWNLOADING, ModelInstallState.Stage.EXTRACTING,
     )
-    val label = "${if (model.isFullPrecision) "Полная точность" else "Компактная INT8"} · ${model.sizeLabel}"
+    val label = "${model.variantTitle} · ${model.sizeLabel}"
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -567,6 +591,9 @@ private fun characterVoices(state: VoiceSettingsUi, language: String, narrator: 
                 else -> null
             }
             RoleVoice(it.choice, "${it.title} · ${it.description}", gender)
+        }
+        VoiceEngine.VOSK -> VoiceCatalog.vosk.map {
+            RoleVoice(it.choice, it.title, if (VoiceCatalog.voskIsMale(it.choice.speaker)) SpeechRole.MALE else SpeechRole.FEMALE)
         }
         VoiceEngine.SYSTEM -> state.engineVoices[narrator.enginePackage].orEmpty()
             .filter { it.language == language && !it.notInstalled }

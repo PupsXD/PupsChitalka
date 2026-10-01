@@ -4,10 +4,15 @@ import android.content.Context
 import org.json.JSONObject
 import kotlin.math.max
 
-/** How an engine takes a stress mark: RuVoice reads «з+амок», other engines a combining acute. */
-enum class StressStyle { PLUS, ACUTE, NONE }
+/**
+ * How an engine takes a stress mark: RuVoice reads «з+амок», other engines a combining acute.
+ * [MARKED] is «з+амок» for the reader's own words only: Vosk looks every other word up in its own
+ * dictionary, which also knows how a word sounds («что» as «што»), and a «+» would bypass it.
+ */
+enum class StressStyle { PLUS, MARKED, ACUTE, NONE }
 
 internal fun stressStyleFor(voice: VoiceChoice): StressStyle = when {
+    voice.engine == VoiceEngine.VOSK -> StressStyle.MARKED
     voice.engine != VoiceEngine.SYSTEM -> StressStyle.NONE
     voice.enginePackage == VoiceCatalog.RUVOICE_PACKAGE -> StressStyle.PLUS
     else -> StressStyle.ACUTE
@@ -107,7 +112,7 @@ class PronunciationDictionary(
                 val vowel = spoken.getOrNull(index + 1)
                 if (c == '+' && vowel != null && vowel in VOWELS) {
                     when (style) {
-                        StressStyle.PLUS -> append('+').append(vowel)
+                        StressStyle.PLUS, StressStyle.MARKED -> append('+').append(vowel)
                         StressStyle.ACUTE -> append(vowel).append(ACUTE)
                         StressStyle.NONE -> append(vowel)
                     }

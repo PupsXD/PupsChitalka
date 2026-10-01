@@ -33,6 +33,7 @@ class VoiceUnavailableException(message: String) : IllegalStateException(message
 internal class SynthesisHub private constructor(context: Context) {
     private val app = context.applicationContext
     private val models = HashMap<SpeechModel, OfflineTts>()
+    @Volatile private var vosk: VoskTts? = null
     private val systemClients = ConcurrentHashMap<String, SystemTtsClient>()
     private val modelLock = Any()
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -51,6 +52,7 @@ internal class SynthesisHub private constructor(context: Context) {
     fun isAvailable(voice: VoiceChoice, settings: SpeechSettings): Boolean = when (voice.engine) {
         VoiceEngine.SUPERTONIC -> supertonicModel(settings) != null
         VoiceEngine.KOKORO -> kokoroModel(settings) != null
+        VoiceEngine.VOSK -> SpeechModels.isInstalled(app, SpeechModel.VOSK)
         VoiceEngine.SYSTEM -> SystemVoices.isEngineInstalled(app, voice.enginePackage)
     }
 
@@ -63,7 +65,7 @@ internal class SynthesisHub private constructor(context: Context) {
         prosody: Prosody = Prosody.NEUTRAL,
     ): SynthesizedAudio {
         val speed = settings.speed * prosody.rate
-        // Supertonic and Kokoro cannot change pitch: they speak slower by as much, and the player plays
+        // Supertonic, Kokoro and Vosk cannot change pitch: they speak slower by as much, and the player plays
         // the sound that much faster, which brings the pace back and raises the voice.
         val modelSpeed = speed / prosody.pitch
         return when (voice.engine) {
@@ -93,6 +95,14 @@ internal class SynthesisHub private constructor(context: Context) {
                 )
                 generate(model, spoken, config, speedUp = prosody.pitch)
             }
+            VoiceEngine.VOSK -> {
+                val tts = voskTts() ?: throw VoiceUnavailableException("Голос Vosk не загружен")
+                // «+» before a vowel is the reader's own stress (StressStyle.MARKED) and passes through.
+                val spoken = SpeechNormalizer.normalize(text, "ru")
+                if (spoken.isBlank()) return SynthesizedAudio(FloatArray(0), tts.sampleRate)
+                val samples = synchronized(tts) { tts.synthesize(spoken, voice.speaker, modelSpeed) }
+                SynthesizedAudio(samples, tts.sampleRate, speedUp = prosody.pitch)
+            }
             VoiceEngine.SYSTEM -> {
                 val client = systemClients.getOrPut(voice.enginePackage) { SystemTtsClient(app, voice.enginePackage) }
                 client.synthesize(text, voice.voiceName, language, speed, prosody.pitch)
@@ -107,6 +117,7 @@ internal class SynthesisHub private constructor(context: Context) {
                 when (voice.engine) {
                     VoiceEngine.SUPERTONIC -> supertonicModel(settings)?.let { load(it) }
                     VoiceEngine.KOKORO -> kokoroModel(settings)?.let { load(it) }
+                    VoiceEngine.VOSK -> voskTts()
                     VoiceEngine.SYSTEM -> if (SystemVoices.isEngineInstalled(app, voice.enginePackage)) {
                         systemClients.getOrPut(voice.enginePackage) { SystemTtsClient(app, voice.enginePackage) }
                     }
@@ -152,6 +163,15 @@ internal class SynthesisHub private constructor(context: Context) {
         else -> null
     }
 
+    /** Vosk loads for 15–55 s on the phone (ONNX Runtime prepares a graph of 15–29 thousand nodes), so it stays loaded. */
+    private fun voskTts(): VoskTts? {
+        vosk?.let { return it }
+        if (!SpeechModels.isInstalled(app, SpeechModel.VOSK)) return null
+        return synchronized(modelLock) {
+            vosk ?: VoskTts(SpeechModels.directory(app, SpeechModel.VOSK), threads).also { vosk = it }
+        }
+    }
+
     private fun generate(model: SpeechModel, text: String, config: GenerationConfig, speedUp: Float): SynthesizedAudio {
         val tts = load(model)
         // One native call at a time per model; a cancelled session may still finish its sentence.
@@ -167,6 +187,7 @@ internal class SynthesisHub private constructor(context: Context) {
             SpeechModel.SUPERTONIC_FULL -> SpeechModel.SUPERTONIC
             SpeechModel.KOKORO -> SpeechModel.KOKORO_FULL
             SpeechModel.KOKORO_FULL -> SpeechModel.KOKORO
+            SpeechModel.VOSK -> error(NOT_SHERPA)
         }
         models.remove(sibling)?.let { old -> synchronized(old) { old.release() } }
         val directory = SpeechModels.directory(app, model)
@@ -209,6 +230,7 @@ internal class SynthesisHub private constructor(context: Context) {
                     maxNumSentences = 1,
                 )
             }
+            SpeechModel.VOSK -> error(NOT_SHERPA)
         }
         OfflineTts(config = config).also { models[model] = it }
     }
@@ -222,6 +244,8 @@ internal class SynthesisHub private constructor(context: Context) {
         synchronized(modelLock) {
             models.values.forEach { tts -> synchronized(tts) { tts.release() } }
             models.clear()
+            vosk?.let { tts -> synchronized(tts) { tts.close() } }
+            vosk = null
         }
         systemClients.values.forEach { it.shutdown() }
         systemClients.clear()
@@ -229,6 +253,7 @@ internal class SynthesisHub private constructor(context: Context) {
 
     companion object {
         private const val IDLE_RELEASE_MS = 5 * 60_000L
+        private const val NOT_SHERPA = "Vosk runs on ONNX Runtime directly, see voskTts()"
         @Volatile private var instance: SynthesisHub? = null
 
         fun shared(context: Context): SynthesisHub =

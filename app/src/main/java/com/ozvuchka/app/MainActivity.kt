@@ -509,6 +509,10 @@ class MainActivity : ComponentActivity() {
             SpeechModel.KOKORO, SpeechModel.KOKORO_FULL -> if (settings.englishVoice.engine == VoiceEngine.SUPERTONIC) {
                 updateSpeech { it.copy(englishVoice = VoiceChoice(VoiceEngine.KOKORO, 3)) }
             }
+            // The reader downloaded it to listen to it; RuVoice stays when it is the voice in use.
+            SpeechModel.VOSK -> if (settings.russianVoice.engine != VoiceEngine.SYSTEM || !isUsable(settings.russianVoice)) {
+                updateSpeech { it.copy(russianVoice = VoiceChoice(VoiceEngine.VOSK, 28)) }
+            }
             else -> Unit
         }
         notice = "${model.title}: голос установлен"
@@ -621,6 +625,7 @@ class MainActivity : ComponentActivity() {
     private fun isUsable(voice: VoiceChoice): Boolean = when (voice.engine) {
         VoiceEngine.SUPERTONIC -> SpeechModel.SUPERTONIC in installedModels || SpeechModel.SUPERTONIC_FULL in installedModels
         VoiceEngine.KOKORO -> SpeechModel.KOKORO in installedModels || SpeechModel.KOKORO_FULL in installedModels
+        VoiceEngine.VOSK -> SpeechModel.VOSK in installedModels
         VoiceEngine.SYSTEM -> voice.enginePackage in installedEngines
     }
 
@@ -887,7 +892,11 @@ class MainActivity : ComponentActivity() {
         override fun delete(model: SpeechModel) {
             if (narration.active) NarrationController.stop(this@MainActivity)
             lifecycleScope.launch {
-                withContext(Dispatchers.IO) { SpeechModels.delete(this@MainActivity, model) }
+                withContext(Dispatchers.IO) {
+                    SpeechModels.delete(this@MainActivity, model)
+                    // A deleted model still loaded would keep its memory: Vosk holds over a gigabyte.
+                    SynthesisHub.shared(this@MainActivity).releaseIfIdle()
+                }
                 refreshInstalledModels()
                 notice = "${model.title}: модель удалена"
             }
