@@ -1,0 +1,78 @@
+а 0.430429 a0
+а 1 a1
+боцман 1 b o1 c m a0 n
+в 0.001 v e0
+в 1 v
+висел 1 vj i0 sj e1 l
+воду 1 v o1 d u0
+вполголоса 1 v p o0 l g o1 l o0 s a0
+все 1.0 v sj e1
+все 0.5 v sj o1
+всё 1 v sj o1
+глядя 0.00394633 g lj a0 dj a1
+глядя 1 g lj a1 dj a0
+горе 0.384146 g o0 rj e1
+горе 1 g o1 rj e0
+д'артаньян 1 d a0 r t a0 nj j a1 n
+двери 0.134615 d vj e0 rj i1
+двери 1 d vj e1 rj i0
+дверь 1 d vj e1 rj
+до 0.154952 d o1
+до 1 d o0
+дождь 1 d o1 zh dj
+долго 1 d o1 l g o0
+дункан 1 d u1 n k a0 n
+ель 1 j e1 lj
+ещё 1 j e0 sch o1
+ж 0.15 zh e0
+ж 1 zh
+за 0.389157 z a1
+за 1 z a0
+и 0.632163 i1
+и 1 i0
+капитан 1 k a0 pj i0 t a1 n
+кормой 1 k o0 r m o1 j
+кто-то 1 k t o1 t o0
+местам 1 mj e0 s t a1 m
+молчал 1 m o0 l ch a1 l
+молчат 1 m o0 l ch a1 t
+молчать 1 m o0 l ch a1 tj
+на 1 n a0
+не 0.109474 nj e1
+не 1 nj e0
+нет 1 nj e1 t
+ничего 1 nj i0 ch e0 g o1
+ну 1 n u1
+октября 1 o0 k tj a0 b rj a1
+он 1 o1 n
+она 1 o0 n a1
+по 1 p o0
+пойдём 1 p o0 j dj o1 m
+постучал 1 p o0 s t u0 ch a1 l
+потом 0.0137879 p o1 t o0 m
+потом 1 p o0 t o1 m
+почему 1 p o0 ch e0 m u1
+проворчал 1 p r o0 v o0 r ch a1 l
+рассеется 1 r a0 s sj e1 j e0 t sj a0
+сегодня 1 sj e0 g o1 d nj a0
+серую 1 sj e1 r u0 j u0
+сказал 1 s k a0 z a1 l
+сказала 1 s k a0 z a1 l a0
+слышишь 1 s l y1 sh i0 sh
+смотрел 1 s m o0 t rj e1 l
+сосна 1 s o0 s n a1
+спросил 1 s p r o0 sj i1 l
+старый 1 s t a1 r y0 j
+стоял 1 s t o0 j a1 l
+там 1 t a1 m
+тишина 1 tj i0 sh i0 n a1
+тогда 1 t o0 g d a1
+туман 1 t u0 m a1 n
+ты 1 t y1
+улыбнулся 1 u0 l y0 b n u1 l sj a0
+утра 0.249453 u1 t r a0
+утра 1 u0 t r a1
+что 0.0256621 ch t o1
+что 1 sh t o1
+шёл 1 sh o1 l
+ёжик 1 j o1 zh i0 k

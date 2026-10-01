@@ -16,6 +16,7 @@ with look-ahead synthesis instead of waiting for a faster big model.
 | --- | --- | --- | --- |
 | Russian | Silero v5 (`v5_5_ru`) through the [RuVoice](https://github.com/kost-t-human/ruvoice-tts) system TTS engine | Non-autoregressive Russian model with neural stress and homograph resolution plus a large normalizer (numbers with cases, dates, abbreviations). Its author reports RTF 0.21 on a Galaxy A32 and about 0.05 on Snapdragon 4 Gen 2. | Integrated through Android `TextToSpeech.synthesizeToFile`; needs a listening comparison with the Qwen samples and an RTF check on the S24 Ultra |
 | English | Kokoro v1.0 (sherpa-onnx, FP32 recommended) | The best-rated small English model; a third-party Android project reports RTF ≈ 0.67 with 4 threads on a Snapdragon 865/870 phone, so the much faster S24 Ultra should stay ahead of playback. The FP32 build is both cleaner and faster than INT8 (see below). | Integrated as an in-app download; RTF on the S24 Ultra to be measured |
+| Russian, test | Vosk TTS 0.10 (ONNX Runtime, decoder cut to 5 steps on install) | 57 voices in one model, 33 male, so narrator and characters differ at no cost; the listener preferred its sound | Integrated as an in-app download; measured on the S24 Ultra, see below |
 | Fallback / other | Supertonic 3 (INT8 or full) | Very fast, 31 languages, already installed by existing users | Integrated; now 4 threads and configurable flow steps |
 | Any | Installed system engines (Google, Samsung) | No download, many voices | Integrated; network voices are marked |
 
@@ -28,6 +29,50 @@ could not run the APK:
    (the reader shows «Готовлю голос…» whenever playback waits for synthesis).
 3. Kokoro FP32 at 1.5× speed: the container measurement below predicts a comfortable margin,
    but the phone's thermal behaviour over a long chapter is untested.
+
+## October 2026: more Russian voices, and Vosk TTS as a test engine
+
+RuVoice ships two male voices, and the listener liked one. One passage was rendered with 96 voices on
+a PC (`tools/voices/render-ru-voices.py`) and each was measured (`tools/voices/analyze-ru-voices.py`):
+speed, median pitch (YIN), what Whisper large-v3-turbo hears (CER) and UTMOS, a predicted naturalness
+score trained on English listening tests, so a rough sort only.
+
+| Source | Male voices | RTF on the PC, 4 threads | UTMOS, median (range) | Notes |
+| --- | ---: | ---: | --- | --- |
+| Silero `v5_5_ru` (RuVoice) | 2 | 0.06 | 2.92 (2.74–3.10) | The reference |
+| Silero `v5_cis_base_nostress` (RuVoice pack `cis_ru`) | 10, and 2 that sound male | 0.06 | 2.54 (1.89–3.14) | No question intonation; RuVoice keeps one model in memory, so mixing it with a stock voice reloads the model at every switch |
+| Vosk TTS `ru-0.10-multi` | 33 of 57 | 0.60 | 2.82 (2.25–3.52) | Five male voices score above eugene; the listener found it clearly better |
+| Piper `ru_RU` | 3 | 0.07 | 2.56 (2.44–2.84) | dmitri misreads words (CER 7.7%) |
+| MOSS-TTS-Nano 100M, cloned voice | any | 1.59 | 2.75 | Lost half of the passage (CER 44%) |
+
+Vosk TTS therefore became a second Russian engine, marked as a test. As published it does not suit a
+phone: on the Galaxy S24 Ultra the acoustic model loads for 45–55 s and synthesizes at RTF 0.78–0.82.
+96.5% of the time goes to its Matcha-TTS decoder, which the ONNX file unrolls into 20 estimator runs:
+10 Euler steps of dt = 0.1, each with a conditional and an unconditional pass mixed by classifier-free
+guidance (`v = v_cond + 0.5 * (v_cond - v_uncond)`). Keeping every other step with dt = 0.2 halves the
+work; dropping the guidance halves it again but costs quality:
+
+| Decoder | Graph nodes | UTMOS, mean of 4 voices | Load on the S24 Ultra | RTF on the S24 Ultra, 4 threads |
+| --- | ---: | ---: | ---: | ---: |
+| 10 steps, guidance (as published) | 29,224 | 3.32 | 45–55 s | 0.78–0.82 |
+| **5 steps, guidance (what the app installs)** | 15,789 | 3.29 | 14–18 s | 0.33–0.46 |
+| 10 steps, no guidance | 14,514 | 3.14 | not measured | not measured |
+| 5 steps, no guidance | 8,434 | 3.04 | 5.6 s | 0.24 |
+
+The app rewrites the downloaded model on the phone (`VoskDecoderSteps.kt`, 8.6 s; its output is
+bit-identical to `tools/voices/vosk-fewer-steps.py --steps 5`). Installing from the app on the S24
+Ultra took about three and a half minutes over Wi-Fi: 834 MB in 170 s, then unpacking, the dictionary
+index and the rewrite. The text frontend is a Kotlin port of
+vosk-tts 0.3.61, checked sentence by sentence against the Python code (`VoskFrontendTest`), and the
+whole engine against Python on the phone with the model's noise switched off: the same number of
+samples, correlation 1.00000 (`VoskTtsDeviceTest`). Saving ONNX Runtime's optimized graph did not help:
+it loaded slower (86 s on the PC) and ran slower. Six threads were slower than four (RTF 0.86 against
+0.78). ruBERT, 654 MB of the download, costs 20–50 ms a sentence; the price of Vosk is memory, about
+1.2 GB while reading.
+
+Not measured: reading for an hour (heat, throttling), phones weaker than the S24 Ultra, and stress in
+homographs, where Vosk takes the most frequent variant without looking at the context. The model's
+speaker list carries the names of the people recorded; the app shows numbers only.
 
 ## Measured in the development container
 

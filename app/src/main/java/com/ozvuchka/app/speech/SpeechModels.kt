@@ -67,10 +67,34 @@ enum class SpeechModel(
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2",
         ),
         requiredFiles = listOf("model.onnx", "voices.bin", "tokens.txt", "espeak-ng-data/phontab"),
+    ),
+    VOSK(
+        directoryName = "vosk-model-tts-ru-0.10-multi",
+        title = "Vosk TTS 0.10",
+        sizeLabel = "≈ 830 МБ",
+        source = ModelSource.Zip(
+            url = "https://alphacephei.com/vosk/models/vosk-model-tts-ru-0.10-multi.zip",
+            files = mapOf(
+                "vosk-model-tts-ru-0.10-multi/model.onnx" to "model.onnx",
+                "vosk-model-tts-ru-0.10-multi/bert/model.onnx" to "bert.onnx",
+                "vosk-model-tts-ru-0.10-multi/bert/vocab.txt" to "vocab.txt",
+                "vosk-model-tts-ru-0.10-multi/dictionary" to "dictionary",
+                "vosk-model-tts-ru-0.10-multi/config.json" to "config.json",
+            ),
+        ),
+        // The acoustic model is model-5steps.onnx, or model.onnx if it could not be rewritten: VoskTts.isInstalled.
+        requiredFiles = listOf("bert.onnx", "vocab.txt", "dictionary", "config.json", "dictionary.idx"),
     );
 
     /** Unquantized weights; the other variant of the same voice is the compact INT8 build. */
     val isFullPrecision: Boolean get() = this == SUPERTONIC_FULL || this == KOKORO_FULL
+
+    /** What sets this download apart from the other variant of the same voice, for the download row. */
+    val variantTitle: String get() = when {
+        this == VOSK -> "57 голосов"
+        isFullPrecision -> "Полная точность"
+        else -> "Компактная INT8"
+    }
 
     /** The Kokoro archives also carry Chinese dictionaries that an English voice never reads. */
     internal fun keepArchiveEntry(path: String): Boolean = when (this) {
@@ -83,6 +107,8 @@ enum class SpeechModel(
 
 internal sealed class ModelSource {
     class Archive(val url: String) : ModelSource()
+    /** A zip from which only [files] are kept, each under a name of its own: path in the zip → file name. */
+    class Zip(val url: String, val files: Map<String, String>) : ModelSource()
     class Files(
         val baseUrl: String,
         val names: List<String>,
@@ -125,7 +151,8 @@ object SpeechModels {
 
     fun isInstalled(context: Context, model: SpeechModel): Boolean {
         val directory = directory(context, model)
-        return model.requiredFiles.all { File(directory, it).let { file -> file.isFile && file.length() > 0 } }
+        return model.requiredFiles.all { File(directory, it).let { file -> file.isFile && file.length() > 0 } } &&
+            (model != SpeechModel.VOSK || VoskTts.isInstalled(directory))
     }
 
     fun isBusy(model: SpeechModel): Boolean = states.value[model]?.stage in setOf(
@@ -211,6 +238,13 @@ object SpeechModels {
                     download(model, source.url, archive, maxBytes = 900L * 1024 * 1024, progressTotal = null)
                     extract(model, archive, staging)
                     archive.delete()
+                }
+                is ModelSource.Zip -> {
+                    val archive = File(root, "${model.directoryName}.part")
+                    download(model, source.url, archive, maxBytes = 900L * 1024 * 1024, progressTotal = null)
+                    extractZip(model, source, archive, staging)
+                    archive.delete()
+                    if (model == SpeechModel.VOSK) prepareVosk(model, staging)
                 }
                 is ModelSource.Files -> {
                     val origin = File(root, source.copiedFrom)
@@ -303,6 +337,36 @@ object SpeechModels {
         }
     }
 
+    /** The dictionary index, and the decoder cut to 5 steps; if the model is not as expected, the original stays. */
+    private fun prepareVosk(model: SpeechModel, staging: File) {
+        publish(ModelInstallState(model, ModelInstallState.Stage.EXTRACTING, message = "Готовим словарь"))
+        VoskDictionary.buildIndex(File(staging, "dictionary"), File(staging, "dictionary.idx"))
+        checkCancelled(model)
+        publish(ModelInstallState(model, ModelInstallState.Stage.EXTRACTING, message = "Ускоряем модель"))
+        val original = File(staging, "model.onnx")
+        val faster = File(staging, "model-5steps.onnx")
+        try {
+            VoskDecoderSteps.halve(original, faster)
+            original.delete()
+        } catch (error: Exception) {
+            android.util.Log.w("SpeechModels", "Vosk decoder kept at 10 steps", error)
+            faster.delete()
+            File(faster.path + ".part").delete()
+        }
+    }
+
+    private fun extractZip(model: SpeechModel, source: ModelSource.Zip, archive: File, staging: File) {
+        publish(ModelInstallState(model, ModelInstallState.Stage.EXTRACTING, 0, archive.length()))
+        var lastReport = 0L
+        unzipSelected(archive, source.files, staging, checkCancelled = { checkCancelled(model) }) { read ->
+            val now = System.currentTimeMillis()
+            if (now - lastReport > 250) {
+                lastReport = now
+                publish(ModelInstallState(model, ModelInstallState.Stage.EXTRACTING, read, archive.length()))
+            }
+        }
+    }
+
     private fun deleteOwned(root: File, directory: File): Boolean {
         if (!directory.exists()) return true
         // Only fixed-name children of filesDir/speech_models are ever removed.
@@ -320,4 +384,48 @@ object SpeechModels {
 
         override fun skip(n: Long): Long = super.skip(n).also { count += it }
     }
+}
+
+/**
+ * Writes the entries of [archive] listed in [files] (path in the zip → file name) into [staging] and
+ * skips the rest. Only those fixed names reach the disk, so no path inside the zip is ever trusted.
+ * [progress] gets the compressed bytes read so far.
+ */
+internal fun unzipSelected(
+    archive: File,
+    files: Map<String, String>,
+    staging: File,
+    checkCancelled: () -> Unit = {},
+    progress: (Long) -> Unit = {},
+) {
+    val buffer = ByteArray(256 * 1024)
+    var read = 0L
+    val counting = object : java.io.FilterInputStream(BufferedInputStream(FileInputStream(archive), 1 shl 16)) {
+        override fun read(): Int = super.read().also { if (it >= 0) read++ }
+        override fun read(b: ByteArray, off: Int, len: Int): Int = super.read(b, off, len).also { if (it > 0) read += it }
+    }
+    val found = HashSet<String>()
+    java.util.zip.ZipInputStream(counting).use { zip ->
+        while (true) {
+            checkCancelled()
+            val entry = zip.nextEntry ?: break
+            val name = files[entry.name.replace('\\', '/')] ?: continue
+            if (entry.isDirectory) continue
+            var written = 0L
+            BufferedOutputStream(FileOutputStream(File(staging, name))).use { sink ->
+                while (true) {
+                    checkCancelled()
+                    val count = zip.read(buffer)
+                    if (count < 0) break
+                    sink.write(buffer, 0, count)
+                    written += count
+                    check(written <= 700L * 1024 * 1024) { "некорректный размер файла" }
+                    progress(read)
+                }
+            }
+            found += name
+        }
+    }
+    val missing = files.values.toSet() - found
+    check(missing.isEmpty()) { "в архиве нет ${missing.joinToString()}" }
 }
