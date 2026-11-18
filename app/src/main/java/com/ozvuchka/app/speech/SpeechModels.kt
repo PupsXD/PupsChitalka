@@ -206,11 +206,11 @@ object SpeechModels {
         (listOf(model) + prerequisites(model)).forEach { cancelled.remove(it) }
         publish(ModelInstallState(model, ModelInstallState.Stage.QUEUED))
         worker.execute {
-            activeRequest = model
             if (model in cancelled) {
                 publish(ModelInstallState(model, ModelInstallState.Stage.CANCELLED))
                 return@execute
             }
+            activeRequest = model
             try {
                 prerequisites(model).filterNot { isInstalled(app, it) }.forEach { needed ->
                     installNow(app, needed, request = model)

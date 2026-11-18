@@ -829,8 +829,9 @@ private fun DialogueVoicesCard(state: VoiceSettingsUi, language: String, narrato
                                 when (slot) {
                                     "narrator" -> {
                                         actions.selectVoice(language, option.choice)
-                                        // A new narrator should not take a character's voice: those move on.
-                                        actions.setDialogue(language, dialogue.withDistinctVoices(options, heardNarrator(state, language, option.choice)))
+                                        // A new narrator should not take a character's voice: those move on,
+                                        // and the roles are re-picked from the NEW narrator's options.
+                                        actions.setDialogue(language, dialogue.withDistinctVoices(characterVoices(state, language, option.choice), heardNarrator(state, language, option.choice)))
                                     }
                                     "male" -> actions.setDialogue(language, dialogue.copy(male = option.choice))
                                     "female" -> actions.setDialogue(language, dialogue.copy(female = option.choice))
