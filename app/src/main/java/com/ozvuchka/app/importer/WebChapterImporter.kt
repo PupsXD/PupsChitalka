@@ -69,6 +69,10 @@ object WebChapterImporter {
             return@withContext ImportResult.Failure(ImportError.of(ImportReason.ANTIBOT))
         }
 
+        structuralEmptyNext(document, sourceUrl)?.let { next ->
+            return@withContext ImportResult.StructuralEmpty(sourceUrl, next)
+        }
+
         onStage(WebImportStage.EXTRACTING)
         val host = runCatching { java.net.URI(sourceUrl).host }.getOrNull().orEmpty()
         val article = findContentElement(document, host)
@@ -104,6 +108,55 @@ object WebChapterImporter {
         isPaywall(document) -> ImportError.of(ImportReason.PAYWALL)
         else -> ImportError.of(ImportReason.EMPTY_CONTENT)
     }
+
+    /**
+     * Standard Ebooks announces section dividers as /text/part-N, titles them "Part II: ...",
+     * and links the following chapter with rel=next. These pages contain only a divider title,
+     * so the normal chapter quality guard correctly rejects them; this narrow signal lets the
+     * next-chapter flow skip only that declared structural page.
+     */
+    internal fun structuralEmptyNext(document: Document, sourceUrl: String): String? {
+        val uri = runCatching { java.net.URI(sourceUrl) }.getOrNull() ?: return null
+        if (!uri.host.equals("standardebooks.org", ignoreCase = true)) return null
+        val sectionPrefix = Regex("^(/ebooks/[^/]+/[^/]+/text/)part-[0-9]+$")
+            .matchEntire(uri.path.orEmpty())?.groupValues?.get(1) ?: return null
+        if (!Regex("(?i)^.+ - Part [ivxlcdm0-9]+: .+$").matches(document.title().trim())) return null
+        val text = document.body()?.let(::cleanedContent)?.text().orEmpty()
+        if (text.length >= MIN_CHAPTER_CHARS) return null
+        if (isLoginRedirect(document, sourceUrl) || isPaywall(document) || isPaywallText(text)) return null
+        val next = extractNextUrl(document, sourceUrl) ?: return null
+        val nextPath = runCatching { java.net.URI(next).path.orEmpty() }.getOrNull().orEmpty()
+        if (!nextPath.startsWith(sectionPrefix) || nextPath == uri.path) return null
+        return next
+    }
+
+    /** Fetch one chapter through at most three explicitly announced structural dividers. */
+    suspend fun importNextChapter(
+        url: String,
+        importer: suspend (String) -> ImportResult = ::importChapter,
+    ): ImportResult {
+        var current = url
+        val visited = linkedSetOf<String>()
+        repeat(MAX_STRUCTURAL_EMPTY_HOPS + 1) { hop ->
+            val canonical = canonicalWebUrl(current)
+                ?: return ImportResult.Failure(ImportError.of(ImportReason.BAD_URL))
+            if (!visited.add(canonical)) {
+                return ImportResult.Failure(ImportError.of(ImportReason.EMPTY_CONTENT))
+            }
+            when (val result = importer(canonical)) {
+                is ImportResult.StructuralEmpty -> {
+                    if (hop == MAX_STRUCTURAL_EMPTY_HOPS) {
+                        return ImportResult.Failure(ImportError.of(ImportReason.EMPTY_CONTENT))
+                    }
+                    current = result.nextUrl
+                }
+                else -> return result
+            }
+        }
+        return ImportResult.Failure(ImportError.of(ImportReason.EMPTY_CONTENT))
+    }
+
+    private const val MAX_STRUCTURAL_EMPTY_HOPS = 3
 
     /** The content types a chapter page may come as. */
     private val allowedTypes = listOf(

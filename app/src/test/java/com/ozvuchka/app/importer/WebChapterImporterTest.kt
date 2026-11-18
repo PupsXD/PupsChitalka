@@ -120,6 +120,79 @@ class WebChapterImporterTest {
         assertEquals("https://litmir.club/br/?b=149221&p=3", extractNextUrl(document, litmirUrl))
     }
 
+    @Test
+    fun onlyAnAnnouncedStandardEbooksPartDividerIsStructuralEmpty() {
+        val url = "https://standardebooks.org/ebooks/robert-louis-stevenson/treasure-island/text/part-2"
+        val divider = Jsoup.parse(
+            """<html><head><title>Treasure Island - Part II: The Sea-Cook</title></head><body>
+                <h2><p epub:type="title">The Sea-Cook</p></h2>
+                <a rel="prev" href="chapter-6">Previous</a>
+                <a rel="next" href="chapter-7">Next</a>
+            </body></html>""",
+            url,
+        )
+        assertEquals(
+            "https://standardebooks.org/ebooks/robert-louis-stevenson/treasure-island/text/chapter-7",
+            WebChapterImporter.structuralEmptyNext(divider, url),
+        )
+        assertNull(WebChapterImporter.structuralEmptyNext(divider, "https://example.org/ebooks/a/b/text/part-2"))
+        assertNull(WebChapterImporter.structuralEmptyNext(divider, url.replace("part-2", "chapter-6")))
+        val wrongBook = Jsoup.parse(
+            """<html><head><title>Treasure Island - Part II: The Sea-Cook</title></head><body>
+                <p>The Sea-Cook</p><a rel="next" href="/ebooks/someone/other-book/text/chapter-7">Next</a>
+            </body></html>""",
+            url,
+        )
+        assertNull(WebChapterImporter.structuralEmptyNext(wrongBook, url))
+
+        val login = Jsoup.parse(
+            """<html><head><title>Treasure Island - Part II: The Sea-Cook</title></head><body>
+                <form><input type="password"></form><a rel="next" href="chapter-7">Next</a>
+            </body></html>""",
+            url,
+        )
+        assertNull(WebChapterImporter.structuralEmptyNext(login, url))
+    }
+
+    @Test
+    fun nextChapterSkipsOnlyBoundedDeclaredStructuralDividers() = runBlocking {
+        val chapter = ImportResult.Success(
+            WebChapter("Chapter 7", "<p>${"A full chapter paragraph. ".repeat(40)}</p>", "https://e.org/7", null),
+        )
+        val calls = mutableListOf<String>()
+        val result = WebChapterImporter.importNextChapter("https://e.org/6") { url ->
+            calls += url
+            if (url.endsWith("/6") || url.endsWith("/part-2")) {
+                ImportResult.StructuralEmpty(url, if (url.endsWith("/6")) "https://e.org/part-2" else "https://e.org/7")
+            } else chapter
+        }
+        assertEquals(listOf("https://e.org/6", "https://e.org/part-2", "https://e.org/7"), calls)
+        assertEquals(chapter, result)
+
+        val ordinaryEmpty = ImportResult.Failure(ImportError.of(ImportReason.EMPTY_CONTENT))
+        assertEquals(ordinaryEmpty, WebChapterImporter.importNextChapter("https://e.org/6") { ordinaryEmpty })
+        assertEquals(
+            ImportReason.EMPTY_CONTENT,
+            (WebChapterImporter.importNextChapter("https://e.org/6") { ImportResult.StructuralEmpty(it, "https://e.org/6") }
+                as ImportResult.Failure).error.reason,
+        )
+        assertEquals(
+            ImportReason.EMPTY_CONTENT,
+            (WebChapterImporter.importNextChapter("https://e.org/6") { ImportResult.StructuralEmpty(it, "https://e.org/7") }
+                as ImportResult.Failure).error.reason,
+        )
+        assertEquals(
+            ImportReason.LOGIN_REQUIRED,
+            (WebChapterImporter.importNextChapter("https://e.org/6") { ImportResult.Failure(ImportError.of(ImportReason.LOGIN_REQUIRED)) }
+                as ImportResult.Failure).error.reason,
+        )
+        assertEquals(
+            ImportReason.ANTIBOT,
+            (WebChapterImporter.importNextChapter("https://e.org/6") { ImportResult.Failure(ImportError.of(ImportReason.ANTIBOT)) }
+                as ImportResult.Failure).error.reason,
+        )
+    }
+
     // ---------- Paragraphs without duplication ----------
 
     @Test

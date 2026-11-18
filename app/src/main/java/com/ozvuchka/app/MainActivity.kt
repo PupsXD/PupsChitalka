@@ -1113,7 +1113,7 @@ class MainActivity : ComponentActivity() {
         prefetchingChapterOf = book.id
         lifecycleScope.launch {
             try {
-                when (val result = WebChapterImporter.importChapter(nextUrl)) {
+                when (val result = WebChapterImporter.importNextChapter(nextUrl)) {
                     is ImportResult.Success -> {
                         val fetched = result.chapter.toBookChapter()
                         // The book has one more chapter again: the old failure is stale.
@@ -1122,6 +1122,7 @@ class MainActivity : ComponentActivity() {
                         books.indexOfFirst { it.id == book.id }.takeIf { it >= 0 }?.let { index -> books[index] = books[index].copy(chapters = updated.chapters) }
                         currentBook?.takeIf { it.id == book.id }?.let { open -> currentBook = open.copy(chapters = updated.chapters) }
                     }
+                    is ImportResult.StructuralEmpty -> Unit
                     is ImportResult.Failure -> {
                         // Offline or the site changed: the typed failure stays for the reader's
                         // «Повторить» button instead of dying in silence.
@@ -1262,6 +1263,11 @@ class MainActivity : ComponentActivity() {
                     webImport = webImport?.copy(stage = stage)
                 }
                 when (result) {
+                    is ImportResult.StructuralEmpty -> {
+                        val error = ImportError.of(ImportReason.EMPTY_CONTENT)
+                        webImport = WebImportUi(WebImportStage.FAILED, url, site, error = error)
+                        notice = error.hint
+                    }
                     is ImportResult.Failure -> {
                         // The sheet shows the typed error; a share-intent import has no sheet,
                         // so the snackbar keeps the failure visible in every case.
@@ -1372,8 +1378,9 @@ class MainActivity : ComponentActivity() {
         val site = siteLabel(nextUrl).orEmpty()
         lifecycleScope.launch {
             try {
-                val result = WebChapterImporter.importChapter(nextUrl)
+                val result = WebChapterImporter.importNextChapter(nextUrl)
                 when (result) {
+                    is ImportResult.StructuralEmpty -> Unit
                     is ImportResult.Failure -> {
                         webChapterError = book.id to result.error
                         notice = "Не удалось загрузить следующую главу: ${result.error.hint}"

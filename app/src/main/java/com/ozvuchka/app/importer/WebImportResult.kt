@@ -9,6 +9,8 @@ import kotlinx.coroutines.delay
  */
 sealed interface ImportResult {
     data class Success(val chapter: WebChapter) : ImportResult
+    /** A recognized Standard Ebooks part divider with no chapter text and an announced next link. */
+    data class StructuralEmpty(val sourceUrl: String, val nextUrl: String) : ImportResult
     data class Failure(val error: ImportError) : ImportResult
 }
 
