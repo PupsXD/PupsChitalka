@@ -534,8 +534,9 @@ private fun ModelStatusRow(model: SpeechModel, suggested: Boolean, state: VoiceS
                 Text(label, style = MaterialTheme.typography.bodyMedium)
                 val status = when {
                     installed -> "Установлена"
-                    busy && install?.stage == ModelInstallState.Stage.EXTRACTING -> "Распаковка…"
+                    busy && install?.message != null -> install.message!!
                     busy && install?.stage == ModelInstallState.Stage.QUEUED -> "В очереди"
+                    busy && install?.stage == ModelInstallState.Stage.EXTRACTING -> "Распаковка…"
                     busy -> "Загрузка…"
                     install?.stage == ModelInstallState.Stage.FAILED -> install.message ?: "Ошибка загрузки"
                     else -> if (suggested) "Не скачана" else "Необязательно"
