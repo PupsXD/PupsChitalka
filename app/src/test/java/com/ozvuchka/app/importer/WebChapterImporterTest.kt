@@ -70,6 +70,129 @@ class WebChapterImporterTest {
         assertTrue(!text.contains("evil") && !text.contains("Купи слона"))
     }
 
+    // ---------- Litmir chapters ----------
+
+    private val litmirUrl = "https://litmir.club/br/?b=149221&p=2"
+
+    @Test
+    fun litmirSitesReadTheirBookTextContainer() {
+        for (site in listOf("litmir.club", "litmir.me", "litmir.net")) {
+            for (host in listOf(site, "www.$site")) {
+                assertEquals(
+                    "правила для $host",
+                    listOf("div.BookText div.page_text", "div.page_text"),
+                    hostRuleSelectors(host),
+                )
+            }
+        }
+        val document = Jsoup.parse(fixture("litmir-chapter.html"), litmirUrl)
+        val found = findContentElement(document, "litmir.club")!!
+        // The chapter itself, not the outer div that carries the whole page.
+        assertEquals("page_text", found.className())
+    }
+
+    @Test
+    fun litmirChapterDropsTheSiteFurnitureAndKeepsItsFootnotes() {
+        val document = Jsoup.parse(fixture("litmir-chapter.html"), litmirUrl)
+        val article = findContentElement(document, "litmir.club")!!
+        val content = chapterContent(document, article)
+        val text = content.text()
+        assertTrue(text.contains("Билли обратил внимание на одного из парней"))
+        assertTrue(text.contains("Таксономист как по характеру"))
+        // The footnote sits beside the chapter container but belongs to the chapter.
+        assertTrue(text.contains("Примечания"))
+        assertTrue(text.contains("Организация из вселенной «Стар Трека»"))
+        for (junk in listOf("Войти на сайт", "ЖАНРЫ", "Стр.2", "Следующая страница", "Оглавление")) {
+            assertFalse("в главу попало: $junk", text.contains(junk))
+        }
+        val chapter = WebChapter("x", content.html(), litmirUrl, null).toBookChapter()
+        assertTrue(chapter.paragraphs.first().startsWith("Билли обратил внимание"))
+        assertTrue(chapter.paragraphs.contains("Примечания"))
+        assertTrue(chapter.paragraphs.any { it.contains("Стар Трека") })
+    }
+
+    @Test
+    fun litmirTitleAndNextPageComeFromTheStructuredMetadata() {
+        val document = Jsoup.parse(fixture("litmir-chapter.html"), litmirUrl)
+        val article = findContentElement(document, "litmir.club")!!
+        // document.title() and og:title are the site's «Читать ... - Страница 2» line.
+        assertEquals("Стр.2 | Кракен", WebChapterImporter.extractTitle(document, article))
+        assertEquals("https://litmir.club/br/?b=149221&p=3", extractNextUrl(document, litmirUrl))
+    }
+
+    @Test
+    fun onlyAnAnnouncedStandardEbooksPartDividerIsStructuralEmpty() {
+        val url = "https://standardebooks.org/ebooks/robert-louis-stevenson/treasure-island/text/part-2"
+        val divider = Jsoup.parse(
+            """<html><head><title>Treasure Island - Part II: The Sea-Cook</title></head><body>
+                <h2><p epub:type="title">The Sea-Cook</p></h2>
+                <a rel="prev" href="chapter-6">Previous</a>
+                <a rel="next" href="chapter-7">Next</a>
+            </body></html>""",
+            url,
+        )
+        assertEquals(
+            "https://standardebooks.org/ebooks/robert-louis-stevenson/treasure-island/text/chapter-7",
+            WebChapterImporter.structuralEmptyNext(divider, url),
+        )
+        assertNull(WebChapterImporter.structuralEmptyNext(divider, "https://example.org/ebooks/a/b/text/part-2"))
+        assertNull(WebChapterImporter.structuralEmptyNext(divider, url.replace("part-2", "chapter-6")))
+        val wrongBook = Jsoup.parse(
+            """<html><head><title>Treasure Island - Part II: The Sea-Cook</title></head><body>
+                <p>The Sea-Cook</p><a rel="next" href="/ebooks/someone/other-book/text/chapter-7">Next</a>
+            </body></html>""",
+            url,
+        )
+        assertNull(WebChapterImporter.structuralEmptyNext(wrongBook, url))
+
+        val login = Jsoup.parse(
+            """<html><head><title>Treasure Island - Part II: The Sea-Cook</title></head><body>
+                <form><input type="password"></form><a rel="next" href="chapter-7">Next</a>
+            </body></html>""",
+            url,
+        )
+        assertNull(WebChapterImporter.structuralEmptyNext(login, url))
+    }
+
+    @Test
+    fun nextChapterSkipsOnlyBoundedDeclaredStructuralDividers() = runBlocking {
+        val chapter = ImportResult.Success(
+            WebChapter("Chapter 7", "<p>${"A full chapter paragraph. ".repeat(40)}</p>", "https://e.org/7", null),
+        )
+        val calls = mutableListOf<String>()
+        val result = WebChapterImporter.importNextChapter("https://e.org/6") { url ->
+            calls += url
+            if (url.endsWith("/6") || url.endsWith("/part-2")) {
+                ImportResult.StructuralEmpty(url, if (url.endsWith("/6")) "https://e.org/part-2" else "https://e.org/7")
+            } else chapter
+        }
+        assertEquals(listOf("https://e.org/6", "https://e.org/part-2", "https://e.org/7"), calls)
+        assertEquals(chapter, result)
+
+        val ordinaryEmpty = ImportResult.Failure(ImportError.of(ImportReason.EMPTY_CONTENT))
+        assertEquals(ordinaryEmpty, WebChapterImporter.importNextChapter("https://e.org/6") { ordinaryEmpty })
+        assertEquals(
+            ImportReason.EMPTY_CONTENT,
+            (WebChapterImporter.importNextChapter("https://e.org/6") { ImportResult.StructuralEmpty(it, "https://e.org/6") }
+                as ImportResult.Failure).error.reason,
+        )
+        assertEquals(
+            ImportReason.EMPTY_CONTENT,
+            (WebChapterImporter.importNextChapter("https://e.org/6") { ImportResult.StructuralEmpty(it, "https://e.org/7") }
+                as ImportResult.Failure).error.reason,
+        )
+        assertEquals(
+            ImportReason.LOGIN_REQUIRED,
+            (WebChapterImporter.importNextChapter("https://e.org/6") { ImportResult.Failure(ImportError.of(ImportReason.LOGIN_REQUIRED)) }
+                as ImportResult.Failure).error.reason,
+        )
+        assertEquals(
+            ImportReason.ANTIBOT,
+            (WebChapterImporter.importNextChapter("https://e.org/6") { ImportResult.Failure(ImportError.of(ImportReason.ANTIBOT)) }
+                as ImportResult.Failure).error.reason,
+        )
+    }
+
     // ---------- Paragraphs without duplication ----------
 
     @Test
@@ -173,6 +296,38 @@ class WebChapterImporterTest {
     fun menuBodyFailsTheQualityGuard() {
         // A page that is all links has no chapter to give, even as the very last resort.
         assertNull(findContentElement(Jsoup.parse(fixture("menu-page.html")), "unknown.example"))
+    }
+
+    @Test
+    fun aPageShellIsDroppedWithoutCuttingShortReplies() {
+        val document = Jsoup.parse(fixture("chapter-shell.html"), "https://story.example/ch/1")
+        val found = findContentElement(document, "unknown.example")!!
+        assertEquals("chapter", found.className())
+        val paragraphs = found.select("p").map { it.text() }
+        assertEquals(4, paragraphs.size)
+        assertTrue(paragraphs[2] == "— Ты слышишь?" && paragraphs[3] == "— Нет.")
+        assertFalse(found.text().contains("Каталог"))
+    }
+
+    @Test
+    fun verseWithoutParagraphsIsStillAChapter() {
+        val document = Jsoup.parse(fixture("verse-br.html"), "https://poems.example/1")
+        val found = findContentElement(document, "unknown.example")!!
+        assertEquals("poem", found.className())
+        val chapter = WebChapter("Стихи", cleanedContent(found).html(), "https://poems.example/1", null).toBookChapter()
+        assertTrue(chapter.paragraphs.any { it.contains("Над тихой рекой") })
+        assertTrue(chapter.paragraphs.any { it.contains("Я слушаю долго") })
+        assertTrue(chapter.paragraphs.size >= 6)
+    }
+
+    @Test
+    fun aPaywallTeaserIsNotTakenForAChapter() {
+        val teaser = "Продолжение доступно после оформления подписки на сайте."
+        assertTrue(isPaywallText(teaser))
+        assertTrue(isPaywall(Jsoup.parse("<html><body><p>$teaser</p></body></html>")))
+        // A real chapter long enough to carry the word «подписка» is not a paywall.
+        val chapter = ("Герой вспоминал подписку на старую газету, " + "и это воспоминание тянулось долго. ".repeat(60))
+        assertFalse(isPaywallText(chapter))
     }
 
     @Test

@@ -81,6 +81,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ozvuchka.app.data.Covers
+import com.ozvuchka.app.importer.WebBookImporter
 import com.ozvuchka.app.importer.WebImportStage
 import com.ozvuchka.app.importer.WebImportUi
 import com.ozvuchka.app.speech.RuVoiceInstallState
@@ -120,6 +121,8 @@ fun LibraryScreen(
     onListen: (String) -> Unit,
     onImportFile: () -> Unit,
     onImportUrl: (String) -> Unit,
+    /** Downloads the whole book a reader site publishes as a file; a separate explicit action. */
+    onImportBook: (String) -> Unit = {},
     onDismissWebImport: () -> Unit = {},
     onDeleteBook: (String) -> Unit,
     onOpenVoices: () -> Unit,
@@ -324,7 +327,13 @@ fun LibraryScreen(
                     shape = RoundedCornerShape(16.dp),
                     enabled = !busy,
                 )
-                WebImportState(webImport, onRetry = onImportUrl, onDismiss = onDismissWebImport)
+                WebImportState(
+                    webImport,
+                    onRetry = { retryUrl ->
+                        if (webImport?.wholeBook == true) onImportBook(retryUrl) else onImportUrl(retryUrl)
+                    },
+                    onDismiss = onDismissWebImport,
+                )
                 OutlinedButton(
                     onClick = { onImportUrl(url.trim()) },
                     enabled = url.isNotBlank() && !busy,
@@ -335,6 +344,17 @@ fun LibraryScreen(
                         if (busy) "Загружаем…" else "Открыть ссылку",
                         fontSize = 16.sp,
                     )
+                }
+                // A whole book is a different, explicit action: the site must publish a file,
+                // and the chapter import above stays the fallback when it does not.
+                if (WebBookImporter.supports(url.trim())) {
+                    TextButton(
+                        onClick = { onImportBook(url.trim()) },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Скачать книгу целиком (FB2)")
+                    }
                 }
             }
         }
@@ -697,7 +717,11 @@ private fun WebImportState(
     if (webImport.stage == WebImportStage.FAILED) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
-                "Не удалось загрузить главу с ${webImport.site.ifBlank { "сайта" }}",
+                if (webImport.wholeBook) {
+                    "Не удалось скачать книгу с ${webImport.site.ifBlank { "сайта" }}"
+                } else {
+                    "Не удалось загрузить главу с ${webImport.site.ifBlank { "сайта" }}"
+                },
                 color = MaterialTheme.colorScheme.error,
                 fontWeight = FontWeight.SemiBold,
             )
@@ -729,9 +753,15 @@ private fun WebImportState(
                 when (webImport.stage) {
                     WebImportStage.CONNECTING -> "Подключаемся к сайту…"
                     WebImportStage.DOWNLOADING ->
-                        if (webImport.site.isBlank()) "Загружаем страницу…" else "Загружаем страницу с ${webImport.site}…"
-                    WebImportStage.EXTRACTING -> "Ищем текст главы…"
-                    WebImportStage.SAVING -> "Сохраняем главу…"
+                        when {
+                            webImport.wholeBook -> if (webImport.site.isBlank()) "Скачиваем книгу…" else "Скачиваем книгу с ${webImport.site}…"
+                            webImport.site.isBlank() -> "Загружаем страницу…"
+                            else -> "Загружаем страницу с ${webImport.site}…"
+                        }
+                    WebImportStage.EXTRACTING ->
+                        if (webImport.wholeBook) "Ищем файл книги…" else "Ищем текст главы…"
+                    WebImportStage.PARSING -> "Разбираем книгу…"
+                    WebImportStage.SAVING -> if (webImport.wholeBook) "Сохраняем книгу…" else "Сохраняем главу…"
                     else -> "Загружаем…"
                 },
                 style = MaterialTheme.typography.bodyMedium,

@@ -72,7 +72,9 @@ internal fun splitForSpeech(text: String, language: String, maxChars: Int = 260)
         boundary = iterator.next()
     }
     dialogueTurn.findAll(text).forEach { boundaries += it.range.last + 1 }
-    val sentenceBounds = boundaries.toList()
+    // An initial, an abbreviation or a date is not the end of a sentence, whatever the iterator
+    // makes of its dot: cutting there would read «А.» and «С. Пушкин» as two phrases.
+    val sentenceBounds = boundaries.filterNot { splitsAbbreviation(text, it) }.toList()
     for (bound in 1 until sentenceBounds.size) {
         val sentenceStart = sentenceBounds[bound - 1]
         val sentenceEnd = sentenceBounds[bound]
@@ -100,6 +102,38 @@ internal fun splitForSpeech(text: String, language: String, maxChars: Int = 260)
 }
 
 private val dialogueTurn = Regex("(?<=[.!?…][»”\"]?)\\s+(?=[—–]\\s*\\p{Lu})")
+
+/** Abbreviations whose dot is part of the word, never the end of a sentence. */
+private val abbreviations = setOf(
+    "г", "гг", "в", "вв", "д", "е", "к", "н", "п", "т", "см", "ср", "стр", "рис", "ул", "им",
+    "проф", "акад", "тов", "др", "пр", "тыс", "руб", "коп", "млн", "млрд", "напр", "ок",
+)
+
+/**
+ * Whether [boundary] falls right after the dot of an initial («А. С. Пушкин»), a common
+ * abbreviation («5 руб. и копейки», «1820 г.», «т. е.») or inside a date or a decimal
+ * («05.12.2020»). Such a dot is not a sentence end and must not become a pause.
+ */
+private fun splitsAbbreviation(text: String, boundary: Int): Boolean {
+    if (boundary <= 0 || boundary >= text.length) return false
+    // The iterator puts the boundary after the following space: step back to the dot itself.
+    var dot = boundary - 1
+    while (dot >= 0 && text[dot].isBoundarySpace()) dot--
+    if (dot <= 0 || text[dot] != '.') return false
+    var next = boundary
+    while (next < text.length && text[next].isBoundarySpace()) next++
+    if (next < text.length && text[next].isDigit()) return true
+    var start = dot
+    while (start > 0 && text[start - 1].isLetter()) start--
+    val word = text.substring(start, dot)
+    if (word.isEmpty() || word.length > 3) return false
+    // «А.» and «АБ.» are initials, whatever case the book uses.
+    if (word.all { it.isUpperCase() }) return true
+    return word.lowercase(Locale.ROOT) in abbreviations
+}
+
+/** A non-breaking space separates sentences in a book as a plain one does. */
+private fun Char.isBoundarySpace(): Boolean = isWhitespace() || this == '\u00A0'
 
 /**
  * Picks the voice language of a sentence. Letters decide; a sentence switches away from the

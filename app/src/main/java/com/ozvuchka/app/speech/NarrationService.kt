@@ -745,7 +745,7 @@ class NarrationService : Service(), NarrationPlayer.Listener {
         scope.launch {
             var more = false
             try {
-                when (val result = WebChapterImporter.importChapter(nextUrl)) {
+                when (val result = WebChapterImporter.importNextChapter(nextUrl)) {
                     is ImportResult.Success -> {
                         val fetched = result.chapter.toBookChapter()
                         // The reader may have stored this chapter already; either way the library has it now.
@@ -775,6 +775,7 @@ class NarrationService : Service(), NarrationPlayer.Listener {
                             updateSession()
                         }
                     }
+                    is ImportResult.StructuralEmpty -> Unit
                 }
             } finally {
                 // Even a crash in toBookChapter or the library must not block later prefetches.

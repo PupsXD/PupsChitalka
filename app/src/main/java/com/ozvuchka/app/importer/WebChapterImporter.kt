@@ -1,16 +1,10 @@
 package com.ozvuchka.app.importer
 
 import com.ozvuchka.app.data.Chapter
-import java.io.IOException
-import java.net.SocketTimeoutException
 import java.util.Locale
-import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
-import org.jsoup.HttpStatusException
-import org.jsoup.UnsupportedMimeTypeException
 import org.jsoup.nodes.Document
 import org.jsoup.safety.Safelist
 
@@ -42,26 +36,8 @@ fun WebChapter.toBookChapter(): Chapter {
  * the outcome is an [ImportResult], whose failures carry a typed [ImportError].
  */
 object WebChapterImporter {
-    /** A realistic phone browser: many reader sites grade guests down to a challenge page. */
-    private const val USER_AGENT =
-        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) " +
-            "Chrome/124.0.0.0 Mobile Safari/537.36"
-
-    private const val ACCEPT =
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-    private const val ACCEPT_LANGUAGE = "ru-RU,ru;q=0.9,en;q=0.8"
-
-    /** jsoup applies its timeout to both connecting and reading; retries read with more slack. */
-    private const val CONNECT_TIMEOUT_MS = 10_000
-    private const val READ_TIMEOUT_MS = 20_000
-    private const val MAX_BODY_BYTES = 8_000_000
-    private const val ATTEMPTS = 3
-
-    /** Cookies of one import session: age gates and consent answers carry across its retries. */
-    private val sessionCookies = ConcurrentHashMap<String, ConcurrentHashMap<String, String>>()
-
     /** Forgets the cookies; every import session starts and ends without borrowed ones. */
-    fun clearWebSession() = sessionCookies.clear()
+    fun clearWebSession() = WebFetch.clearSession()
 
     suspend fun importChapter(
         url: String,
@@ -74,9 +50,9 @@ object WebChapterImporter {
         // poisoned cookie from an earlier attempt cannot answer for this one.
         clearWebSession()
         onStage(WebImportStage.DOWNLOADING)
-        val response = when (val fetched = fetch(requestedUrl)) {
-            is FetchResult.Ok -> fetched.response
-            is FetchResult.Failed -> return@withContext ImportResult.Failure(fetched.error)
+        val response = when (val fetched = WebFetch.fetch(requestedUrl, allowUrl = { allowsWebRedirect(requestedUrl, it) })) {
+            is WebFetch.FetchResult.Ok -> fetched.response
+            is WebFetch.FetchResult.Failed -> return@withContext ImportResult.Failure(fetched.error)
         }
         val sourceUrl = canonicalWebUrl(response.url().toString())
             ?: return@withContext ImportResult.Failure(ImportError.of(ImportReason.BAD_URL))
@@ -93,25 +69,22 @@ object WebChapterImporter {
             return@withContext ImportResult.Failure(ImportError.of(ImportReason.ANTIBOT))
         }
 
+        structuralEmptyNext(document, sourceUrl)?.let { next ->
+            return@withContext ImportResult.StructuralEmpty(sourceUrl, next)
+        }
+
         onStage(WebImportStage.EXTRACTING)
         val host = runCatching { java.net.URI(sourceUrl).host }.getOrNull().orEmpty()
         val article = findContentElement(document, host)
-            ?: return@withContext ImportResult.Failure(
-                when {
-                    isLoginRedirect(document, sourceUrl) -> ImportError.of(ImportReason.LOGIN_REQUIRED)
-                    isPaywall(document) -> ImportError.of(ImportReason.PAYWALL)
-                    else -> ImportError.of(ImportReason.EMPTY_CONTENT)
-                },
-            )
-        val content = cleanedContent(article)
+            ?: return@withContext ImportResult.Failure(pageFailure(document, sourceUrl))
+        val content = chapterContent(document, article)
         if (content.text().length < MIN_CHAPTER_CHARS) {
-            return@withContext ImportResult.Failure(
-                when {
-                    isLoginRedirect(document, sourceUrl) -> ImportError.of(ImportReason.LOGIN_REQUIRED)
-                    isPaywall(document) -> ImportError.of(ImportReason.PAYWALL)
-                    else -> ImportError.of(ImportReason.EMPTY_CONTENT)
-                },
-            )
+            return@withContext ImportResult.Failure(pageFailure(document, sourceUrl))
+        }
+        // A page short enough to be a teaser that passed the length bar is not a chapter:
+        // «продолжение доступно после подписки» must not become book text.
+        if (isPaywallText(content.text())) {
+            return@withContext ImportResult.Failure(ImportError.of(ImportReason.PAYWALL))
         }
 
         val safeHtml = Jsoup.clean(content.html(), sourceUrl, Safelist.relaxed())
@@ -129,103 +102,77 @@ object WebChapterImporter {
         )
     }
 
+    /** Why a page did not give chapter text: the guarded pages have their own typed failure. */
+    private fun pageFailure(document: Document, sourceUrl: String): ImportError = when {
+        isLoginRedirect(document, sourceUrl) -> ImportError.of(ImportReason.LOGIN_REQUIRED)
+        isPaywall(document) -> ImportError.of(ImportReason.PAYWALL)
+        else -> ImportError.of(ImportReason.EMPTY_CONTENT)
+    }
+
+    /**
+     * Standard Ebooks announces section dividers as /text/part-N, titles them "Part II: ...",
+     * and links the following chapter with rel=next. These pages contain only a divider title,
+     * so the normal chapter quality guard correctly rejects them; this narrow signal lets the
+     * next-chapter flow skip only that declared structural page.
+     */
+    internal fun structuralEmptyNext(document: Document, sourceUrl: String): String? {
+        val uri = runCatching { java.net.URI(sourceUrl) }.getOrNull() ?: return null
+        if (!uri.host.equals("standardebooks.org", ignoreCase = true)) return null
+        val sectionPrefix = Regex("^(/ebooks/[^/]+/[^/]+/text/)part-[0-9]+$")
+            .matchEntire(uri.path.orEmpty())?.groupValues?.get(1) ?: return null
+        if (!Regex("(?i)^.+ - Part [ivxlcdm0-9]+: .+$").matches(document.title().trim())) return null
+        val text = document.body()?.let(::cleanedContent)?.text().orEmpty()
+        if (text.length >= MIN_CHAPTER_CHARS) return null
+        if (isLoginRedirect(document, sourceUrl) || isPaywall(document) || isPaywallText(text)) return null
+        val next = extractNextUrl(document, sourceUrl) ?: return null
+        val nextPath = runCatching { java.net.URI(next).path.orEmpty() }.getOrNull().orEmpty()
+        if (!nextPath.startsWith(sectionPrefix) || nextPath == uri.path) return null
+        return next
+    }
+
+    /** Fetch one chapter through at most three explicitly announced structural dividers. */
+    suspend fun importNextChapter(
+        url: String,
+        importer: suspend (String) -> ImportResult = ::importChapter,
+    ): ImportResult {
+        var current = url
+        val visited = linkedSetOf<String>()
+        repeat(MAX_STRUCTURAL_EMPTY_HOPS + 1) { hop ->
+            val canonical = canonicalWebUrl(current)
+                ?: return ImportResult.Failure(ImportError.of(ImportReason.BAD_URL))
+            if (!visited.add(canonical)) {
+                return ImportResult.Failure(ImportError.of(ImportReason.EMPTY_CONTENT))
+            }
+            when (val result = importer(canonical)) {
+                is ImportResult.StructuralEmpty -> {
+                    if (hop == MAX_STRUCTURAL_EMPTY_HOPS) {
+                        return ImportResult.Failure(ImportError.of(ImportReason.EMPTY_CONTENT))
+                    }
+                    current = result.nextUrl
+                }
+                else -> return result
+            }
+        }
+        return ImportResult.Failure(ImportError.of(ImportReason.EMPTY_CONTENT))
+    }
+
+    private const val MAX_STRUCTURAL_EMPTY_HOPS = 3
+
     /** The content types a chapter page may come as. */
     private val allowedTypes = listOf(
         "text/html", "application/xhtml+xml", "application/xml", "text/xml",
     )
 
-    /** The end of the fetch loop: the response, or why none arrived. */
-    private sealed interface FetchResult {
-        data class Ok(val response: org.jsoup.Connection.Response) : FetchResult
-        data class Failed(val error: ImportError) : FetchResult
-    }
-
-    /** One fetch with its retries; each attempt reconnects, so the session cookies carry over. */
-    private suspend fun fetch(url: String): FetchResult {
-        val site = siteOf(runCatching { java.net.URI(url).host }.getOrNull().orEmpty())
-            ?: runCatching { java.net.URI(url).host }.getOrNull().orEmpty()
-        var attempt = 0
-        var lastError = ImportError.of(ImportReason.NETWORK)
-        while (attempt < ATTEMPTS) {
-            if (attempt > 0) delay(750L * attempt)
-            try {
-                val timeout = if (attempt == 0) CONNECT_TIMEOUT_MS else READ_TIMEOUT_MS
-                val response = Jsoup.connect(url)
-                    .userAgent(USER_AGENT)
-                    .header("Accept", ACCEPT)
-                    .header("Accept-Language", ACCEPT_LANGUAGE)
-                    .referrer(originOf(url))
-                    .cookies(sessionCookies[site] ?: emptyMap())
-                    .timeout(timeout)
-                    .maxBodySize(MAX_BODY_BYTES)
-                    .followRedirects(true)
-                    .ignoreContentType(true)
-                    // Error answers arrive as responses, so a challenge page can be read.
-                    .ignoreHttpErrors(true)
-                    .execute()
-                response.cookies().forEach { (name, value) ->
-                    sessionCookies.getOrPut(site) { ConcurrentHashMap() }[name] = value
-                }
-                if (response.statusCode() >= 400) {
-                    val error = statusErrorOf(
-                        response.statusCode(),
-                        response.statusMessage(),
-                        response.url().toString(),
-                        response.charset(),
-                        response.bodyAsBytes(),
-                    )
-                    // A refusal or a bot challenge answers the same on every try; only a bare
-                    // 5xx (a temporary overload) deserves another attempt.
-                    if (response.statusCode() < 500 || error.reason == ImportReason.ANTIBOT) {
-                        return FetchResult.Failed(error)
-                    }
-                    lastError = error
-                } else {
-                    return FetchResult.Ok(response)
-                }
-            } catch (error: HttpStatusException) {
-                lastError = importErrorOf(error)
-                // 401, 403, 404 and friends answer the same on every try; only 5xx deserve one.
-                if (error.statusCode < 500) return FetchResult.Failed(lastError)
-            } catch (error: UnsupportedMimeTypeException) {
-                return FetchResult.Failed(importErrorOf(error))
-            } catch (error: SocketTimeoutException) {
-                lastError = importErrorOf(error)
-            } catch (error: IOException) {
-                lastError = importErrorOf(error)
-            }
-            attempt += 1
-        }
-        return FetchResult.Failed(lastError)
-    }
-
-    /**
-     * The typed failure of an error response. A 403 or 503 that carries a Cloudflare/DDoS-Guard
-     * challenge in its body is an ANTIBOT answer, not a plain refusal — real protection answers
-     * with an error status, so the body must be read to see it.
-     */
+    /** The typed failure of an error response; the shared fetch does the work. */
     internal fun statusErrorOf(
         statusCode: Int,
         statusMessage: String?,
         url: String,
         charsetHeader: String?,
         body: ByteArray,
-    ): ImportError {
-        if (statusCode == 403 || statusCode == 503) {
-            val document = Jsoup.parse(String(body, resolveCharset(charsetHeader, body)), url)
-            if (isAntibotPage(document)) return ImportError.of(ImportReason.ANTIBOT)
-        }
-        return importErrorOf(HttpStatusException(statusMessage ?: "HTTP $statusCode", statusCode, url))
-    }
+    ): ImportError = WebFetch.statusErrorOf(statusCode, statusMessage, url, charsetHeader, body)
 
-    /** The page's origin as a Referer: scheme and authority, no path. */
-    private fun originOf(url: String): String {
-        val schemeEnd = url.indexOf("://")
-        if (schemeEnd < 0) return url
-        return url.substring(0, schemeEnd + 3) + url.substring(schemeEnd + 3).substringBefore('/')
-    }
-
-    private fun extractTitle(document: Document, article: org.jsoup.nodes.Element): String {
+    internal fun extractTitle(document: Document, article: org.jsoup.nodes.Element): String {
         val heading = article.closest(".story")?.selectFirst("h1")
             ?: article.selectFirst("h1")
             ?: document.selectFirst("h1[itemprop=name]")
@@ -239,11 +186,32 @@ object WebChapterImporter {
             return "$headingText | $bookTitle"
         }
         return headingText.ifBlank {
+            breadcrumbTitle(document)
+        }.ifBlank {
             document.selectFirst("meta[property=og:title]")?.attr("content")?.trim().orEmpty()
         }.ifBlank {
             document.title().trim()
         }.ifBlank {
             "Глава"
+        }
+    }
+
+    /**
+     * The title from the page's schema.org breadcrumbs: the last two crumbs name the chapter
+     * and the book, while the first repeats the site's own name and is dropped. Reader sites
+     * put the whole «Читать ... - Страница N - библиотека» line into og:title, so the crumbs
+     * come before it. A page without crumbs gives an empty string and falls through.
+     */
+    private fun breadcrumbTitle(document: Document): String {
+        val siteName = document.selectFirst("meta[property=og:site_name]")
+            ?.attr("content")?.let(::normalizeText).orEmpty()
+        val crumbs = document.select("[itemtype*=BreadcrumbList] [itemprop=name]")
+            .map { normalizeText(it.text()) }
+            .filter { it.isNotEmpty() && !it.equals(siteName, ignoreCase = true) }
+        return when {
+            crumbs.size >= 2 -> "${crumbs.last()} | ${crumbs[crumbs.size - 2]}"
+            crumbs.size == 1 -> crumbs.single()
+            else -> ""
         }
     }
 }

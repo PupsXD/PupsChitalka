@@ -119,6 +119,43 @@ class VoskFrontendTest {
     }
 
     @Test
+    fun numbersAndAbbreviationsBecomeWordsBeforeTheFrontendDropsCharacters() {
+        // The pipeline is normalize (SpeechNormalizer) and only then sanitize; this proves the
+        // order on the Vosk path: a digit never reaches the phoneme layer to be deleted there.
+        val spoken = SpeechNormalizer.normalize("В 1917 году он получил 21%, т. е. больше всех.", "ru")
+        val clean = VoskFrontend.sanitize(spoken)
+        assertTrue(clean.none { it.isDigit() })
+        assertTrue(clean, clean.contains("тысяча девятьсот семнадцатом году"))
+        assertTrue(clean, clean.contains("двадцать один процент"))
+        assertTrue(clean, clean.contains("то есть"))
+    }
+
+    @Test
+    fun aHomographMarkFromTheContextLayerBypassesTheDictionary() {
+        // «з+амок» is the context layer's reading of a castle; the model's dictionary knows one
+        // reading of «замок», so the mark must reach the phonemes not as a lookup but as +.
+        assertEquals("z a1 m o0 k", VoskFrontend.convert("з+амок"))
+        assertEquals("z a0 m o1 k", VoskFrontend.convert("зам+ок"))
+    }
+
+    @Test
+    fun inflectedHomographsReachTheRightPhonesWithoutBreakingBertRows() {
+        val map = JSONObject(resource("config.json")).getJSONObject("phoneme_id_map")
+        val ids = map.keys().asSequence().associateWith { map.getInt(it) }
+        val frontend = VoskFrontend(ids, BertWordPiece.load(resource("vocab.txt").lineSequence()), { null })
+
+        val castleForm = frontend.prepare(RussianHomographStress.apply("\u0414\u0432\u0435\u0440\u044c \u0437\u0430\u043c\u043a\u0430."))
+        assertTrue(wordSymbols(castleForm).toString(), wordSymbols(castleForm).contains("a1"))
+        assertTrue(castleForm.bertRows.all { it in castleForm.wordTokens.indices })
+        assertEquals(castleForm.phonemes.size, castleForm.bertRows.size)
+
+        val flourForm = frontend.prepare(RussianHomographStress.apply("\u041f\u0448\u0435\u043d\u0438\u0447\u043d\u043e\u0439 \u043c\u0443\u043a\u043e\u0439."))
+        assertTrue(wordSymbols(flourForm).toString(), wordSymbols(flourForm).contains("o1"))
+        assertTrue(flourForm.bertRows.all { it in flourForm.wordTokens.indices })
+        assertEquals(flourForm.phonemes.size, flourForm.bertRows.size)
+    }
+
+    @Test
     fun dictionaryKeepsTheMostProbableVariantAndTheFirstOnATie() {
         val text = folder.newFile("small").apply {
             writeText(

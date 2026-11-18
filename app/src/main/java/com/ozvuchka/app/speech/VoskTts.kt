@@ -135,7 +135,9 @@ internal class VoskTts(
         noise: Float = this.noise,
         durationNoise: Float = this.durationNoise,
     ): FloatArray {
-        val prepared = frontend.prepare(text)
+        // The reader's own marks are already in the text and win; the homograph layer only
+        // fills in words the context—not the dictionary—decides.
+        val prepared = frontend.prepare(RussianHomographStress.apply(text))
         if (prepared.phonemes.size <= 3) return FloatArray(0) // only ^, a space and $: nothing to say
         val words = wordEmbeddings(prepared)
         val count = prepared.phonemes.size
