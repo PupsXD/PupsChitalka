@@ -61,6 +61,7 @@ import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RecordVoiceOver
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
@@ -335,7 +336,7 @@ fun ReaderScreen(
                 val lead = if (previous != null) 1 else 0
                 val initialPage = lead + pages.indexOfLast { it.startsAt <= pageAnchor + 0.0001f }.coerceAtLeast(0)
                 val pager = rememberPagerState(initialPage = initialPage) {
-                    lead + pages.size + if (currentState.nextChapter != null || currentState.hasNextWebChapter) 1 else 0
+                    lead + pages.size + if (currentState.nextChapter != null || currentState.webChapterLoad != WebChapterLoadUi.None) 1 else 0
                 }
                 fun chapterPage(index: Int): Int? = (index - lead).takeIf { it in pages.indices }
                 // Where the previous chapter's last page starts, once it is laid out.
@@ -365,7 +366,7 @@ fun ReaderScreen(
                         settled == lead + pages.size -> {
                             val upcoming = currentState.nextChapter
                             if (upcoming != null) currentActions.changeChapter(upcoming.index, 0f)
-                            else if (currentState.hasNextWebChapter) currentActions.importNextChapter()
+                            else if (currentState.webChapterLoad != WebChapterLoadUi.None) currentActions.importNextChapter()
                         }
                     }
                 }
@@ -1293,17 +1294,31 @@ private fun ReaderBottomPanel(
                     Text("${state.chapterIndex + 1} / ${state.chapterCount}  ·  ${(state.overallProgress * 100).roundToInt()}%")
                 }
                 Spacer(Modifier.weight(1f))
+                val load = state.webChapterLoad
+                val hasRealNext = state.chapterIndex + 1 < state.chapterCount
                 TextButton(
                     onClick = {
-                        if (state.chapterIndex + 1 < state.chapterCount) actions.changeChapter(state.chapterIndex + 1)
+                        if (hasRealNext) actions.changeChapter(state.chapterIndex + 1)
                         else actions.importNextChapter()
                     },
-                    enabled = state.chapterIndex + 1 < state.chapterCount || state.hasNextWebChapter,
+                    enabled = hasRealNext || load != WebChapterLoadUi.None,
                     colors = ButtonDefaults.textButtonColors(contentColor = colors.accent),
                 ) {
-                    Text(if (state.chapterIndex + 1 < state.chapterCount) "Глава" else "Загрузить")
+                    Text(
+                        when {
+                            hasRealNext -> "Глава"
+                            load is WebChapterLoadUi.Loading ->
+                                if (load.site.isBlank()) "Загрузка…" else "Загрузка: ${load.site}…"
+                            load is WebChapterLoadUi.Failed -> "Ошибка · повторить"
+                            else -> "Загрузить"
+                        },
+                    )
                     Icon(
-                        if (state.chapterIndex + 1 < state.chapterCount) Icons.AutoMirrored.Filled.NavigateNext else Icons.Filled.Download,
+                        when {
+                            hasRealNext -> Icons.AutoMirrored.Filled.NavigateNext
+                            load is WebChapterLoadUi.Failed -> Icons.Filled.Refresh
+                            else -> Icons.Filled.Download
+                        },
                         contentDescription = null,
                     )
                 }

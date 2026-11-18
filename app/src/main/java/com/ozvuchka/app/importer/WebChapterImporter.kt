@@ -1,13 +1,17 @@
 package com.ozvuchka.app.importer
 
 import com.ozvuchka.app.data.Chapter
-import java.net.URI
+import java.io.IOException
+import java.net.SocketTimeoutException
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
+import org.jsoup.HttpStatusException
+import org.jsoup.UnsupportedMimeTypeException
 import org.jsoup.nodes.Document
-import org.jsoup.nodes.Element
 import org.jsoup.safety.Safelist
 
 data class WebChapter(
@@ -17,74 +21,171 @@ data class WebChapter(
     val nextUrl: String?,
 )
 
-/** A web chapter as book text: its paragraphs, with the site's own title suffix dropped. */
+/**
+ * A web chapter as book text: its paragraphs, with the site's own title suffix dropped. The
+ * paragraphs go through [htmlBlocks], so nested markup (a blockquote inside a blockquote, a
+ * list inside a table) is visited once and never duplicated.
+ */
 fun WebChapter.toBookChapter(): Chapter {
     val body = Jsoup.parseBodyFragment(html).body()
-    val selected = body.select("p, h2, h3, blockquote, li")
-        .map { it.text().trim() }.filter(String::isNotBlank)
-    val paragraphs = if (selected.isNotEmpty()) selected else body.wholeText().split(Regex("\\n+"))
-        .map(String::trim).filter(String::isNotBlank)
+    body.select(junkSelector).remove()
+    val blocks = htmlBlocks(body)
+    val paragraphs = if (blocks.isNotEmpty()) blocks else body.wholeText()
+        .split(Regex("\\n+")).map(String::trim).filter(String::isNotBlank).map { it to null }
     val chapterTitle = title.substringBefore(" | ").trim().ifBlank { title }
-    return Chapter(chapterTitle, paragraphs, sourceUrl, nextUrl)
+    return chapterOf(chapterTitle, paragraphs).copy(sourceUrl = sourceUrl, nextUrl = nextUrl)
 }
 
-/** Imports only the URL selected by the reader. [nextUrl] is offered for a separate action. */
+/**
+ * Imports only the URL selected by the reader; [nextUrl] is offered for a separate action.
+ * The import reports its [WebImportStage] through [onStage] as it goes and never throws:
+ * the outcome is an [ImportResult], whose failures carry a typed [ImportError].
+ */
 object WebChapterImporter {
-    suspend fun importChapter(url: String): WebChapter = withContext(Dispatchers.IO) {
-        val requestedUrl = canonicalHttpUrl(url)
-            ?: throw IllegalArgumentException("Нужна ссылка на страницу с протоколом http или https")
+    /** A realistic phone browser: many reader sites grade guests down to a challenge page. */
+    private const val USER_AGENT =
+        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) " +
+            "Chrome/124.0.0.0 Mobile Safari/537.36"
 
-        val response = Jsoup.connect(requestedUrl)
-            .userAgent("Mozilla/5.0 (Linux; Android) Ozvuchka/1.0")
-            .timeout(15_000)
-            .maxBodySize(5_000_000)
-            .followRedirects(true)
-            .execute()
+    private const val ACCEPT =
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+    private const val ACCEPT_LANGUAGE = "ru-RU,ru;q=0.9,en;q=0.8"
 
-        val sourceUrl = canonicalHttpUrl(response.url().toString())
-            ?: throw IllegalArgumentException("Страница перенаправила на неподдерживаемый адрес")
+    /** jsoup applies its timeout to both connecting and reading; retries read with more slack. */
+    private const val CONNECT_TIMEOUT_MS = 10_000
+    private const val READ_TIMEOUT_MS = 20_000
+    private const val MAX_BODY_BYTES = 8_000_000
+    private const val ATTEMPTS = 3
+
+    /** Cookies of one site across the calls of an import session: age gates, consent, chapters. */
+    private val sessionCookies = ConcurrentHashMap<String, ConcurrentHashMap<String, String>>()
+
+    /** Forgets the cookies, for example when the reader asks for a fresh start. */
+    fun clearWebSession() = sessionCookies.clear()
+
+    suspend fun importChapter(
+        url: String,
+        onStage: (WebImportStage) -> Unit = {},
+    ): ImportResult = withContext(Dispatchers.IO) {
+        onStage(WebImportStage.CONNECTING)
+        classifyUrl(url)?.let { return@withContext ImportResult.Failure(it) }
+        val requestedUrl = canonicalWebUrl(url)!!
+        val response = when (val fetched = fetch(requestedUrl)) {
+            is FetchResult.Ok -> fetched.response
+            is FetchResult.Failed -> return@withContext ImportResult.Failure(fetched.error)
+        }
+        val sourceUrl = canonicalWebUrl(response.url().toString())
+            ?: return@withContext ImportResult.Failure(ImportError.of(ImportReason.BAD_URL))
+
+        onStage(WebImportStage.DOWNLOADING)
         val contentType = response.contentType().orEmpty().lowercase(Locale.ROOT)
-        if (!contentType.startsWith("text/html") && !contentType.startsWith("application/xhtml+xml")) {
-            throw IllegalArgumentException("По ссылке нет HTML-страницы")
+        if (allowedTypes.none(contentType::startsWith)) {
+            return@withContext ImportResult.Failure(ImportError.of(ImportReason.NON_HTML))
         }
 
-        val document = response.parse()
-        val article = findArticle(document)
-            ?: throw IllegalArgumentException("Не удалось найти текст главы на странице")
-        val content = article.clone()
-        content.select(
-            "script, style, nav, aside, header, footer, form, iframe, button, noscript, " +
-                "[hidden], [aria-hidden=true], [role=navigation], " +
-                ".ad, .ads, .adsbygoogle, .advertisement, .banner, .share, .social, " +
-                ".comments, #comments, [data-ad]",
-        ).remove()
+        val bytes = response.bodyAsBytes()
+        val charset = resolveCharset(response.charset(), bytes)
+        val document = Jsoup.parse(String(bytes, charset), sourceUrl)
+        if (isAntibotPage(document)) {
+            return@withContext ImportResult.Failure(ImportError.of(ImportReason.ANTIBOT))
+        }
 
-        if (content.text().length < 80) {
-            throw IllegalArgumentException("На странице слишком мало текста для главы")
+        onStage(WebImportStage.EXTRACTING)
+        val host = runCatching { java.net.URI(sourceUrl).host }.getOrNull().orEmpty()
+        val article = findContentElement(document, host)
+            ?: return@withContext ImportResult.Failure(
+                when {
+                    isLoginRedirect(document, sourceUrl) -> ImportError.of(ImportReason.LOGIN_REQUIRED)
+                    isPaywall(document) -> ImportError.of(ImportReason.PAYWALL)
+                    else -> ImportError.of(ImportReason.EMPTY_CONTENT)
+                },
+            )
+        val content = cleanedContent(article)
+        if (content.text().length < MIN_CHAPTER_CHARS) {
+            return@withContext ImportResult.Failure(
+                when {
+                    isLoginRedirect(document, sourceUrl) -> ImportError.of(ImportReason.LOGIN_REQUIRED)
+                    isPaywall(document) -> ImportError.of(ImportReason.PAYWALL)
+                    else -> ImportError.of(ImportReason.EMPTY_CONTENT)
+                },
+            )
         }
 
         val safeHtml = Jsoup.clean(content.html(), sourceUrl, Safelist.relaxed())
-        if (Jsoup.parseBodyFragment(safeHtml).body().text().length < 80) {
-            throw IllegalArgumentException("Не удалось извлечь текст главы")
+        if (Jsoup.parseBodyFragment(safeHtml).body().text().length < MIN_CHAPTER_CHARS) {
+            return@withContext ImportResult.Failure(ImportError.of(ImportReason.EMPTY_CONTENT))
         }
 
-        WebChapter(
-            title = extractTitle(document, article),
-            html = safeHtml,
-            sourceUrl = sourceUrl,
-            nextUrl = extractNextUrl(document, sourceUrl),
+        ImportResult.Success(
+            WebChapter(
+                title = extractTitle(document, article),
+                html = safeHtml,
+                sourceUrl = sourceUrl,
+                nextUrl = extractNextUrl(document, sourceUrl),
+            ),
         )
     }
 
-    private fun findArticle(document: Document): Element? =
-        document.selectFirst("#arrticle")
-            ?: document.selectFirst("#article")
-            ?: document.selectFirst("#article-content")
-            ?: document.select("article").maxByOrNull { it.text().length }
-                ?.takeIf { it.text().length >= 80 }
-            ?: document.select("main").maxByOrNull { it.text().length }
+    /** The content types a chapter page may come as. */
+    private val allowedTypes = listOf(
+        "text/html", "application/xhtml+xml", "application/xml", "text/xml",
+    )
 
-    private fun extractTitle(document: Document, article: Element): String {
+    /** The end of the fetch loop: the response, or why none arrived. */
+    private sealed interface FetchResult {
+        data class Ok(val response: org.jsoup.Connection.Response) : FetchResult
+        data class Failed(val error: ImportError) : FetchResult
+    }
+
+    /** One fetch with its retries; each attempt reconnects, so the session cookies carry over. */
+    private suspend fun fetch(url: String): FetchResult {
+        val site = siteOf(runCatching { java.net.URI(url).host }.getOrNull().orEmpty())
+            ?: runCatching { java.net.URI(url).host }.getOrNull().orEmpty()
+        var attempt = 0
+        var lastError = ImportError.of(ImportReason.NETWORK)
+        while (attempt < ATTEMPTS) {
+            if (attempt > 0) delay(750L * attempt)
+            try {
+                val timeout = if (attempt == 0) CONNECT_TIMEOUT_MS else READ_TIMEOUT_MS
+                val response = Jsoup.connect(url)
+                    .userAgent(USER_AGENT)
+                    .header("Accept", ACCEPT)
+                    .header("Accept-Language", ACCEPT_LANGUAGE)
+                    .referrer(originOf(url))
+                    .cookies(sessionCookies[site] ?: emptyMap())
+                    .timeout(timeout)
+                    .maxBodySize(MAX_BODY_BYTES)
+                    .followRedirects(true)
+                    .ignoreContentType(true)
+                    .execute()
+                response.cookies().forEach { (name, value) ->
+                    sessionCookies.getOrPut(site) { ConcurrentHashMap() }[name] = value
+                }
+                return FetchResult.Ok(response)
+            } catch (error: HttpStatusException) {
+                lastError = importErrorOf(error)
+                // 401, 403, 404 and friends answer the same on every try; only 5xx deserve one.
+                if (error.statusCode < 500) return FetchResult.Failed(lastError)
+            } catch (error: UnsupportedMimeTypeException) {
+                return FetchResult.Failed(importErrorOf(error))
+            } catch (error: SocketTimeoutException) {
+                lastError = importErrorOf(error)
+            } catch (error: IOException) {
+                lastError = importErrorOf(error)
+            }
+            attempt += 1
+        }
+        return FetchResult.Failed(lastError)
+    }
+
+    /** The page's origin as a Referer: scheme and authority, no path. */
+    private fun originOf(url: String): String {
+        val schemeEnd = url.indexOf("://")
+        if (schemeEnd < 0) return url
+        return url.substring(0, schemeEnd + 3) + url.substring(schemeEnd + 3).substringBefore('/')
+    }
+
+    private fun extractTitle(document: Document, article: org.jsoup.nodes.Element): String {
         val heading = article.closest(".story")?.selectFirst("h1")
             ?: article.selectFirst("h1")
             ?: document.selectFirst("h1[itemprop=name]")
@@ -104,37 +205,5 @@ object WebChapterImporter {
         }.ifBlank {
             "Глава"
         }
-    }
-
-    private fun extractNextUrl(document: Document, sourceUrl: String): String? {
-        val href = document.selectFirst("a#next[href]")?.absUrl("href")
-            ?: document.selectFirst("a[rel=next][href]")?.absUrl("href")
-            ?: return null
-        val nextUrl = canonicalHttpUrl(href) ?: return null
-        val sourceHost = URI(sourceUrl).host
-        val nextHost = URI(nextUrl).host
-        return nextUrl.takeIf { nextHost.equals(sourceHost, ignoreCase = true) && it != sourceUrl }
-    }
-
-    private fun canonicalHttpUrl(value: String): String? {
-        val uri = try {
-            URI(value.trim()).normalize()
-        } catch (_: Exception) {
-            return null
-        }
-        val scheme = uri.scheme?.lowercase(Locale.ROOT) ?: return null
-        val host = uri.host?.lowercase(Locale.ROOT) ?: return null
-        if ((scheme != "http" && scheme != "https") || host.isBlank() || uri.rawUserInfo != null) {
-            return null
-        }
-        val port = uri.port
-        if (port > 65535) return null
-        val authorityHost = if (host.contains(':') && !host.startsWith('[')) "[$host]" else host
-        val authorityPort = if (port == -1 || (scheme == "http" && port == 80) ||
-            (scheme == "https" && port == 443)
-        ) "" else ":$port"
-        val path = uri.rawPath?.ifEmpty { "/" } ?: "/"
-        val query = uri.rawQuery?.let { "?$it" }.orEmpty()
-        return "$scheme://$authorityHost$authorityPort$path$query"
     }
 }

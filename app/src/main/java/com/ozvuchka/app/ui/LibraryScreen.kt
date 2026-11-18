@@ -39,6 +39,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -56,6 +57,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -79,6 +81,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ozvuchka.app.data.Covers
+import com.ozvuchka.app.importer.ImportReason
+import com.ozvuchka.app.importer.WebImportStage
+import com.ozvuchka.app.importer.WebImportUi
 import com.ozvuchka.app.speech.RuVoiceInstallState
 import com.ozvuchka.app.update.AppUpdateState
 import kotlinx.coroutines.Dispatchers
@@ -116,6 +121,7 @@ fun LibraryScreen(
     onListen: (String) -> Unit,
     onImportFile: () -> Unit,
     onImportUrl: (String) -> Unit,
+    onDismissWebImport: () -> Unit = {},
     onDeleteBook: (String) -> Unit,
     onOpenVoices: () -> Unit,
     modifier: Modifier = Modifier,
@@ -128,6 +134,8 @@ fun LibraryScreen(
     appUpdateActions: AppUpdateActions? = null,
     /** «Версия от …» in the menu; null leaves the line out. */
     appVersion: String? = null,
+    /** Progress of a web chapter import, or its typed failure with a retry. */
+    webImport: WebImportUi? = null,
 ) {
     var query by rememberSaveable { mutableStateOf("") }
     var filter by rememberSaveable { mutableStateOf("Все") }
@@ -275,6 +283,14 @@ fun LibraryScreen(
 
     if (showImportSheet) {
         ModalBottomSheet(onDismissRequest = { showImportSheet = false }) {
+            val busy = webImport?.isActive == true
+            // A finished import closes the sheet on its own: the book is already open.
+            LaunchedEffect(webImport?.stage) {
+                if (webImport?.stage == WebImportStage.DONE) {
+                    showImportSheet = false
+                    onDismissWebImport()
+                }
+            }
             Column(
                 modifier = Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, bottom = 32.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -289,6 +305,7 @@ fun LibraryScreen(
                         showImportSheet = false
                         onImportFile()
                     },
+                    enabled = !busy,
                     modifier = Modifier.fillMaxWidth(),
                     contentPadding = PaddingValues(vertical = 15.dp),
                 ) {
@@ -306,21 +323,19 @@ fun LibraryScreen(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                     singleLine = true,
                     shape = RoundedCornerShape(16.dp),
+                    enabled = !busy,
                 )
+                WebImportState(webImport, onRetry = onImportUrl, onDismiss = onDismissWebImport)
                 OutlinedButton(
-                    onClick = {
-                        val input = url.trim()
-                        if (input.isNotEmpty()) {
-                            showImportSheet = false
-                            url = ""
-                            onImportUrl(input)
-                        }
-                    },
-                    enabled = url.isNotBlank(),
+                    onClick = { onImportUrl(url.trim()) },
+                    enabled = url.isNotBlank() && !busy,
                     modifier = Modifier.fillMaxWidth(),
                     contentPadding = PaddingValues(vertical = 15.dp),
                 ) {
-                    Text("Открыть ссылку", fontSize = 16.sp)
+                    Text(
+                        if (busy) "Загружаем…" else "Открыть ссылку",
+                        fontSize = 16.sp,
+                    )
                 }
             }
         }
@@ -668,6 +683,59 @@ private fun LibraryEmptyState(
             Spacer(Modifier.height(3.dp))
             Button(onClick = onImportFile) { Text("Выбрать файл") }
             OutlinedButton(onClick = onImportUrl) { Text("Добавить по ссылке") }
+        }
+    }
+}
+
+/** The stage of a running web import, or its typed failure with the retry, inside the sheet. */
+@Composable
+private fun WebImportState(
+    webImport: WebImportUi?,
+    onRetry: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    if (webImport == null) return
+    if (webImport.stage == WebImportStage.FAILED) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "Не удалось загрузить главу с ${webImport.site.ifBlank { "сайта" }}",
+                color = MaterialTheme.colorScheme.error,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                webImport.error?.hint
+                    ?: "Неизвестная ошибка. Попробуйте ещё раз позже",
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(
+                    onClick = { webImport.url.takeIf { it.isNotBlank() }?.let(onRetry) },
+                    enabled = webImport.error?.reason != ImportReason.BAD_URL &&
+                        webImport.error?.reason != ImportReason.CLEARTEXT,
+                ) {
+                    Text("Повторить")
+                }
+                TextButton(onClick = onDismiss) { Text("Скрыть") }
+            }
+        }
+    } else {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            CircularProgressIndicator(modifier = Modifier.size(22.dp))
+            Text(
+                when (webImport.stage) {
+                    WebImportStage.CONNECTING -> "Подключаемся к сайту…"
+                    WebImportStage.DOWNLOADING ->
+                        if (webImport.site.isBlank()) "Загружаем страницу…" else "Загружаем страницу с ${webImport.site}…"
+                    WebImportStage.EXTRACTING -> "Ищем текст главы…"
+                    WebImportStage.SAVING -> "Сохраняем главу…"
+                    else -> "Загружаем…"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+            )
         }
     }
 }
