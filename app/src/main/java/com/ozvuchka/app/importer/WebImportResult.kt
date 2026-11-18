@@ -1,5 +1,7 @@
 package com.ozvuchka.app.importer
 
+import kotlinx.coroutines.delay
+
 /**
  * The end of a web chapter import: either the chapter, or a typed failure. Replaces the old
  * exception-message plumbing, so the interface can show a Russian hint and a retry button
@@ -74,4 +76,19 @@ data class WebImportUi(
 ) {
     /** A running import: the sheet shows progress and blocks another start. */
     val isActive: Boolean get() = stage != WebImportStage.DONE && stage != WebImportStage.FAILED
+}
+
+/**
+ * Retires a finished import's state. The sheet closes itself when it sees [WebImportStage.DONE],
+ * but a share-intent import has no sheet and a stale DONE would slam the sheet shut the next
+ * time it opens: the stage is gone only after [settleMillis], and only if nothing else reset it.
+ */
+suspend fun retireFinishedWebImport(
+    stage: () -> WebImportStage?,
+    clear: () -> Unit,
+    settleMillis: Long,
+) {
+    if (stage() != WebImportStage.DONE) return
+    delay(settleMillis)
+    if (stage() == WebImportStage.DONE) clear()
 }

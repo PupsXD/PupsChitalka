@@ -744,38 +744,44 @@ class NarrationService : Service(), NarrationPlayer.Listener {
         fetchingChapter = true
         scope.launch {
             var more = false
-            when (val result = WebChapterImporter.importChapter(nextUrl)) {
-                is ImportResult.Success -> {
-                    val fetched = result.chapter.toBookChapter()
-                    // The reader may have stored this chapter already; either way the library has it now.
-                    val stored = withContext(Dispatchers.IO) { library.appendChapter(target.id, fetched) ?: library.get(target.id) }
-                    val current = book
-                    if (stored != null && current?.id == target.id && stored.chapters.size > current.chapters.size) {
-                        val added = stored.chapters.drop(current.chapters.size)
-                        book = current.copy(chapters = stored.chapters)
-                        if (source === growingSource) added.forEach(growingSource::append)
-                        NarrationController.bookUpdated(target.id)
-                        more = stored.chapters.last().nextUrl != null
+            try {
+                when (val result = WebChapterImporter.importChapter(nextUrl)) {
+                    is ImportResult.Success -> {
+                        val fetched = result.chapter.toBookChapter()
+                        // The reader may have stored this chapter already; either way the library has it now.
+                        val stored = withContext(Dispatchers.IO) { library.appendChapter(target.id, fetched) ?: library.get(target.id) }
+                        val current = book
+                        if (stored != null && current?.id == target.id && stored.chapters.size > current.chapters.size) {
+                            val added = stored.chapters.drop(current.chapters.size)
+                            book = current.copy(chapters = stored.chapters)
+                            if (source === growingSource) added.forEach(growingSource::append)
+                            NarrationController.bookUpdated(target.id)
+                            more = stored.chapters.last().nextUrl != null
+                        }
+                    }
+                    is ImportResult.Failure -> {
+                        Log.w(TAG, "Next web chapter failed: ${result.error.reason}")
+                        if (book?.id == target.id) {
+                            // The player runs out anyway: growing ends here, so the synthesis loop
+                            // dries up and onCompleted ends the narration with its own IDLE publish,
+                            // wiping this hint. The failure stays in the log; restarting narration
+                            // retries the chapter.
+                            publish(
+                                state.copy(
+                                    message = "Не удалось загрузить следующую главу: ${result.error.hint}",
+                                    phase = NarrationPhase.PREPARING,
+                                ),
+                            )
+                            updateSession()
+                        }
                     }
                 }
-                is ImportResult.Failure -> {
-                    Log.w(TAG, "Next web chapter failed: ${result.error.reason}")
-                    if (book?.id == target.id) {
-                        // The player waits for text that is not coming yet: keep the PREPARING
-                        // state and say what the site answered, the retries still run.
-                        publish(
-                            state.copy(
-                                message = "Не удалось загрузить следующую главу: ${result.error.hint}",
-                                phase = NarrationPhase.PREPARING,
-                            ),
-                        )
-                        updateSession()
-                    }
-                }
+            } finally {
+                // Even a crash in toBookChapter or the library must not block later prefetches.
+                fetchingChapter = false
+                growingSource.growing = more && autoLoadsChapters()
+                growingSource.onExhausted = { handler.post { book?.let { prefetchNextWebChapter(it, force = true) } } }
             }
-            fetchingChapter = false
-            growingSource.growing = more && autoLoadsChapters()
-            growingSource.onExhausted = { handler.post { book?.let { prefetchNextWebChapter(it, force = true) } } }
         }
     }
 

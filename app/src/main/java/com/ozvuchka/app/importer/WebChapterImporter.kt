@@ -57,10 +57,10 @@ object WebChapterImporter {
     private const val MAX_BODY_BYTES = 8_000_000
     private const val ATTEMPTS = 3
 
-    /** Cookies of one site across the calls of an import session: age gates, consent, chapters. */
+    /** Cookies of one import session: age gates and consent answers carry across its retries. */
     private val sessionCookies = ConcurrentHashMap<String, ConcurrentHashMap<String, String>>()
 
-    /** Forgets the cookies, for example when the reader asks for a fresh start. */
+    /** Forgets the cookies; every import session starts and ends without borrowed ones. */
     fun clearWebSession() = sessionCookies.clear()
 
     suspend fun importChapter(
@@ -70,6 +70,10 @@ object WebChapterImporter {
         onStage(WebImportStage.CONNECTING)
         classifyUrl(url)?.let { return@withContext ImportResult.Failure(it) }
         val requestedUrl = canonicalWebUrl(url)!!
+        // Cookies live for one import session only: each call starts clean, so a stale or
+        // poisoned cookie from an earlier attempt cannot answer for this one.
+        clearWebSession()
+        onStage(WebImportStage.DOWNLOADING)
         val response = when (val fetched = fetch(requestedUrl)) {
             is FetchResult.Ok -> fetched.response
             is FetchResult.Failed -> return@withContext ImportResult.Failure(fetched.error)
@@ -77,7 +81,6 @@ object WebChapterImporter {
         val sourceUrl = canonicalWebUrl(response.url().toString())
             ?: return@withContext ImportResult.Failure(ImportError.of(ImportReason.BAD_URL))
 
-        onStage(WebImportStage.DOWNLOADING)
         val contentType = response.contentType().orEmpty().lowercase(Locale.ROOT)
         if (allowedTypes.none(contentType::startsWith)) {
             return@withContext ImportResult.Failure(ImportError.of(ImportReason.NON_HTML))
@@ -157,11 +160,29 @@ object WebChapterImporter {
                     .maxBodySize(MAX_BODY_BYTES)
                     .followRedirects(true)
                     .ignoreContentType(true)
+                    // Error answers arrive as responses, so a challenge page can be read.
+                    .ignoreHttpErrors(true)
                     .execute()
                 response.cookies().forEach { (name, value) ->
                     sessionCookies.getOrPut(site) { ConcurrentHashMap() }[name] = value
                 }
-                return FetchResult.Ok(response)
+                if (response.statusCode() >= 400) {
+                    val error = statusErrorOf(
+                        response.statusCode(),
+                        response.statusMessage(),
+                        response.url().toString(),
+                        response.charset(),
+                        response.bodyAsBytes(),
+                    )
+                    // A refusal or a bot challenge answers the same on every try; only a bare
+                    // 5xx (a temporary overload) deserves another attempt.
+                    if (response.statusCode() < 500 || error.reason == ImportReason.ANTIBOT) {
+                        return FetchResult.Failed(error)
+                    }
+                    lastError = error
+                } else {
+                    return FetchResult.Ok(response)
+                }
             } catch (error: HttpStatusException) {
                 lastError = importErrorOf(error)
                 // 401, 403, 404 and friends answer the same on every try; only 5xx deserve one.
@@ -176,6 +197,25 @@ object WebChapterImporter {
             attempt += 1
         }
         return FetchResult.Failed(lastError)
+    }
+
+    /**
+     * The typed failure of an error response. A 403 or 503 that carries a Cloudflare/DDoS-Guard
+     * challenge in its body is an ANTIBOT answer, not a plain refusal — real protection answers
+     * with an error status, so the body must be read to see it.
+     */
+    internal fun statusErrorOf(
+        statusCode: Int,
+        statusMessage: String?,
+        url: String,
+        charsetHeader: String?,
+        body: ByteArray,
+    ): ImportError {
+        if (statusCode == 403 || statusCode == 503) {
+            val document = Jsoup.parse(String(body, resolveCharset(charsetHeader, body)), url)
+            if (isAntibotPage(document)) return ImportError.of(ImportReason.ANTIBOT)
+        }
+        return importErrorOf(HttpStatusException(statusMessage ?: "HTTP $statusCode", statusCode, url))
     }
 
     /** The page's origin as a Referer: scheme and authority, no path. */

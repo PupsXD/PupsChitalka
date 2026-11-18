@@ -81,7 +81,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ozvuchka.app.data.Covers
-import com.ozvuchka.app.importer.ImportReason
 import com.ozvuchka.app.importer.WebImportStage
 import com.ozvuchka.app.importer.WebImportUi
 import com.ozvuchka.app.speech.RuVoiceInstallState
@@ -711,8 +710,9 @@ private fun WebImportState(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TextButton(
                     onClick = { webImport.url.takeIf { it.isNotBlank() }?.let(onRetry) },
-                    enabled = webImport.error?.reason != ImportReason.BAD_URL &&
-                        webImport.error?.reason != ImportReason.CLEARTEXT,
+                    // The failure type knows whether another try can succeed; a 404 or a paywall
+                    // is not retryable and the button says so.
+                    enabled = webImport.error?.retryable == true,
                 ) {
                     Text("Повторить")
                 }

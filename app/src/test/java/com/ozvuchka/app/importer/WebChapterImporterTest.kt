@@ -2,11 +2,13 @@ package com.ozvuchka.app.importer
 
 import java.net.SocketTimeoutException
 import java.nio.charset.StandardCharsets
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.jsoup.Jsoup
 import org.jsoup.HttpStatusException
 import org.jsoup.UnsupportedMimeTypeException
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -44,7 +46,9 @@ class WebChapterImporterTest {
         // Two paragraphs only: the density stage needs three and stays out of the way.
         val document = Jsoup.parse(fixture("readability-fallback.html"))
         val found = findContentElement(document, "unknown.example")!!
-        assertTrue(found.tagName() == "td" || found.text().contains("Лампа над столом"))
+        // The scored parent is the chapter's own cell, not the teaser wall.
+        assertEquals("td", found.tagName())
+        assertTrue(found.text().contains("Лампа над столом"))
         assertTrue(!found.text().contains("Глава шесть"))
     }
 
@@ -125,12 +129,50 @@ class WebChapterImporterTest {
     }
 
     @Test
+    fun oversizedNumericSegmentsIncrementWithoutOverflow() {
+        // A 10-digit post id does not fit an Int: the guess goes one up, and never throws.
+        assertEquals(
+            "https://story.example/post/1712345679",
+            nextOf("<p>Конец главы</p>", "https://story.example/post/1712345678"),
+        )
+        assertEquals(
+            "https://story.example/read?page=100000000000",
+            nextOf("<p>Конец главы</p>", "https://story.example/read?page=99999999999"),
+        )
+        // Beyond a Long there is no guess at all instead of a wrapped one.
+        assertNull(nextOf("<p>Конец главы</p>", "https://story.example/post/99999999999999999999"))
+        assertNull(nextOf("<p>Конец главы</p>", "https://story.example/read?page=99999999999999999999999"))
+    }
+
+    @Test
     fun foreignCurrentAndContentsLinksAreRejected() {
         val base = "https://story.example/story"
         assertNull(nextOf("""<a rel="next" href="https://other.example/ch2">Дальше</a>""", base))
         assertNull(nextOf("""<a rel="next" href="https://story.example/story">Глава</a>""", base))
         assertNull(nextOf("""<a class="next" href="/all">Все главы</a>""", base))
         assertNull(nextOf("""<a rel="next" href="/contents">Содержание</a>""", base))
+    }
+
+    @Test
+    fun tocPaginationIsNotTakenForTheNextChapter() {
+        // The TOC's «下一页» and bare-number pager walk /page/N; the fallback still counts
+        // the chapter segment itself.
+        assertEquals(
+            "https://book.example/posts/1712345679",
+            nextOf(fixture("toc-pagination.html"), "https://book.example/posts/1712345678"),
+        )
+        // A pager that only moves the page query is not a chapter either.
+        assertTrue(isPageTurn("https://site.example/book/1", "https://site.example/book/1/page/2"))
+        assertTrue(isPageTurn("https://site.example/read?page=2", "https://site.example/read?page=3"))
+        // ...unless the link itself really says "next" on the same path.
+        assertFalse(isPageTurn("https://site.example/read?page=2", "https://site.example/read?page=3", labelledNext = true))
+        assertFalse(isPageTurn("https://site.example/story/chapter-5", "https://site.example/story/chapter-6"))
+    }
+
+    @Test
+    fun menuBodyFailsTheQualityGuard() {
+        // A page that is all links has no chapter to give, even as the very last resort.
+        assertNull(findContentElement(Jsoup.parse(fixture("menu-page.html")), "unknown.example"))
     }
 
     @Test
@@ -197,6 +239,38 @@ class WebChapterImporterTest {
         assertTrue(!isPaywall(chapter))
     }
 
+    @Test
+    fun errorStatusWithChallengeBodyMapsToAntibot() {
+        // Real protection answers 403/503 with a challenge page in the body.
+        val challenge = "<html><head><title>Just a moment...</title></head>" +
+            "<body>Checking your browser before accessing the site</body>"
+        assertEquals(
+            ImportReason.ANTIBOT,
+            WebChapterImporter.statusErrorOf(403, "Forbidden", "https://site.example/1", "utf-8", challenge.toByteArray()).reason,
+        )
+        assertEquals(
+            ImportReason.ANTIBOT,
+            WebChapterImporter.statusErrorOf(
+                503,
+                "Service Unavailable",
+                "https://site.example/1",
+                "utf-8",
+                "<html><body><center>ddos-guard</center></body></html>".toByteArray(),
+            ).reason,
+        )
+        // A plain refusal keeps its own typed failure.
+        assertEquals(
+            ImportReason.HTTP_403,
+            WebChapterImporter.statusErrorOf(
+                403,
+                "Forbidden",
+                "https://site.example/1",
+                "utf-8",
+                "<html><body><p>Доступ запрещён администратором</p></body></html>".toByteArray(),
+            ).reason,
+        )
+    }
+
     // ---------- Typed failures ----------
 
     @Test
@@ -232,7 +306,38 @@ class WebChapterImporterTest {
     }
 
     @Test
-    fun aSuccessfulImportGoesThroughItsStages() = runBlocking {
+    fun retryableFollowsTheFailureType() {
+        val retryable = setOf(ImportReason.NETWORK, ImportReason.TIMEOUT, ImportReason.ANTIBOT, ImportReason.HTTP_403)
+        ImportReason.entries.forEach { reason ->
+            assertEquals("retryable для $reason", reason in retryable, ImportError.of(reason).retryable)
+        }
+    }
+
+    @Test
+    fun finishedImportRetiresAfterTheSheetHadItsChance() = runBlocking {
+        // A DONE seen through to the end is cleared, so the next opened sheet starts clean.
+        var stale: WebImportStage? = WebImportStage.DONE
+        var staleCleared = false
+        retireFinishedWebImport({ stale }, { staleCleared = true }, settleMillis = 20)
+        assertTrue(staleCleared)
+
+        // The sheet closed itself meanwhile: the stage is already gone, nothing to clear.
+        var raced: WebImportStage? = WebImportStage.DONE
+        var racedCleared = false
+        val job = launch { retireFinishedWebImport({ raced }, { racedCleared = true }, settleMillis = 20) }
+        raced = null
+        job.join()
+        assertFalse(racedCleared)
+
+        // A running import is never touched.
+        var running: WebImportStage? = WebImportStage.CONNECTING
+        var runningCleared = false
+        retireFinishedWebImport({ running }, { runningCleared = true }, settleMillis = 20)
+        assertFalse(runningCleared)
+    }
+
+    @Test
+    fun aBadUrlImportReportsItsStageAndTypedFailure() = runBlocking {
         // The pipeline itself needs a network; here only the stage wiring is checked with a
         // BAD_URL, which fails before any fetch and still walks the reported stages.
         val stages = mutableListOf<WebImportStage>()

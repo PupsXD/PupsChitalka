@@ -57,7 +57,14 @@ internal fun findContentElement(document: Document, host: String): Element? {
     big(document.select("main").maxByOrNull { it.text().length })?.let { return it }
     return densityCandidate(document)
         ?: readabilityCandidate(document)
-        ?: big(document.body())
+        // The last resort keeps a quality bar: a page that is mostly links (a menu, a TOC)
+        // must not import "successfully" as the whole body.
+        ?: document.body()?.takeIf { body ->
+            val text = body.text()
+            val linkText = body.select("a[href]").text().length
+            text.length >= MIN_CHAPTER_CHARS * 3 && text.length - linkText >= MIN_CHAPTER_CHARS &&
+                (text.length - linkText) * 2 >= text.length
+        }
 }
 
 /** Container selectors of the site's rule table for this host, empty when unknown. */
@@ -160,11 +167,15 @@ internal fun extractNextUrl(document: Document, sourceUrl: String): String? {
         if (siteOf(nextHost) != siteOf(host) || nextUrl == sourceUrl) return null
         val label = element!!.text()
         if (notNextText.containsMatchIn(label) || notNextText.containsMatchIn(nextUrl)) return null
+        // TOC pagination walks /page/N; a chapter link does not.
+        if (isPageTurn(sourceUrl, nextUrl, labelledNext = nextText.containsMatchIn(label))) return null
         return nextUrl
     }
 
     val byClass = document.select("a#next[href], a[rel=next][href], a[class*=next][href]")
         .filterNot { it.className().lowercase(Locale.ROOT).contains("prev") }
+        // A bare number or a pager glyph names a table-of-contents page, not a chapter.
+        .filterNot { it.text().trim().matches(numericLabel) }
     for (element in byClass) accept(element)?.let { return it }
     accept(document.selectFirst("link[rel=next][href]"))?.let { return it }
     for (element in document.select("a[href]")) {
@@ -172,7 +183,45 @@ internal fun extractNextUrl(document: Document, sourceUrl: String): String? {
         if (label.length > 60 || notNextText.containsMatchIn(label)) continue
         if (nextText.containsMatchIn(label)) accept(element)?.let { return it }
     }
-    return numericIncrementNext(sourceUrl)
+    return runCatching { numericIncrementNext(sourceUrl) }.getOrNull()
+}
+
+/** «2», «1 / 5», «»» — a pager's label, never a chapter link's. */
+private val numericLabel = Regex("[\\d\\s/·.»›-]+")
+
+/** The `/page/N` step at the end of a path, as in `/book/1/page/2`. */
+private val trailingPageStep = Regex("(?i)/p(?:age)?/(\\d+)$")
+
+/** The value of a `page`/`p` query parameter, as in `?page=3`. */
+private fun pageNumber(query: String?): String? =
+    query?.let { Regex("(?:^|&)(?:page|p)=(\\d+)").find(it)?.groupValues?.get(1) }
+
+/**
+ * True when the link is a table-of-contents pager rather than a chapter: it extends the current
+ * path with a `/page/N` step, walks the same `/page/N` list one page on, or (for links without
+ * a real "next" label) merely moves a `?page=` value on the same path.
+ */
+internal fun isPageTurn(sourceUrl: String, nextUrl: String, labelledNext: Boolean = false): Boolean {
+    val source = runCatching { URI(sourceUrl) }.getOrNull() ?: return false
+    val next = runCatching { URI(nextUrl) }.getOrNull() ?: return false
+    val sourcePath = source.rawPath.orEmpty().trimEnd('/')
+    val nextPath = next.rawPath.orEmpty().trimEnd('/')
+    if (nextPath != sourcePath) {
+        // /book/1 -> /book/1/page/2: one more page of the same list.
+        if (nextPath.startsWith("$sourcePath/")) {
+            return trailingPageStep.matches(nextPath.substring(sourcePath.length))
+        }
+        // /page/1 -> /page/2 of the same list.
+        val sourceStep = trailingPageStep.find(sourcePath) ?: return false
+        val nextStep = trailingPageStep.find(nextPath) ?: return false
+        return sourcePath.substringBeforeLast('/') == nextPath.substringBeforeLast('/')
+    }
+    // Same path: only a ?page= move marks a pager, and a link that really says "next"
+    // on the same URL is left to the other checks.
+    if (labelledNext) return false
+    val nextPage = pageNumber(next.rawQuery)?.toIntOrNull() ?: return false
+    val sourcePage = pageNumber(source.rawQuery)?.toIntOrNull()
+    return nextPage != sourcePage
 }
 
 /**
@@ -186,9 +235,9 @@ internal fun numericIncrementNext(sourceUrl: String): String? {
     if (query != null) {
         val parameter = Regex("(?:^|&)(page|chapter|glava|p)=(\\d+)(?:&|$)").find(query)
         if (parameter != null) {
-            val value = parameter.groupValues[2]
-            val bumped = query.replaceRange(parameter.groups[2]!!.range, (value.toInt() + 1).toString())
-            return canonicalWebUrl(sourceUrl.substringBefore('?') + "?" + bumped)
+            val value = parameter.groupValues[2].toLongOrNull() ?: return null
+            val bumped = bumpedNumber(value) ?: return null
+            return canonicalWebUrl(sourceUrl.substringBefore('?') + "?" + query.replaceRange(parameter.groups[2]!!.range, bumped))
         }
     }
     val segments = (uri.rawPath ?: return null).split('/').toMutableList()
@@ -202,12 +251,18 @@ internal fun numericIncrementNext(sourceUrl: String): String? {
     return null
 }
 
+/** The number one up, capped so the last representable value stops guessing instead of wrapping. */
+private fun bumpedNumber(value: Long): String? = if (value == Long.MAX_VALUE) null else (value + 1).toString()
+
 /** The segment of a URL path with its chapter number one up, null when it has none. */
 private fun String.bumpedChapter(): String? {
-    Regex("^\\d+$").matchEntire(this)?.let { return (toInt() + 1).toString() }
+    Regex("^\\d+$").matchEntire(this)?.let {
+        // A >2^31 segment like /post/1712345678 must never throw NumberFormatException.
+        return bumpedNumber(it.value.toLongOrNull() ?: return null)
+    }
     Regex("(?i)^(chapter|glava|ch)[-_.]?(\\d+)$").matchEntire(this)?.let { match ->
-        val digits = match.groups[2]!!
-        return replaceRange(digits.range, (digits.value.toInt() + 1).toString())
+        val digits = match.groups[2]!!.value.toLongOrNull() ?: return null
+        return bumpedNumber(digits)?.let { replaceRange(match.groups[2]!!.range, it) }
     }
     return null
 }
