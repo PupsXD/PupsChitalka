@@ -3,6 +3,7 @@ package com.ozvuchka.app.ui
 import com.ozvuchka.app.data.Annotation
 import com.ozvuchka.app.data.ParagraphStyle
 import com.ozvuchka.app.data.SearchHit
+import com.ozvuchka.app.importer.ImportError
 import com.ozvuchka.app.speech.CastMember
 import com.ozvuchka.app.speech.DialogueVoices
 import com.ozvuchka.app.speech.EmotionLevel
@@ -90,6 +91,19 @@ data class ChapterContent(
     val language: String = "ru",
 )
 
+/**
+ * The state of loading the next web chapter at the end of a web book: the «Загрузить» button,
+ * a load in progress with the site's name, a typed failure with a retry, or nothing to load.
+ */
+sealed interface WebChapterLoadUi {
+    /** Mid-book, or the site offers no next link: no chapters left to load. */
+    data object None : WebChapterLoadUi
+    /** A next link is known and the button may load it. */
+    data object Ready : WebChapterLoadUi
+    data class Loading(val site: String) : WebChapterLoadUi
+    data class Failed(val error: ImportError) : WebChapterLoadUi
+}
+
 /** All reader settings are supplied by the caller so they can be persisted between launches. */
 data class ReaderUiState(
     val bookId: String,
@@ -110,7 +124,8 @@ data class ReaderUiState(
     val typography: ReaderTypography = ReaderTypography(),
     val theme: ReaderTheme = ReaderTheme.SEPIA,
     val narration: ReaderNarrationUi = ReaderNarrationUi(),
-    val hasNextWebChapter: Boolean = false,
+    /** The next web chapter load: a button, a progress, a typed failure, or no more chapters. */
+    val webChapterLoad: WebChapterLoadUi = WebChapterLoadUi.None,
     val volumeKeysTurnPages: Boolean = true,
     val keepScreenOn: Boolean = true,
     val highlightWords: Boolean = true,

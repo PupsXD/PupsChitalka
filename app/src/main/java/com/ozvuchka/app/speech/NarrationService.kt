@@ -36,6 +36,9 @@ import com.ozvuchka.app.data.Chapter
 import com.ozvuchka.app.data.Covers
 import com.ozvuchka.app.data.LibraryStore
 import com.ozvuchka.app.data.chapterProgressOf
+import com.ozvuchka.app.importer.ImportError
+import com.ozvuchka.app.importer.ImportReason
+import com.ozvuchka.app.importer.ImportResult
 import com.ozvuchka.app.importer.WebChapterImporter
 import com.ozvuchka.app.importer.toBookChapter
 import kotlinx.coroutines.CoroutineScope
@@ -732,28 +735,49 @@ class NarrationService : Service(), NarrationPlayer.Listener {
         val nextUrl = target.chapters.last().nextUrl
         if (nextUrl == null || !autoLoadsChapters()) {
             growingSource.growing = false
+            if (nextUrl == null && force && book?.id == target.id) {
+                // The book just ended: say so instead of leaving the PREPARING state dangling.
+                publish(state.copy(message = ImportError.of(ImportReason.NEXT_LINK_MISSING).hint))
+            }
             return
         }
         fetchingChapter = true
         scope.launch {
             var more = false
             try {
-                val fetched = WebChapterImporter.importChapter(nextUrl).toBookChapter()
-                // The reader may have stored this chapter already; either way the library has it now.
-                val stored = withContext(Dispatchers.IO) { library.appendChapter(target.id, fetched) ?: library.get(target.id) }
-                val current = book
-                if (stored != null && current?.id == target.id && stored.chapters.size > current.chapters.size) {
-                    val added = stored.chapters.drop(current.chapters.size)
-                    book = current.copy(chapters = stored.chapters)
-                    if (source === growingSource) added.forEach(growingSource::append)
-                    NarrationController.bookUpdated(target.id)
-                    more = stored.chapters.last().nextUrl != null
+                when (val result = WebChapterImporter.importChapter(nextUrl)) {
+                    is ImportResult.Success -> {
+                        val fetched = result.chapter.toBookChapter()
+                        // The reader may have stored this chapter already; either way the library has it now.
+                        val stored = withContext(Dispatchers.IO) { library.appendChapter(target.id, fetched) ?: library.get(target.id) }
+                        val current = book
+                        if (stored != null && current?.id == target.id && stored.chapters.size > current.chapters.size) {
+                            val added = stored.chapters.drop(current.chapters.size)
+                            book = current.copy(chapters = stored.chapters)
+                            if (source === growingSource) added.forEach(growingSource::append)
+                            NarrationController.bookUpdated(target.id)
+                            more = stored.chapters.last().nextUrl != null
+                        }
+                    }
+                    is ImportResult.Failure -> {
+                        Log.w(TAG, "Next web chapter failed: ${result.error.reason}")
+                        if (book?.id == target.id) {
+                            // The player runs out anyway: growing ends here, so the synthesis loop
+                            // dries up and onCompleted ends the narration with its own IDLE publish,
+                            // wiping this hint. The failure stays in the log; restarting narration
+                            // retries the chapter.
+                            publish(
+                                state.copy(
+                                    message = "Не удалось загрузить следующую главу: ${result.error.hint}",
+                                    phase = NarrationPhase.PREPARING,
+                                ),
+                            )
+                            updateSession()
+                        }
+                    }
                 }
-            } catch (error: Exception) {
-                if (error is kotlinx.coroutines.CancellationException) throw error
-                Log.w(TAG, "Next web chapter failed", error)
-                if (book?.id == target.id) publish(state.copy(message = "Не удалось загрузить следующую главу: ${error.message ?: "нет сети"}"))
             } finally {
+                // Even a crash in toBookChapter or the library must not block later prefetches.
                 fetchingChapter = false
                 growingSource.growing = more && autoLoadsChapters()
                 growingSource.onExhausted = { handler.post { book?.let { prefetchNextWebChapter(it, force = true) } } }

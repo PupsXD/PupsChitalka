@@ -60,9 +60,15 @@ import com.ozvuchka.app.data.SearchHit
 import com.ozvuchka.app.data.chapterProgressOf
 import com.ozvuchka.app.data.searchBook
 import com.ozvuchka.app.importer.FileBookImporter
-import com.ozvuchka.app.importer.WebChapter
+import com.ozvuchka.app.importer.ImportError
+import com.ozvuchka.app.importer.ImportReason
+import com.ozvuchka.app.importer.ImportResult
 import com.ozvuchka.app.importer.WebChapterImporter
+import com.ozvuchka.app.importer.WebImportStage
+import com.ozvuchka.app.importer.WebImportUi
 import com.ozvuchka.app.importer.imageExtension
+import com.ozvuchka.app.importer.retireFinishedWebImport
+import com.ozvuchka.app.importer.siteLabel
 import com.ozvuchka.app.importer.toBookChapter
 import com.ozvuchka.app.speech.BookCasts
 import com.ozvuchka.app.speech.CastMember
@@ -107,6 +113,7 @@ import com.ozvuchka.app.ui.ReaderUiState
 import com.ozvuchka.app.ui.VoiceSettingsActions
 import com.ozvuchka.app.ui.VoiceSettingsSheet
 import com.ozvuchka.app.ui.VoiceSettingsUi
+import com.ozvuchka.app.ui.WebChapterLoadUi
 import com.ozvuchka.app.ui.AppUpdateActions
 import com.ozvuchka.app.ui.appUpdateShown
 import com.ozvuchka.app.update.AppUpdater
@@ -122,6 +129,12 @@ class MainActivity : ComponentActivity() {
     private var currentBook by mutableStateOf<Book?>(null)
     private var importing by mutableStateOf(false)
     private var importProgressText by mutableStateOf("Подготавливаем книгу…")
+    /** Progress of the web import inside the sheet: stages, or a typed failure with a retry. */
+    private var webImport by mutableStateOf<WebImportUi?>(null)
+    /** The book whose next web chapter is loading for the reader's «Загрузить» button. */
+    private var webChapterLoading by mutableStateOf<String?>(null)
+    /** The typed failure of the last next-chapter load, by book, so the reader offers a retry. */
+    private var webChapterError by mutableStateOf<Pair<String, ImportError>?>(null)
     private var notice by mutableStateOf<String?>(null)
     private var narration by mutableStateOf(NarrationController.state.value)
 
@@ -265,6 +278,12 @@ class MainActivity : ComponentActivity() {
                     snackbars.showSnackbar(message)
                 }
             }
+            // A finished web import must not linger: the sheet closes itself on DONE, but a
+            // share-intent import has no sheet, and a stale DONE would instantly close the
+            // import sheet the next time it is opened.
+            LaunchedEffect(webImport?.stage) {
+                retireFinishedWebImport({ webImport?.stage }, { webImport = null }, settleMillis = 1_000)
+            }
             OzvuchkaTheme(darkTheme = dark) {
                 SideEffect {
                     WindowInsetsControllerCompat(window, window.decorView).apply {
@@ -296,6 +315,8 @@ class MainActivity : ComponentActivity() {
                             onListen = ::listenFromLibrary,
                             onImportFile = { openDocument.launch(arrayOf("*/*")) },
                             onImportUrl = ::importUrl,
+                            onDismissWebImport = { webImport = null },
+                            webImport = webImport,
                             onDeleteBook = ::deleteBook,
                             onOpenVoices = { openVoices("ru") },
                             ruVoiceOffer = ruVoiceSetup.takeIf {
@@ -602,7 +623,7 @@ class MainActivity : ComponentActivity() {
                 voiceReady = voice != null && (isUsable(voice) || isUsable(VoiceChoice(VoiceEngine.SUPERTONIC))),
                 voiceLabel = voice?.let(::voiceLabel).orEmpty(),
             ),
-            hasNextWebChapter = chapterIndex == book.chapters.lastIndex && chapter.nextUrl != null,
+            webChapterLoad = webChapterLoadUi(book, chapterIndex, chapter),
             volumeKeysTurnPages = volumeKeysTurnPages,
             keepScreenOn = keepScreenOn,
             highlightWords = highlightWords,
@@ -621,6 +642,23 @@ class MainActivity : ComponentActivity() {
 
     private fun neighbour(index: Int, chapter: Chapter) =
         ChapterContent(index, chapter.title, chapter.paragraphs, chapter.styles, dominantLanguage(chapter.paragraphs))
+
+    /** The tri-state of loading the next web chapter: ready, loading on the site, failed, or nothing. */
+    private fun webChapterLoadUi(book: Book, chapterIndex: Int, chapter: Chapter): WebChapterLoadUi {
+        if (chapterIndex != book.chapters.lastIndex) return WebChapterLoadUi.None
+        val error = webChapterError
+        val loadingSite = if (webChapterLoading == book.id) {
+            siteLabel(chapter.nextUrl.orEmpty()).orEmpty()
+        } else {
+            null
+        }
+        return when {
+            loadingSite != null -> WebChapterLoadUi.Loading(loadingSite)
+            error != null && error.first == book.id && chapter.nextUrl != null -> WebChapterLoadUi.Failed(error.second)
+            chapter.nextUrl != null -> WebChapterLoadUi.Ready
+            else -> WebChapterLoadUi.None
+        }
+    }
 
     private fun isUsable(voice: VoiceChoice): Boolean = when (voice.engine) {
         VoiceEngine.SUPERTONIC -> SpeechModel.SUPERTONIC in installedModels || SpeechModel.SUPERTONIC_FULL in installedModels
@@ -1052,13 +1090,29 @@ class MainActivity : ComponentActivity() {
         prefetchingChapterOf = book.id
         lifecycleScope.launch {
             try {
-                val fetched = WebChapterImporter.importChapter(nextUrl).toBookChapter()
-                val updated = withContext(Dispatchers.IO) { library.appendChapter(book.id, fetched) } ?: return@launch
-                books.indexOfFirst { it.id == book.id }.takeIf { it >= 0 }?.let { index -> books[index] = books[index].copy(chapters = updated.chapters) }
-                currentBook?.takeIf { it.id == book.id }?.let { open -> currentBook = open.copy(chapters = updated.chapters) }
+                when (val result = WebChapterImporter.importChapter(nextUrl)) {
+                    is ImportResult.Success -> {
+                        val fetched = result.chapter.toBookChapter()
+                        // The book has one more chapter again: the old failure is stale.
+                        webChapterError = webChapterError?.takeIf { it.first != book.id }
+                        val updated = withContext(Dispatchers.IO) { library.appendChapter(book.id, fetched) } ?: return@launch
+                        books.indexOfFirst { it.id == book.id }.takeIf { it >= 0 }?.let { index -> books[index] = books[index].copy(chapters = updated.chapters) }
+                        currentBook?.takeIf { it.id == book.id }?.let { open -> currentBook = open.copy(chapters = updated.chapters) }
+                    }
+                    is ImportResult.Failure -> {
+                        // Offline or the site changed: the typed failure stays for the reader's
+                        // «Повторить» button instead of dying in silence.
+                        webChapterError = book.id to result.error
+                    }
+                }
             } catch (error: Exception) {
-                if (error is kotlinx.coroutines.CancellationException) throw error
-                // Offline or the site changed: the «Загрузить» button stays for a manual try.
+                // The design keeps the reader's «Повторить» alive even when the append or the
+                // save itself blows up, instead of crashing the coroutine.
+                webChapterError = book.id to ImportError(
+                    ImportReason.NETWORK,
+                    "Не удалось загрузить главу: ${error.message ?: "неизвестная ошибка"}",
+                    retryable = true,
+                )
             } finally {
                 prefetchingChapterOf = null
             }
@@ -1176,36 +1230,51 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun importUrl(url: String) {
-        if (importing) return
-        importing = true
-        importProgressText = "Загружаем главу…"
+        if (webImport?.isActive == true) return
+        val site = siteLabel(url).orEmpty()
+        webImport = WebImportUi(WebImportStage.CONNECTING, url, site)
         lifecycleScope.launch {
             try {
-                val chapter = WebChapterImporter.importChapter(url)
-                val existing = books.firstOrNull { book ->
-                    book.chapters.any { it.sourceUrl == chapter.sourceUrl }
+                val result = WebChapterImporter.importChapter(url) { stage ->
+                    webImport = webImport?.copy(stage = stage)
                 }
-                if (existing != null) {
-                    openBook(existing.id)
-                } else {
-                    val titleParts = chapter.title.split(" | ", limit = 2)
-                    val bookTitle = titleParts.getOrNull(1)?.trim().orEmpty().ifBlank { chapter.title }
-                    val book = Book(
-                        title = bookTitle,
-                        format = "web",
-                        source = chapter.sourceUrl,
-                        chapters = listOf(chapter.toBookChapter()),
-                        lastOpenedAt = System.currentTimeMillis(),
-                    )
-                    withContext(Dispatchers.IO) { library.save(book) }
-                    books.add(0, book)
-                    currentBook = book
+                when (result) {
+                    is ImportResult.Failure -> {
+                        // The sheet shows the typed error; a share-intent import has no sheet,
+                        // so the snackbar keeps the failure visible in every case.
+                        webImport = WebImportUi(WebImportStage.FAILED, url, site, error = result.error)
+                        notice = "Не удалось добавить главу: ${result.error.hint}"
+                    }
+                    is ImportResult.Success -> {
+                        val chapter = result.chapter
+                        webImport = webImport?.copy(stage = WebImportStage.SAVING)
+                        val existing = books.firstOrNull { book ->
+                            book.chapters.any { it.sourceUrl == chapter.sourceUrl }
+                        }
+                        if (existing != null) {
+                            openBook(existing.id)
+                        } else {
+                            val titleParts = chapter.title.split(" | ", limit = 2)
+                            val bookTitle = titleParts.getOrNull(1)?.trim().orEmpty().ifBlank { chapter.title }
+                            val book = Book(
+                                title = bookTitle,
+                                format = "web",
+                                source = chapter.sourceUrl,
+                                chapters = listOf(chapter.toBookChapter()),
+                                lastOpenedAt = System.currentTimeMillis(),
+                            )
+                            withContext(Dispatchers.IO) { library.save(book) }
+                            books.add(0, book)
+                            currentBook = book
+                        }
+                        webImport = webImport?.copy(stage = WebImportStage.DONE)
+                    }
                 }
             } catch (error: Exception) {
-                notice = "Не удалось добавить главу: ${error.message ?: "неизвестная ошибка"}"
-            } finally {
-                importing = false
-                importProgressText = "Подготавливаем книгу…"
+                // A crashed save must not leave the import hanging in SAVING and blocking the next.
+                val crash = ImportError(ImportReason.NETWORK, "Не удалось загрузить главу: ${error.message ?: "неизвестная ошибка"}", retryable = true)
+                webImport = WebImportUi(WebImportStage.FAILED, url, site, error = crash)
+                notice = crash.hint
             }
         }
     }
@@ -1214,29 +1283,44 @@ class MainActivity : ComponentActivity() {
         val book = currentBook ?: return
         val nextUrl = book.chapters.lastOrNull()?.nextUrl ?: return
         // The chapter is already on its way; the reader moves into it when it arrives.
-        if (importing || prefetchingChapterOf == book.id) return
-        importing = true
-        importProgressText = "Загружаем следующую главу…"
+        if (webChapterLoading == book.id || prefetchingChapterOf == book.id) return
+        webChapterError = webChapterError?.takeIf { it.first != book.id }
+        webChapterLoading = book.id
+        val site = siteLabel(nextUrl).orEmpty()
         lifecycleScope.launch {
             try {
-                val next = WebChapterImporter.importChapter(nextUrl)
-                if (book.chapters.any { it.sourceUrl == next.sourceUrl }) {
-                    notice = "Эта глава уже есть в книге"
-                } else {
-                    val updated = book.copy(
-                        chapters = book.chapters + next.toBookChapter(),
-                        currentChapter = book.chapters.size,
-                        chapterProgress = 0f,
-                    )
-                    withContext(Dispatchers.IO) { library.save(updated) }
-                    replaceBook(updated)
-                    currentBook = updated
+                val result = WebChapterImporter.importChapter(nextUrl)
+                when (result) {
+                    is ImportResult.Failure -> {
+                        webChapterError = book.id to result.error
+                        notice = "Не удалось загрузить следующую главу: ${result.error.hint}"
+                    }
+                    is ImportResult.Success -> {
+                        val next = result.chapter
+                        if (book.chapters.any { it.sourceUrl == next.sourceUrl }) {
+                            notice = "Эта глава уже есть в книге"
+                        } else {
+                            val updated = book.copy(
+                                chapters = book.chapters + next.toBookChapter(),
+                                currentChapter = book.chapters.size,
+                                chapterProgress = 0f,
+                            )
+                            withContext(Dispatchers.IO) { library.save(updated) }
+                            replaceBook(updated)
+                            currentBook = updated
+                        }
+                    }
                 }
             } catch (error: Exception) {
-                notice = "Не удалось загрузить следующую главу: ${error.message ?: "ошибка сети"}"
+                // A crashed save must not leave the button forever in Loading: show the typed
+                // failure and let «Повторить» run again.
+                webChapterError = book.id to ImportError(
+                    ImportReason.NETWORK,
+                    "Не удалось загрузить главу: ${error.message ?: "неизвестная ошибка"}",
+                    retryable = true,
+                )
             } finally {
-                importing = false
-                importProgressText = "Подготавливаем книгу…"
+                webChapterLoading = null
             }
         }
     }
