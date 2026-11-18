@@ -1,12 +1,14 @@
 package com.ozvuchka.app.speech
 
 import java.io.File
+import java.io.RandomAccessFile
 import java.nio.file.Files
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 /**
@@ -87,12 +89,130 @@ class KokoroRuTest {
         assertEquals(SpeechModel.KOKORO_RU, KokoroRu.speechModelFor(KokoroRu.MASHA))
         assertEquals(listOf("voices/dima.bin"), KokoroRu.packs(SpeechModel.KOKORO_RU_DIMA))
         // sherpa-onnx numbers the speakers of a file from zero: dima is the only one in his.
-        assertEquals(0, KokoroRu.localSpeaker(SpeechModel.KOKORO_RU_DIMA, KokoroRu.DIMA))
-        assertEquals(1, KokoroRu.localSpeaker(SpeechModel.KOKORO_RU, KokoroRu.MASHA))
+        assertEquals(0, KokoroRu.speakerIn(SpeechModel.KOKORO_RU_DIMA, KokoroRu.DIMA))
+        assertEquals(KokoroRu.MASHA, KokoroRu.speakerIn(SpeechModel.KOKORO_RU, KokoroRu.MASHA))
         assertTrue(KokoroRu.isMale(KokoroRu.DIMA))
         assertFalse(KokoroRu.isMale(KokoroRu.SVETA))
         assertFalse(KokoroRu.isMale(KokoroRu.MASHA))
         assertEquals(SpeechModel.KOKORO_RU_DIMA, KokoroRu.speechModelFor(VoiceChoice(VoiceEngine.KOKORO_RU, KokoroRu.DIMA).speaker))
+    }
+
+    @Test
+    fun aNarrationReadsEveryLineWithTheNarratorsCheckpoint() {
+        // One checkpoint is 326 MB: sveta and masha share the base file, dima has his own, and a
+        // session takes the narrator's. The other voice is refused instead of reloading per line.
+        assertEquals(SpeechModel.KOKORO_RU, KokoroRu.checkpointFor(KokoroRu.SVETA))
+        assertEquals(SpeechModel.KOKORO_RU, KokoroRu.checkpointFor(KokoroRu.MASHA))
+        assertEquals(SpeechModel.KOKORO_RU_DIMA, KokoroRu.checkpointFor(KokoroRu.DIMA))
+        val base = KokoroRu.checkpointFor(KokoroRu.SVETA)
+        assertEquals(KokoroRu.SVETA, KokoroRu.speakerIn(base, KokoroRu.SVETA))
+        assertEquals(KokoroRu.MASHA, KokoroRu.speakerIn(base, KokoroRu.MASHA))
+        assertNull(KokoroRu.speakerIn(base, KokoroRu.DIMA))
+        val dima = KokoroRu.checkpointFor(KokoroRu.DIMA)
+        assertEquals(0, KokoroRu.speakerIn(dima, KokoroRu.DIMA))
+        assertNull(KokoroRu.speakerIn(dima, KokoroRu.SVETA))
+    }
+
+    @Test
+    fun theRoleListOfADialogueHoldsOnlyTheNarratorsCheckpoint() {
+        val both = setOf(SpeechModel.KOKORO_RU, SpeechModel.KOKORO_RU_DIMA)
+        // Sveta narrates: masha is a second role voice, dima belongs to the other 326 MB file.
+        assertEquals(
+            listOf(KokoroRu.SVETA, KokoroRu.MASHA),
+            VoiceCatalog.kokoroRuRoleVoices(KokoroRu.SVETA, both).map { it.choice.speaker },
+        )
+        // Dima narrates: he is the only voice his own file reads.
+        assertEquals(
+            listOf(KokoroRu.DIMA),
+            VoiceCatalog.kokoroRuRoleVoices(KokoroRu.DIMA, both).map { it.choice.speaker },
+        )
+        // One download only: the list follows what the narrator's file offers.
+        assertEquals(
+            listOf(KokoroRu.SVETA, KokoroRu.MASHA),
+            VoiceCatalog.kokoroRuRoleVoices(KokoroRu.SVETA, setOf(SpeechModel.KOKORO_RU)).map { it.choice.speaker },
+        )
+        assertTrue(VoiceCatalog.kokoroRuRoleVoices(KokoroRu.SVETA, setOf(SpeechModel.KOKORO_RU_DIMA)).isEmpty())
+    }
+
+    @Test
+    fun aTruncatedVoicePackFailsTheInstallInsteadOfEndingTheProcess() {
+        val directory = Files.createTempDirectory("kokoro-ru").toFile()
+        try {
+            // sveta came down four bytes short: sherpa-onnx's Init sees voices_len / 4 != 510*256*2
+            // and calls SHERPA_ONNX_EXIT(-1), which is _Exit and takes the whole process with it.
+            File(directory, "voices/sveta.bin").apply { parentFile.mkdirs() }.writeBytes(ByteArray(STYLE_BYTES - 4))
+            File(directory, "voices/masha.bin").apply { parentFile.mkdirs() }.writeBytes(ByteArray(STYLE_BYTES))
+            File(directory, KokoroRu.CONFIG).writeText(config)
+            File(directory, KokoroRu.BASE_MODEL).apply { parentFile.mkdirs() }.writeBytes(FAKE_MODEL)
+            try {
+                KokoroRu.prepare(directory, SpeechModel.KOKORO_RU)
+                fail("a truncated style pack was accepted")
+            } catch (error: IllegalArgumentException) {
+                assertTrue("${error.message}", error.message.orEmpty().contains("sveta.bin"))
+            }
+            // The voiced file was not built from the broken pack.
+            assertFalse(File(directory, KokoroRu.VOICES).exists())
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aCheckpointBelowTheSizeOfAModelIsRefused() {
+        val file = File.createTempFile("kokoro", ".onnx")
+        try {
+            file.writeBytes(ByteArray(1 shl 10))
+            try {
+                KokoroRu.requireCheckpoint(file)
+                fail("a kilobyte was accepted as a 326 MB checkpoint")
+            } catch (error: IllegalArgumentException) {
+                assertTrue("${error.message}", error.message.orEmpty().contains("не полностью"))
+            }
+            RandomAccessFile(file, "rw").use { it.setLength(KokoroRu.MIN_CHECKPOINT_BYTES) }
+            KokoroRu.requireCheckpoint(file)
+        } finally {
+            file.delete()
+        }
+    }
+
+    @Test
+    fun preparingTwiceLeavesTheSameFiles() {
+        val directory = Files.createTempDirectory("kokoro-ru").toFile()
+        try {
+            KokoroRu.packs(SpeechModel.KOKORO_RU).forEach { name ->
+                File(directory, name).apply { parentFile.mkdirs() }.writeBytes(ByteArray(STYLE_BYTES))
+            }
+            File(directory, KokoroRu.CONFIG).writeText(config)
+            File(directory, KokoroRu.BASE_MODEL).apply { parentFile.mkdirs() }.writeBytes(FAKE_MODEL)
+            KokoroRu.prepare(directory, SpeechModel.KOKORO_RU)
+            val voices = File(directory, KokoroRu.VOICES).readBytes()
+            val metadata = KokoroOnnxMetadata.read(File(directory, KokoroRu.BASE_MODEL))
+            KokoroRu.prepare(directory, SpeechModel.KOKORO_RU)
+            assertArrayEquals(voices, File(directory, KokoroRu.VOICES).readBytes())
+            assertEquals(metadata, KokoroOnnxMetadata.read(File(directory, KokoroRu.BASE_MODEL)))
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aDownloadWithoutConfigIsNotPrepared() {
+        val directory = Files.createTempDirectory("kokoro-ru").toFile()
+        try {
+            KokoroRu.packs(SpeechModel.KOKORO_RU).forEach { name ->
+                File(directory, name).apply { parentFile.mkdirs() }.writeBytes(ByteArray(STYLE_BYTES))
+            }
+            File(directory, KokoroRu.BASE_MODEL).apply { parentFile.mkdirs() }.writeBytes(FAKE_MODEL)
+            try {
+                KokoroRu.prepare(directory, SpeechModel.KOKORO_RU)
+                fail("a download without config.json was prepared")
+            } catch (_: java.io.FileNotFoundException) {
+                // The install reports the failure; nothing in the picker is offered as usable.
+            }
+            assertFalse(File(directory, KokoroRu.TOKENS).exists())
+        } finally {
+            directory.deleteRecursively()
+        }
     }
 
     @Test
@@ -111,8 +231,14 @@ class KokoroRuTest {
             assertTrue(model.sizeLabel.contains("МБ"))
             assertTrue(model.isKokoroRu)
         }
-        // The male voice reuses the first download's espeak-ng data instead of fetching it again.
-        assertEquals("kokoro-ru-sveta-masha", (SpeechModel.KOKORO_RU_DIMA.source as ModelSource.Files).copiedFrom)
+        // Each checkpoint is a download of its own: dima fetches his own config and espeak-ng data
+        // (under a megabyte) instead of pulling the 330 MB sveta-and-masha file for them.
+        val dima = SpeechModel.KOKORO_RU_DIMA.source as ModelSource.Files
+        assertNull(dima.copiedFrom)
+        assertTrue(KokoroRu.CONFIG in dima.names)
+        assertTrue("${KokoroRu.ESPEAK_DIR}/ru_dict" in dima.names)
+        // 326 MB of weights, half a megabyte of style, and the espeak-ng data: not 660 MB.
+        assertTrue(dima.totalBytes in 320_000_000L..340_000_000L)
         assertNull((SpeechModel.KOKORO_RU.source as ModelSource.Files).copiedFrom)
     }
 

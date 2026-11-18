@@ -95,6 +95,17 @@ object VoiceCatalog {
 
     fun kokoroRuIsMale(speaker: Int): Boolean = KokoroRu.isMale(speaker)
 
+    /**
+     * The Kokoro RU voices that can read characters' lines under a narrator of [narratorSpeaker]: the
+     * ones its checkpoint reads. The other download is a second 326 MB model in memory, so a dialogue
+     * never mixes Sveta's file with dima's — dima is offered when he is the narrator, not as a role.
+     */
+    fun kokoroRuRoleVoices(narratorSpeaker: Int, installed: Set<SpeechModel>): List<VoicePreset> {
+        val checkpoint = KokoroRu.checkpointFor(narratorSpeaker)
+        if (checkpoint !in installed) return emptyList()
+        return kokoroRu.filter { KokoroRu.checkpointFor(it.choice.speaker) == checkpoint }
+    }
+
     const val VOSK_SPEAKERS = 57
 
     /**

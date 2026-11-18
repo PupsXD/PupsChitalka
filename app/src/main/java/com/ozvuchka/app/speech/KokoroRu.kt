@@ -13,6 +13,10 @@ import java.io.InputStream
  * phoneme ids, so Russian words are phonemized by espeak-ng inside sherpa-onnx, and the file set
  * here is exactly what makes that work on a phone.
  *
+ * The two checkpoints are 326 MB each, so a narration keeps one of them in memory — the narrator's —
+ * and reads characters' lines with that one: [checkpointFor] and [speakerIn] decide, and a voice of
+ * the other download is voiced by another engine rather than by reloading a model per line.
+ *
  * Two things the upstream ONNX export lacks, and this object adds on install:
  * - the metadata sherpa-onnx reads (sample rate, speaker count, that espeak-ng phonemizes);
  * - a `tokens.txt` built from the model's own vocabulary, with the four symbols espeak-ng emits for
@@ -40,6 +44,10 @@ internal object KokoroRu {
     /** Voice packs of the model: one style vector per phoneme count, 510 rows of 256 floats. */
     const val STYLE_ROWS = 510
     const val STYLE_DIM = 256
+    const val PACK_BYTES = STYLE_ROWS.toLong() * STYLE_DIM * 4
+
+    /** Below this a checkpoint is a truncated download rather than a model. */
+    const val MIN_CHECKPOINT_BYTES = 300L * 1024 * 1024
 
     /** The espeak-ng data Russian needs; the upstream tree carries a dictionary for every language. */
     val espeakFiles: List<String> = listOf(
@@ -57,13 +65,37 @@ internal object KokoroRu {
     fun speechModelFor(speaker: Int): SpeechModel =
         if (speaker == DIMA) SpeechModel.KOKORO_RU_DIMA else SpeechModel.KOKORO_RU
 
+    /**
+     * The checkpoint a narration reads every Kokoro RU voice with: the narrator's. Two fp32
+     * checkpoints are 660 MB of native memory together, more than the app may spend on speech, so a
+     * session takes one of them and a voice from the other download is left to another engine.
+     */
+    fun checkpointFor(narrator: Int): SpeechModel = speechModelFor(narrator)
+
+    /**
+     * [speaker] in the numbering of [model]'s own voices.bin, or null when the voice's style pack
+     * lives in the other checkpoint — reading it with this one needs a 326 MB reload. Nothing clamps
+     * a voice into the wrong checkpoint: a man's lines are not read by masha.
+     */
+    fun speakerIn(model: SpeechModel, speaker: Int): Int? = when {
+        model == SpeechModel.KOKORO_RU_DIMA -> if (speaker == DIMA) 0 else null
+        speaker == SVETA || speaker == MASHA -> speaker
+        else -> null
+    }
+
     fun modelFile(model: SpeechModel): String = if (model == SpeechModel.KOKORO_RU_DIMA) DIMA_MODEL else BASE_MODEL
 
-    /** [speaker] in the numbering of [model]'s own voices.bin. */
-    fun localSpeaker(model: SpeechModel, speaker: Int): Int =
-        if (model == SpeechModel.KOKORO_RU_DIMA) 0 else speaker.coerceIn(SVETA, MASHA)
-
     fun isMale(speaker: Int): Boolean = speaker == DIMA
+
+    /**
+     * A checkpoint that came down cut short is not a model: sherpa-onnx reads the whole graph in its
+     * loader and ends the process when the ONNX is broken.
+     */
+    fun requireCheckpoint(file: File) {
+        require(file.length() >= MIN_CHECKPOINT_BYTES) {
+            "Модель скачалась не полностью: ${file.length()} байт вместо $MIN_CHECKPOINT_BYTES"
+        }
+    }
 
     /**
      * Turns the downloaded files into what sherpa-onnx loads: `voices.bin` (the style packs one after
@@ -71,11 +103,19 @@ internal object KokoroRu {
      */
     fun prepare(directory: File, model: SpeechModel) {
         val files = packs(model).map { File(directory, it) }
+        // sherpa-onnx checks voices_len / 4 == 510 * 256 * n_speakers during Init and calls
+        // SHERPA_ONNX_EXIT(-1), which is _Exit: a style pack cut short must fail the install here.
+        files.forEach { pack ->
+            require(pack.length() == PACK_BYTES) {
+                "Голос ${pack.name.substringAfterLast('/')} скачался не полностью: " +
+                    "${pack.length()} байт вместо $PACK_BYTES"
+            }
+        }
+        val speakers = files.size
         val voices = File(directory, VOICES)
         voices.outputStream().buffered().use { sink ->
             files.forEach { pack -> pack.inputStream().use { it.copyTo(sink) } }
         }
-        val speakers = (voices.length() / (STYLE_ROWS.toLong() * STYLE_DIM * 4)).toInt().coerceAtLeast(1)
         File(directory, TOKENS).writeText(KokoroRuTokens.build(File(directory, CONFIG).readText()))
         KokoroOnnxMetadata.ensure(
             File(directory, modelFile(model)),

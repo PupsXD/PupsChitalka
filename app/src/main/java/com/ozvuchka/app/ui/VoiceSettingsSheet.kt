@@ -412,7 +412,8 @@ private fun EngineVoices(state: VoiceSettingsUi, language: String, selected: Voi
             badge = "тест",
             description = "Русская версия Kokoro на 82 млн параметров: живая интонация и мягкие переходы, " +
                 "ударения по словарю на 2 млн слов. Свэта и Маша — один файл модели, Дима — отдельный, " +
-                "скачивается вторым. Читает рассказчика; реплики можно оставить на RuVoice.",
+                "каждый около 330 МБ. В памяти держится файл рассказчика, и роли читает он же: выбрать " +
+                "Диму для мужских ролей при рассказчике Свэте нельзя.",
             models = listOf(SpeechModel.KOKORO_RU, SpeechModel.KOKORO_RU_DIMA),
             presets = VoiceCatalog.kokoroRu.filter { preset ->
                 KokoroRu.speechModelFor(preset.choice.speaker) in state.installedModels
@@ -609,8 +610,17 @@ private fun ModelStatusRow(model: SpeechModel, suggested: Boolean, state: VoiceS
     }
 }
 
-/** Character voices come from the narrator's engine, so a scene never jumps between synthesizers. */
-private fun characterVoices(state: VoiceSettingsUi, language: String, narrator: VoiceChoice): List<RoleVoice> =
+/**
+ * Character voices come from the narrator's engine, so a scene never jumps between synthesizers.
+ * Under Kokoro RU the list is the narrator's checkpoint ([forNarrator] widens it back to every
+ * installed voice, for the narrator's own picker).
+ */
+private fun characterVoices(
+    state: VoiceSettingsUi,
+    language: String,
+    narrator: VoiceChoice,
+    forNarrator: Boolean = false,
+): List<RoleVoice> =
     when (narrator.engine) {
         VoiceEngine.SUPERTONIC -> VoiceCatalog.supertonic.map {
             RoleVoice(it.choice, it.title, if (it.choice.speaker < 5) SpeechRole.FEMALE else SpeechRole.MALE)
@@ -623,9 +633,13 @@ private fun characterVoices(state: VoiceSettingsUi, language: String, narrator: 
             }
             RoleVoice(it.choice, "${it.title} · ${it.description}", gender)
         }
-        VoiceEngine.KOKORO_RU -> VoiceCatalog.kokoroRu
-            .filter { KokoroRu.speechModelFor(it.choice.speaker) in state.installedModels }
-            .map {
+        VoiceEngine.KOKORO_RU -> {
+            val presets = if (forNarrator) {
+                VoiceCatalog.kokoroRu.filter { KokoroRu.speechModelFor(it.choice.speaker) in state.installedModels }
+            } else {
+                VoiceCatalog.kokoroRuRoleVoices(narrator.speaker, state.installedModels)
+            }
+            presets.map {
                 val male = VoiceCatalog.kokoroRuIsMale(it.choice.speaker)
                 RoleVoice(
                     it.choice,
@@ -633,6 +647,7 @@ private fun characterVoices(state: VoiceSettingsUi, language: String, narrator: 
                     if (male) SpeechRole.MALE else SpeechRole.FEMALE,
                 )
             }
+        }
         VoiceEngine.VOSK -> VoiceCatalog.vosk.map {
             RoleVoice(it.choice, it.title, if (VoiceCatalog.voskIsMale(it.choice.speaker)) SpeechRole.MALE else SpeechRole.FEMALE)
         }
@@ -765,11 +780,14 @@ private fun DialogueVoicesCard(state: VoiceSettingsUi, language: String, narrato
             "female" -> dialogue.female
             else -> dialogue.single
         }
-        // The narrator may also stay with the engine's own default voice.
-        val pickable = if (slot == "narrator" && narrator.engine == VoiceEngine.SYSTEM) {
-            listOf(RoleVoice(VoiceChoice(VoiceEngine.SYSTEM, enginePackage = narrator.enginePackage), "По умолчанию", null)) + options
-        } else {
-            options
+        // The narrator may also stay with the engine's own default voice; under a Kokoro RU narrator
+        // the other checkpoint is offered too, because choosing it is what switches the one file a
+        // narration keeps in memory.
+        val pickable = when {
+            slot != "narrator" -> options
+            narrator.engine == VoiceEngine.SYSTEM ->
+                listOf(RoleVoice(VoiceChoice(VoiceEngine.SYSTEM, enginePackage = narrator.enginePackage), "По умолчанию", null)) + options
+            else -> characterVoices(state, language, narrator, forNarrator = true)
         }
         /** Where a voice is already heard, so the reader sees which choices would sound alike. */
         fun usedBy(choice: VoiceChoice): String? = when {

@@ -2,6 +2,7 @@ package com.ozvuchka.app.speech
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -72,6 +73,22 @@ class VoiceRoutingTest {
         assertEquals(ruVoice, narratorFor(settings, "ru", SpeechRole.FEMALE))
         // English lines read by the same cast settings are untouched: English has its own cast.
         assertEquals(heart, narratorFor(settings, "en", SpeechRole.MALE))
+    }
+
+    @Test
+    fun dimaIsNotARoleVoiceUnderSveta() {
+        // Sveta and dima are two 326 MB checkpoints. A narration keeps the narrator's one, so a dima
+        // line under Sveta is not read by an engine that would have to reload the model for it: the
+        // player falls back to another engine, and the picker does not offer the pair (Voices.kt).
+        val settings = settings(russianDialogue = DialogueVoices(DialogueMode.BY_GENDER, male = dima))
+        val maleLine = narratorFor(settings, "ru", SpeechRole.MALE)
+        assertEquals(dima, maleLine)
+        assertNull(KokoroRu.speakerIn(KokoroRu.checkpointFor(settings.russianVoice.speaker), maleLine.speaker))
+        // The reverse pair is refused too: dima's file has no female voice to read with.
+        val dimaNarrates = settings(russian = dima)
+        assertNull(KokoroRu.speakerIn(KokoroRu.checkpointFor(dimaNarrates.russianVoice.speaker), sveta.speaker))
+        // Masha shares sveta's checkpoint, so this one needs no second download.
+        assertEquals(KokoroRu.MASHA, KokoroRu.speakerIn(KokoroRu.checkpointFor(KokoroRu.SVETA), KokoroRu.MASHA))
     }
 
     @Test

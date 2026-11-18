@@ -93,7 +93,7 @@ enum class SpeechModel(
             baseUrl = "https://huggingface.co/zaakirio/kokoro-ru/resolve/main",
             names = listOf(KokoroRu.BASE_MODEL, "voices/sveta.bin", "voices/masha.bin", KokoroRu.CONFIG) +
                 KokoroRu.espeakFiles.map { "${KokoroRu.ESPEAK_DIR}/$it" },
-            totalBytes = 340L * 1024 * 1024,
+            totalBytes = 328_000_000L,
         ),
         requiredFiles = listOf(
             KokoroRu.BASE_MODEL, KokoroRu.VOICES, KokoroRu.TOKENS, KokoroRu.CONFIG,
@@ -105,10 +105,11 @@ enum class SpeechModel(
         sizeLabel = "≈ 330 МБ",
         source = ModelSource.Files(
             baseUrl = "https://huggingface.co/zaakirio/kokoro-ru/resolve/main",
-            names = listOf(KokoroRu.DIMA_MODEL, "voices/dima.bin"),
-            copiedFrom = "kokoro-ru-sveta-masha",
-            copiedNames = listOf(KokoroRu.CONFIG) + KokoroRu.espeakFiles.map { "${KokoroRu.ESPEAK_DIR}/$it" },
-            totalBytes = 340L * 1024 * 1024,
+            // A download of its own: config.json and the espeak-ng data are under a megabyte in the same
+            // repository, so dima no longer pulls the 330 MB sveta-and-masha checkpoint for them.
+            names = listOf(KokoroRu.DIMA_MODEL, "voices/dima.bin", KokoroRu.CONFIG) +
+                KokoroRu.espeakFiles.map { "${KokoroRu.ESPEAK_DIR}/$it" },
+            totalBytes = 328_000_000L,
         ),
         requiredFiles = listOf(KokoroRu.DIMA_MODEL, KokoroRu.VOICES, KokoroRu.TOKENS, KokoroRu.CONFIG) +
             KokoroRu.espeakFiles.map { "${KokoroRu.ESPEAK_DIR}/$it" },
@@ -181,6 +182,9 @@ object SpeechModels {
     private val activeConnection = AtomicReference<HttpURLConnection?>(null)
     @Volatile private var activeModel: SpeechModel? = null
 
+    /** The download the user asked for, while a model it needs is being fetched first. */
+    @Volatile private var activeRequest: SpeechModel? = null
+
     fun root(context: Context): File = File(context.applicationContext.filesDir, "speech_models")
 
     fun directory(context: Context, model: SpeechModel): File = File(root(context), model.directoryName)
@@ -198,20 +202,18 @@ object SpeechModels {
     fun install(context: Context, model: SpeechModel) {
         val app = context.applicationContext
         if (isInstalled(app, model) || isBusy(model)) return
-        cancelled.remove(model)
+        // A retry also retries the download this one is fetched with.
+        (listOf(model) + prerequisites(model)).forEach { cancelled.remove(it) }
         publish(ModelInstallState(model, ModelInstallState.Stage.QUEUED))
         worker.execute {
+            activeRequest = model
             if (model in cancelled) {
                 publish(ModelInstallState(model, ModelInstallState.Stage.CANCELLED))
                 return@execute
             }
             try {
-                if (model == SpeechModel.SUPERTONIC_FULL && !isInstalled(app, SpeechModel.SUPERTONIC)) {
-                    installNow(app, SpeechModel.SUPERTONIC)
-                }
-                // Either Russian Kokoro download reuses the other's espeak-ng data.
-                if (model == SpeechModel.KOKORO_RU_DIMA && !isInstalled(app, SpeechModel.KOKORO_RU)) {
-                    installNow(app, SpeechModel.KOKORO_RU)
+                prerequisites(model).filterNot { isInstalled(app, it) }.forEach { needed ->
+                    installNow(app, needed, request = model)
                 }
                 installNow(app, model)
                 publish(ModelInstallState(model, ModelInstallState.Stage.DONE))
@@ -231,13 +233,21 @@ object SpeechModels {
             } finally {
                 activeConnection.set(null)
                 activeModel = null
+                activeRequest = null
             }
         }
     }
 
+    /** Downloads [model] cannot work without. */
+    private fun prerequisites(model: SpeechModel): List<SpeechModel> = when (model) {
+        SpeechModel.SUPERTONIC_FULL -> listOf(SpeechModel.SUPERTONIC)
+        else -> emptyList()
+    }
+
     fun cancel(model: SpeechModel) {
         cancelled += model
-        if (activeModel == model) activeConnection.get()?.disconnect()
+        // The model on the wire may be one this download is fetching first; the request stops it too.
+        if (activeModel == model || activeRequest == model) activeConnection.get()?.disconnect()
     }
 
     /** Removes an installed model. Partial downloads are kept only while an install is queued. */
@@ -258,11 +268,12 @@ object SpeechModels {
         mutableStates.value = mutableStates.value + (state.model to state)
     }
 
-    private fun checkCancelled(model: SpeechModel) {
-        if (model in cancelled) throw InstallCancelled()
+    /** Stops when [model] itself or the download that asked for it was cancelled. */
+    private fun checkCancelled(model: SpeechModel, request: SpeechModel = model) {
+        if (model in cancelled || request in cancelled) throw InstallCancelled()
     }
 
-    private fun installNow(context: Context, model: SpeechModel) {
+    private fun installNow(context: Context, model: SpeechModel, request: SpeechModel = model) {
         if (isInstalled(context, model)) return
         activeModel = model
         val root = root(context)
@@ -275,16 +286,16 @@ object SpeechModels {
             when (val source = model.source) {
                 is ModelSource.Archive -> {
                     val archive = File(root, "${model.directoryName}.part")
-                    download(model, source.url, archive, maxBytes = 900L * 1024 * 1024, progressTotal = null)
-                    extract(model, archive, staging)
+                    download(model, source.url, archive, maxBytes = 900L * 1024 * 1024, progressTotal = null, request = request)
+                    extract(model, archive, staging, request)
                     archive.delete()
                 }
                 is ModelSource.Zip -> {
                     val archive = File(root, "${model.directoryName}.part")
-                    download(model, source.url, archive, maxBytes = 900L * 1024 * 1024, progressTotal = null)
-                    extractZip(model, source, archive, staging)
+                    download(model, source.url, archive, maxBytes = 900L * 1024 * 1024, progressTotal = null, request = request)
+                    extractZip(model, source, archive, staging, request)
                     archive.delete()
-                    if (model == SpeechModel.VOSK) prepareVosk(model, staging)
+                    if (model == SpeechModel.VOSK) prepareVosk(model, staging, request)
                 }
                 is ModelSource.Files -> {
                     source.copiedFrom?.let { from ->
@@ -297,23 +308,40 @@ object SpeechModels {
                     }
                     var completed = 0L
                     source.names.forEach { name ->
-                        checkCancelled(model)
+                        checkCancelled(model, request)
                         val file = File(staging, name)
                         file.parentFile?.mkdirs()
                         completed += download(
                             model, "${source.baseUrl}/$name?download=true", file,
                             maxBytes = 400L * 1024 * 1024, progressTotal = source.totalBytes, offset = completed,
+                            request = request,
                         )
                     }
-                    if (model.isKokoroRu) prepareKokoroRu(model, staging)
+                    if (model.isKokoroRu) prepareKokoroRu(model, staging, request)
                 }
             }
-            checkCancelled(model)
+            checkCancelled(model, request)
             check(model.requiredFiles.all { File(staging, it).length() > 0 }) { "Модель загружена не полностью" }
             if (target.exists()) check(deleteOwned(root, target)) { "Не удалось заменить повреждённую модель" }
             check(staging.renameTo(target)) { "Не удалось завершить установку" }
-            // A model installed as another's prerequisite (the base Kokoro RU before dima) is done too.
+            // A model installed as another's prerequisite (the base Supertonic before the full one) is done too.
             publish(ModelInstallState(model, ModelInstallState.Stage.DONE))
+        } catch (error: InstallCancelled) {
+            // Nobody may be left in «Загрузка…»: the row of the model that was on the wire returns to
+            // «Скачать» as well as the row the user pressed «Отмена» on.
+            publish(ModelInstallState(model, ModelInstallState.Stage.CANCELLED, message = "Загрузка отменена"))
+            throw error
+        } catch (error: Exception) {
+            // The same for a failure: a prerequisite that broke must not read «Загрузка…» forever.
+            if (model != request) {
+                publish(
+                    ModelInstallState(
+                        model, ModelInstallState.Stage.FAILED,
+                        message = "Не удалось загрузить ${model.title}: ${error.message ?: "ошибка сети"}",
+                    )
+                )
+            }
+            throw error
         } finally {
             if (staging.exists()) deleteOwned(root, staging)
         }
@@ -327,11 +355,12 @@ object SpeechModels {
         maxBytes: Long,
         progressTotal: Long?,
         offset: Long = 0,
-    ): Long = downloadResumable(url, file, maxBytes, activeConnection, checkCancelled = { checkCancelled(model) }) { bytes, total ->
+        request: SpeechModel = model,
+    ): Long = downloadResumable(url, file, maxBytes, activeConnection, checkCancelled = { checkCancelled(model, request) }) { bytes, total ->
         publish(ModelInstallState(model, ModelInstallState.Stage.DOWNLOADING, offset + bytes, progressTotal ?: total))
     }
 
-    private fun extract(model: SpeechModel, archive: File, staging: File) {
+    private fun extract(model: SpeechModel, archive: File, staging: File, request: SpeechModel = model) {
         publish(ModelInstallState(model, ModelInstallState.Stage.EXTRACTING, 0, archive.length()))
         val buffer = ByteArray(256 * 1024)
         var totalBytes = 0L
@@ -340,7 +369,7 @@ object SpeechModels {
             TarArchiveInputStream(bz2).use { tar ->
                 var lastReport = 0L
                 while (true) {
-                    checkCancelled(model)
+                    checkCancelled(model, request)
                     @Suppress("DEPRECATION")
                     val entry = tar.nextTarEntry ?: break
                     val name = entry.name.replace('\\', '/')
@@ -366,7 +395,7 @@ object SpeechModels {
                     var written = 0L
                     BufferedOutputStream(FileOutputStream(output)).use { sink ->
                         while (written < entry.size) {
-                            checkCancelled(model)
+                            checkCancelled(model, request)
                             val count = tar.read(buffer, 0, minOf(buffer.size.toLong(), entry.size - written).toInt())
                             check(count > 0) { "файл модели повреждён: $relative" }
                             sink.write(buffer, 0, count)
@@ -384,10 +413,10 @@ object SpeechModels {
     }
 
     /** The dictionary index, and the decoder cut to 5 steps; if the model is not as expected, the original stays. */
-    private fun prepareVosk(model: SpeechModel, staging: File) {
+    private fun prepareVosk(model: SpeechModel, staging: File, request: SpeechModel = model) {
         publish(ModelInstallState(model, ModelInstallState.Stage.EXTRACTING, message = "Готовим словарь"))
         VoskDictionary.buildIndex(File(staging, "dictionary"), File(staging, "dictionary.idx"))
-        checkCancelled(model)
+        checkCancelled(model, request)
         publish(ModelInstallState(model, ModelInstallState.Stage.EXTRACTING, message = "Ускоряем модель"))
         val original = File(staging, "model.onnx")
         val faster = File(staging, "model-5steps.onnx")
@@ -402,16 +431,19 @@ object SpeechModels {
     }
 
     /** The style packs joined, the vocabulary and the ONNX metadata sherpa-onnx expects. */
-    private fun prepareKokoroRu(model: SpeechModel, staging: File) {
+    private fun prepareKokoroRu(model: SpeechModel, staging: File, request: SpeechModel = model) {
         publish(ModelInstallState(model, ModelInstallState.Stage.EXTRACTING, message = "Готовим голоса"))
+        // A cut-short 326 MB download would be loaded by sherpa-onnx, which ends the process on a
+        // broken ONNX; the install has to fail here instead.
+        KokoroRu.requireCheckpoint(File(staging, KokoroRu.modelFile(model)))
         KokoroRu.prepare(staging, model)
-        checkCancelled(model)
+        checkCancelled(model, request)
     }
 
-    private fun extractZip(model: SpeechModel, source: ModelSource.Zip, archive: File, staging: File) {
+    private fun extractZip(model: SpeechModel, source: ModelSource.Zip, archive: File, staging: File, request: SpeechModel = model) {
         publish(ModelInstallState(model, ModelInstallState.Stage.EXTRACTING, 0, archive.length()))
         var lastReport = 0L
-        unzipSelected(archive, source.files, staging, checkCancelled = { checkCancelled(model) }) { read ->
+        unzipSelected(archive, source.files, staging, checkCancelled = { checkCancelled(model, request) }) { read ->
             val now = System.currentTimeMillis()
             if (now - lastReport > 250) {
                 lastReport = now

@@ -86,7 +86,7 @@ internal fun voiceParams(
  */
 internal class SynthesisHub private constructor(context: Context) {
     private val app = context.applicationContext
-    private val models = HashMap<SpeechModel, OfflineTts>()
+    private val models = HashMap<SpeechModel, Loaded>()
     @Volatile private var vosk: VoskTts? = null
     private val systemClients = ConcurrentHashMap<String, SystemTtsClient>()
     private val modelLock = Any()
@@ -106,7 +106,7 @@ internal class SynthesisHub private constructor(context: Context) {
     fun isAvailable(voice: VoiceChoice, settings: SpeechSettings): Boolean = when (voice.engine) {
         VoiceEngine.SUPERTONIC -> supertonicModel(settings) != null
         VoiceEngine.KOKORO -> kokoroModel(settings) != null
-        VoiceEngine.KOKORO_RU -> kokoroRuModel(voice.speaker) != null
+        VoiceEngine.KOKORO_RU -> kokoroRuVoice(voice.speaker, settings) != null
         VoiceEngine.VOSK -> SpeechModels.isInstalled(app, SpeechModel.VOSK)
         VoiceEngine.SYSTEM -> SystemVoices.isEngineInstalled(app, voice.enginePackage)
     }
@@ -149,13 +149,13 @@ internal class SynthesisHub private constructor(context: Context) {
                 generate(model, spoken, config, speedUp = params.speedUp)
             }
             VoiceEngine.KOKORO_RU -> {
-                val model = kokoroRuModel(voice.speaker)
+                val (model, sid) = kokoroRuVoice(voice.speaker, settings)
                     ?: throw VoiceUnavailableException("Голос Kokoro RU не загружен")
                 // The words carry StressStyle.DICTIONARY_ACUTE marks; espeak-ng reads them.
                 val spoken = SpeechNormalizer.normalize(text, "ru")
                 if (spoken.isBlank()) return SynthesizedAudio(FloatArray(0), KokoroRu.SAMPLE_RATE)
                 val config = GenerationConfig(
-                    sid = KokoroRu.localSpeaker(model, voice.speaker),
+                    sid = sid,
                     speed = params.speed,
                     extra = mapOf("lang" to "ru"),
                 )
@@ -186,7 +186,7 @@ internal class SynthesisHub private constructor(context: Context) {
                 when (voice.engine) {
                     VoiceEngine.SUPERTONIC -> supertonicModel(settings)?.let { load(it) }
                     VoiceEngine.KOKORO -> kokoroModel(settings)?.let { load(it) }
-                    VoiceEngine.KOKORO_RU -> kokoroRuModel(voice.speaker)?.let { load(it) }
+                    VoiceEngine.KOKORO_RU -> kokoroRuVoice(voice.speaker, settings)?.let { (model, _) -> load(model) }
                     VoiceEngine.VOSK -> voskTts()
                     VoiceEngine.SYSTEM -> if (SystemVoices.isEngineInstalled(app, voice.enginePackage)) {
                         systemClients.getOrPut(voice.enginePackage) { SystemTtsClient(app, voice.enginePackage) }
@@ -234,13 +234,21 @@ internal class SynthesisHub private constructor(context: Context) {
     }
 
     /**
-     * The Russian Kokoro checkpoint behind [voice]: dima is a model of its own, sveta and masha share
-     * one. A dima voice whose download is missing is read by the base checkpoint rather than not at all.
+     * The Kokoro RU checkpoint this narration reads with, and [speaker]'s id inside it; null when the
+     * voice is not usable right now. Two checkpoints are 326 MB each: a session keeps the narrator's
+     * one, so a role voice from the other download is left to another engine instead of reloading a
+     * model per line. A dima voice whose download is gone is not read by the base checkpoint either —
+     * that would give a man's lines to Masha.
      */
-    private fun kokoroRuModel(speaker: Int): SpeechModel? {
-        val wanted = KokoroRu.speechModelFor(speaker)
-        if (SpeechModels.isInstalled(app, wanted)) return wanted
-        return SpeechModel.KOKORO_RU.takeIf { SpeechModels.isInstalled(app, it) }
+    private fun kokoroRuVoice(speaker: Int, settings: SpeechSettings): Pair<SpeechModel, Int>? {
+        val narrator = settings.russianVoice
+        val checkpoint = if (narrator.engine == VoiceEngine.KOKORO_RU) {
+            KokoroRu.checkpointFor(narrator.speaker)
+        } else {
+            SpeechModel.KOKORO_RU
+        }
+        if (!SpeechModels.isInstalled(app, checkpoint)) return null
+        return KokoroRu.speakerIn(checkpoint, speaker)?.let { checkpoint to it }
     }
 
     /** Vosk loads for 15–55 s on the phone (ONNX Runtime prepares a graph of 15–29 thousand nodes), so it stays loaded. */
@@ -255,15 +263,30 @@ internal class SynthesisHub private constructor(context: Context) {
     }
 
     private fun generate(model: SpeechModel, text: String, config: GenerationConfig, speedUp: Float): SynthesizedAudio {
-        val tts = load(model)
-        // One native call at a time per model; a cancelled session may still finish its sentence.
-        val audio = synchronized(tts) { tts.generateWithConfig(text, config) }
-        return SynthesizedAudio(audio.samples, audio.sampleRate.takeIf { it > 0 } ?: tts.sampleRate(), speedUp = speedUp)
+        // Counted under the model lock before it is dropped: another voice may evict this checkpoint
+        // between choosing it and reaching the native call, and generating on a released handle is a
+        // pointer into freed memory.
+        val loaded = synchronized(modelLock) { load(model).also { it.users++ } }
+        try {
+            // One native call at a time per model; a cancelled session may still finish its sentence.
+            val audio = synchronized(loaded.tts) { loaded.tts.generateWithConfig(text, config) }
+            return SynthesizedAudio(
+                audio.samples,
+                audio.sampleRate.takeIf { it > 0 } ?: loaded.tts.sampleRate(),
+                speedUp = speedUp,
+            )
+        } finally {
+            synchronized(modelLock) {
+                loaded.users--
+                if (loaded.users == 0 && loaded.retired) synchronized(loaded.tts) { loaded.tts.release() }
+            }
+        }
     }
 
-    private fun load(model: SpeechModel): OfflineTts = synchronized(modelLock) {
+    private fun load(model: SpeechModel): Loaded = synchronized(modelLock) {
         models[model]?.let { return it }
-        // Keep at most one variant of each family in memory.
+        // At most one variant of each family stays in memory: the INT8 and fp32 builds of one voice are
+        // alternatives, and a narration reads the two Russian Kokoro checkpoints with one of them.
         val sibling = when (model) {
             SpeechModel.SUPERTONIC -> SpeechModel.SUPERTONIC_FULL
             SpeechModel.SUPERTONIC_FULL -> SpeechModel.SUPERTONIC
@@ -273,7 +296,7 @@ internal class SynthesisHub private constructor(context: Context) {
             SpeechModel.KOKORO_RU_DIMA -> SpeechModel.KOKORO_RU
             SpeechModel.VOSK -> error(NOT_SHERPA)
         }
-        models.remove(sibling)?.let { old -> synchronized(old) { old.release() } }
+        models.remove(sibling)?.let { retire(it) }
         val directory = SpeechModels.directory(app, model)
         val config = when (model) {
             SpeechModel.SUPERTONIC, SpeechModel.SUPERTONIC_FULL -> {
@@ -334,7 +357,12 @@ internal class SynthesisHub private constructor(context: Context) {
             }
             SpeechModel.VOSK -> error(NOT_SHERPA)
         }
-        OfflineTts(config = config).also { models[model] = it }
+        Loaded(OfflineTts(config = config)).also { models[model] = it }
+    }
+
+    /** Frees [loaded] now, or as soon as the line being read from it finishes. */
+    private fun retire(loaded: Loaded) {
+        if (loaded.users > 0) loaded.retired = true else synchronized(loaded.tts) { loaded.tts.release() }
     }
 
     /** An engine was replaced by a newer build: its process restarted, so the connection kept to it is dead. */
@@ -344,13 +372,19 @@ internal class SynthesisHub private constructor(context: Context) {
 
     private fun releaseAll() {
         synchronized(modelLock) {
-            models.values.forEach { tts -> synchronized(tts) { tts.release() } }
+            models.values.forEach { retire(it) }
             models.clear()
             vosk?.let { tts -> synchronized(tts) { tts.close() } }
             vosk = null
         }
         systemClients.values.forEach { it.shutdown() }
         systemClients.clear()
+    }
+
+    /** A loaded checkpoint and the number of lines reading it right now. */
+    private class Loaded(val tts: OfflineTts) {
+        var users = 0
+        var retired = false
     }
 
     companion object {

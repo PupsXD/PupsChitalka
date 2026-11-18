@@ -630,7 +630,7 @@ class MainActivity : ComponentActivity() {
     private fun isUsable(voice: VoiceChoice): Boolean = when (voice.engine) {
         VoiceEngine.SUPERTONIC -> SpeechModel.SUPERTONIC in installedModels || SpeechModel.SUPERTONIC_FULL in installedModels
         VoiceEngine.KOKORO -> SpeechModel.KOKORO in installedModels || SpeechModel.KOKORO_FULL in installedModels
-        VoiceEngine.KOKORO_RU -> KokoroRu.speechModelFor(voice.speaker) in installedModels || SpeechModel.KOKORO_RU in installedModels
+        VoiceEngine.KOKORO_RU -> KokoroRu.checkpointFor(voice.speaker) in installedModels
         VoiceEngine.VOSK -> SpeechModel.VOSK in installedModels
         VoiceEngine.SYSTEM -> voice.enginePackage in installedEngines
     }
