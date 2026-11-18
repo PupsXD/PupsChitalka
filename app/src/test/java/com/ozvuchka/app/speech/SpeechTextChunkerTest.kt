@@ -51,4 +51,35 @@ class SpeechTextChunkerTest {
         assertEquals("Повтори это.", source.substring(chunks[1].start, chunks[1].end))
         assertTrue(chunks[1].start > chunks[0].end)
     }
+
+    @Test
+    fun initialsAreNotSplitIntoPhrases() {
+        val source = "А. С. Пушкин родился в Москве. Потом он уехал."
+        val chunks = splitForSpeech(source, "ru")
+
+        assertEquals(listOf("А. С. Пушкин родился в Москве.", "Потом он уехал."), chunks.map { it.text })
+    }
+
+    @Test
+    fun abbreviationsAndDatesDoNotEndASentence() {
+        val source = "Он пришёл в 1820 г. и остался до 5 руб. в день. Потом уехал 05.12.2020."
+        val chunks = splitForSpeech(source, "ru")
+
+        assertEquals(
+            listOf(
+                "Он пришёл в 1820 г. и остался до 5 руб. в день.",
+                "Потом уехал 05.12.2020.",
+            ),
+            chunks.map { it.text },
+        )
+        assertEquals(source.substring(chunks[0].start, chunks[0].end), chunks[0].text.replace(Regex(" +"), " "))
+    }
+
+    @Test
+    fun aClosingQuoteStaysWithItsSentence() {
+        val source = "Она сказала: «Я вернусь». Потом ушла."
+        val chunks = splitForSpeech(source, "ru")
+
+        assertEquals(listOf("Она сказала: «Я вернусь».", "Потом ушла."), chunks.map { it.text })
+    }
 }

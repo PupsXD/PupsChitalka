@@ -119,6 +119,26 @@ class VoskFrontendTest {
     }
 
     @Test
+    fun numbersAndAbbreviationsBecomeWordsBeforeTheFrontendDropsCharacters() {
+        // The pipeline is normalize (SpeechNormalizer) and only then sanitize; this proves the
+        // order on the Vosk path: a digit never reaches the phoneme layer to be deleted there.
+        val spoken = SpeechNormalizer.normalize("В 1917 году он получил 21%, т. е. больше всех.", "ru")
+        val clean = VoskFrontend.sanitize(spoken)
+        assertTrue(clean.none { it.isDigit() })
+        assertTrue(clean, clean.contains("тысяча девятьсот семнадцатом году"))
+        assertTrue(clean, clean.contains("двадцать один процент"))
+        assertTrue(clean, clean.contains("то есть"))
+    }
+
+    @Test
+    fun aHomographMarkFromTheContextLayerBypassesTheDictionary() {
+        // «з+амок» is the context layer's reading of a castle; the model's dictionary knows one
+        // reading of «замок», so the mark must reach the phonemes not as a lookup but as +.
+        assertEquals("z a1 m o0 k", VoskFrontend.convert("з+амок"))
+        assertEquals("z a0 m o1 k", VoskFrontend.convert("зам+ок"))
+    }
+
+    @Test
     fun dictionaryKeepsTheMostProbableVariantAndTheFirstOnATie() {
         val text = folder.newFile("small").apply {
             writeText(
