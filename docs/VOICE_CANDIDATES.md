@@ -157,9 +157,10 @@ than like a formant synthesizer, and it is wired as a download in «Голоса
 **One checkpoint in memory.** The two fp32 checkpoints are 326 MB each, 652 MB together — more than
 the app may spend on speech. A narration therefore loads only the narrator's file
 (`KokoroRu.checkpointFor`), reads characters' lines with it (`speakerIn` returns null for a voice of
-the other file) and lets another engine take a role voice from the second download. Neither the
-picker nor the synthesis path ever alternates the two checkpoints, which would re-read 326 MB per
-line; dima is offered as a narrator, not as a role under sveta or masha.
+the other file) and lets another engine take a role voice from the second download. The character
+picker never offers the other file's voice and the synthesis path refuses it, so nothing alternates
+the two checkpoints — that would re-read 326 MB per line. Dima is offered as a narrator, not as a
+role under Sveta or Masha.
 
 **What the repository contains** (`https://huggingface.co/zaakirio/kokoro-ru`): `onnx/model.onnx`
 (fp32, 326 MB) plus `model_quantized.onnx` (138 MB), `model_fp16.onnx`, and the same three for dima;
