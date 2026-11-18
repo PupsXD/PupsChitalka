@@ -20,11 +20,14 @@ internal data class VoskNoise(val level: Float, val durationLevel: Float) {
         private const val EMOTIONAL_DURATION_LEVEL = 0.85f
         private val EMOTIONAL_TONES = setOf(SpeechTone.EXCLAIM, SpeechTone.ANGRY, SpeechTone.JOY, SpeechTone.FEAR)
 
+        /** Even narration: what every line gets while «Эмоции» are off. */
+        val CALM = VoskNoise(CALM_LEVEL, CALM_DURATION_LEVEL)
+
         fun forLine(role: SpeechRole, tone: SpeechTone): VoskNoise =
             if (role != SpeechRole.NARRATOR && tone in EMOTIONAL_TONES) {
                 VoskNoise(EMOTIONAL_LEVEL, EMOTIONAL_DURATION_LEVEL)
             } else {
-                VoskNoise(CALM_LEVEL, CALM_DURATION_LEVEL)
+                CALM
             }
     }
 }

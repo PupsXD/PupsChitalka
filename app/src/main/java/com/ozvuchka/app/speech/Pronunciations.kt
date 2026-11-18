@@ -5,14 +5,24 @@ import org.json.JSONObject
 import kotlin.math.max
 
 /**
- * How an engine takes a stress mark: RuVoice reads «з+амок», other engines a combining acute.
+ * How an engine takes a stress mark: RuVoice reads «з+амок», a system engine a combining acute.
+ * [DICTIONARY_ACUTE] is the same acute, but every word the reader's dictionary knows is marked —
+ * Russian Kokoro phonemizes with espeak-ng, which reads such a mark through the model's own Russian
+ * dictionary, while a generic system engine would just see an unusual character.
  * [MARKED] is «з+амок» for the reader's own words only: Vosk looks every other word up in its own
  * dictionary, which also knows how a word sounds («что» as «што»), and a «+» would bypass it.
  */
-enum class StressStyle { PLUS, MARKED, ACUTE, NONE }
+enum class StressStyle { PLUS, MARKED, ACUTE, DICTIONARY_ACUTE, NONE }
+
+/** Whether words the dictionary knows are marked for this engine. Vosk marks only the reader's own. */
+private val StressStyle.takesDictionary: Boolean get() = this == StressStyle.PLUS || this == StressStyle.DICTIONARY_ACUTE
+
+/** The mark an engine reads as an acute accent over the vowel. */
+private val StressStyle.isAcute: Boolean get() = this == StressStyle.ACUTE || this == StressStyle.DICTIONARY_ACUTE
 
 internal fun stressStyleFor(voice: VoiceChoice): StressStyle = when {
     voice.engine == VoiceEngine.VOSK -> StressStyle.MARKED
+    voice.engine == VoiceEngine.KOKORO_RU -> StressStyle.DICTIONARY_ACUTE
     voice.engine != VoiceEngine.SYSTEM -> StressStyle.NONE
     voice.enginePackage == VoiceCatalog.RUVOICE_PACKAGE -> StressStyle.PLUS
     else -> StressStyle.ACUTE
@@ -77,13 +87,13 @@ class PronunciationDictionary(
     val isEmpty: Boolean get() = entries.isEmpty() && defaultStresses == null
 
     internal fun apply(text: String, style: StressStyle): Rewrite {
-        if (entries.isEmpty() && (style != StressStyle.PLUS || defaultStresses == null)) return Rewrite.identity(text)
+        if (entries.isEmpty() && (!style.takesDictionary || defaultStresses == null)) return Rewrite.identity(text)
         val builder = RewriteBuilder(text.length)
         var cursor = 0
         var changed = false
         for (match in WORD.findAll(text)) {
             val spoken = entries[normalizeWord(match.value)] ?: if (
-                style == StressStyle.PLUS && text.getOrNull(match.range.last + 1) != ACUTE
+                style.takesDictionary && text.getOrNull(match.range.last + 1) != ACUTE
             ) defaultStresses?.invoke(match.value.lowercase()) else null
             if (spoken == null) continue
             builder.copy(text, cursor, match.range.first)
@@ -111,10 +121,10 @@ class PronunciationDictionary(
                 val c = spoken[index]
                 val vowel = spoken.getOrNull(index + 1)
                 if (c == '+' && vowel != null && vowel in VOWELS) {
-                    when (style) {
-                        StressStyle.PLUS, StressStyle.MARKED -> append('+').append(vowel)
-                        StressStyle.ACUTE -> append(vowel).append(ACUTE)
-                        StressStyle.NONE -> append(vowel)
+                    when {
+                        style.isAcute -> append(vowel).append(ACUTE)
+                        style == StressStyle.NONE -> append(vowel)
+                        else -> append('+').append(vowel)
                     }
                     index += 2
                 } else {

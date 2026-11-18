@@ -94,6 +94,33 @@ internal class BookSegmentSource(
 }
 
 /**
+ * Whether [voice] can say a line of [language]: Kokoro reads only English, and its Russian sibling
+ * only Russian. Every other engine — Supertonic, Vosk, the system ones — takes any language.
+ */
+internal fun VoiceChoice.speaks(language: String): Boolean = when (engine) {
+    VoiceEngine.KOKORO -> language == "en"
+    VoiceEngine.KOKORO_RU -> language != "en"
+    else -> true
+}
+
+/** A downloaded Kokoro model: the English ones and the Russian pair share one loading path. */
+internal val VoiceEngine.isKokoro: Boolean
+    get() = this == VoiceEngine.KOKORO || this == VoiceEngine.KOKORO_RU
+
+/**
+ * The voice that really reads a line of [language]: the one chosen for it and its role while it knows
+ * the language, otherwise the narrator of that language (a Russian line in a book whose narrator is
+ * English Kokoro goes to the Russian voice).
+ */
+internal fun narratorFor(settings: SpeechSettings, language: String, role: SpeechRole): VoiceChoice {
+    val chosen = settings.voiceFor(language, role)
+    if (chosen.speaks(language)) return chosen
+    val narrator = settings.voiceFor(language)
+    if (narrator.speaks(language)) return narrator
+    return settings.russianVoice.takeIf { it.speaks(language) } ?: narrator
+}
+
+/**
  * Places an engine's word starts in a rendered sentence: frames shift by the trimmed lead-in and
  * scale to the output rate; ranges in the spoken text become offsets in the paragraph [source].
  */
@@ -358,12 +385,8 @@ internal class NarrationPlayer(
         }
 
         private fun render(index: Int, segment: SpeechSegment): Rendered? {
-            var voice = settings.voiceFor(segment.language, segment.role)
-            // Kokoro speaks only English; anything else goes to the Russian voice.
-            if (voice.engine == VoiceEngine.KOKORO && segment.language != "en") {
-                voice = settings.voiceFor("ru", segment.role).takeIf { it.engine != VoiceEngine.KOKORO } ?: settings.russianVoice
-            }
-            if (voice.engine == VoiceEngine.KOKORO && !hub.isAvailable(voice, settings)) voice = fallbackVoice(voice) ?: voice
+            var voice = narratorFor(settings, segment.language, segment.role)
+            if (voice.engine.isKokoro && !hub.isAvailable(voice, settings)) voice = fallbackVoice(voice) ?: voice
             if (voice in brokenVoices) voice = fallbackVoice(voice) ?: voice
             // The reader's pronunciations go in the form each engine understands.
             var rewrite = pronunciations.apply(segment.text, stressStyleFor(voice))
