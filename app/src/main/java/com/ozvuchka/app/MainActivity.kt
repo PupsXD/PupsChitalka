@@ -60,9 +60,12 @@ import com.ozvuchka.app.data.SearchHit
 import com.ozvuchka.app.data.chapterProgressOf
 import com.ozvuchka.app.data.searchBook
 import com.ozvuchka.app.importer.FileBookImporter
+import com.ozvuchka.app.importer.FolderImageSink
 import com.ozvuchka.app.importer.ImportError
 import com.ozvuchka.app.importer.ImportReason
 import com.ozvuchka.app.importer.ImportResult
+import com.ozvuchka.app.importer.WebBookImporter
+import com.ozvuchka.app.importer.WebBookResult
 import com.ozvuchka.app.importer.WebChapterImporter
 import com.ozvuchka.app.importer.WebImportStage
 import com.ozvuchka.app.importer.WebImportUi
@@ -118,6 +121,7 @@ import com.ozvuchka.app.ui.WebChapterLoadUi
 import com.ozvuchka.app.ui.AppUpdateActions
 import com.ozvuchka.app.ui.appUpdateShown
 import com.ozvuchka.app.update.AppUpdater
+import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
@@ -325,6 +329,7 @@ class MainActivity : ComponentActivity() {
                             onListen = ::listenFromLibrary,
                             onImportFile = { openDocument.launch(arrayOf("*/*")) },
                             onImportUrl = ::importUrl,
+                            onImportBook = ::importWebBook,
                             onDismissWebImport = { webImport = null },
                             webImport = webImport,
                             onDeleteBook = ::deleteBook,
@@ -1293,6 +1298,66 @@ class MainActivity : ComponentActivity() {
                 val crash = ImportError(ImportReason.NETWORK, "Не удалось загрузить главу: ${error.message ?: "неизвестная ошибка"}", retryable = true)
                 webImport = WebImportUi(WebImportStage.FAILED, url, site, error = crash)
                 notice = crash.hint
+            }
+        }
+    }
+
+    /**
+     * Downloads the whole book the site publishes as a file. A separate action from the chapter
+     * import on purpose: the file is a new book of its own, and an existing book is never replaced.
+     */
+    private fun importWebBook(url: String) {
+        if (webImport?.isActive == true) return
+        val site = siteLabel(url).orEmpty()
+        webImport = WebImportUi(WebImportStage.CONNECTING, url, site, wholeBook = true)
+        lifecycleScope.launch {
+            val bookId = UUID.randomUUID().toString()
+            val imageFolder = BookImages.directory(this@MainActivity, bookId)
+            var imported = false
+            try {
+                val result = WebBookImporter.importBook(
+                    url,
+                    onStage = { stage -> webImport = webImport?.copy(stage = stage) },
+                    images = FolderImageSink(imageFolder),
+                )
+                when (result) {
+                    is WebBookResult.Failure -> {
+                        webImport = WebImportUi(WebImportStage.FAILED, url, site, error = result.error, wholeBook = true)
+                        notice = "Не удалось скачать книгу: ${result.error.hint}"
+                    }
+                    is WebBookResult.Success -> {
+                        webImport = webImport?.copy(stage = WebImportStage.SAVING)
+                        // A book of the same page is never replaced: the reader is taken to it.
+                        val existing = books.firstOrNull {
+                            it.source == result.book.source && it.format == result.book.format
+                        }
+                        if (existing != null) {
+                            openBook(existing.id)
+                            notice = "Эта книга уже есть в библиотеке"
+                            webImport = webImport?.copy(stage = WebImportStage.DONE)
+                            return@launch
+                        }
+                        val book = result.book.copy(id = bookId, lastOpenedAt = System.currentTimeMillis())
+                        withContext(Dispatchers.IO) { library.save(book) }
+                        result.cover?.let { cover -> runCatching { Covers.save(this@MainActivity, book.id, cover) } }
+                        books.add(0, book)
+                        currentBook = book
+                        imported = true
+                        webImport = webImport?.copy(stage = WebImportStage.DONE)
+                        if (book.warnings.isNotEmpty()) notice = book.warnings.take(2).joinToString(" ")
+                    }
+                }
+            } catch (error: Exception) {
+                // A crashed save must not leave the sheet hanging and blocking the next import.
+                val crash = ImportError(
+                    ImportReason.NETWORK,
+                    "Не удалось скачать книгу: ${error.message ?: "неизвестная ошибка"}",
+                    retryable = true,
+                )
+                webImport = WebImportUi(WebImportStage.FAILED, url, site, error = crash, wholeBook = true)
+                notice = crash.hint
+            } finally {
+                if (!imported) imageFolder.deleteRecursively()
             }
         }
     }

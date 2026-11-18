@@ -226,6 +226,38 @@ class WebChapterImporterTest {
     }
 
     @Test
+    fun aPageShellIsDroppedWithoutCuttingShortReplies() {
+        val document = Jsoup.parse(fixture("chapter-shell.html"), "https://story.example/ch/1")
+        val found = findContentElement(document, "unknown.example")!!
+        assertEquals("chapter", found.className())
+        val paragraphs = found.select("p").map { it.text() }
+        assertEquals(4, paragraphs.size)
+        assertTrue(paragraphs[2] == "— Ты слышишь?" && paragraphs[3] == "— Нет.")
+        assertFalse(found.text().contains("Каталог"))
+    }
+
+    @Test
+    fun verseWithoutParagraphsIsStillAChapter() {
+        val document = Jsoup.parse(fixture("verse-br.html"), "https://poems.example/1")
+        val found = findContentElement(document, "unknown.example")!!
+        assertEquals("poem", found.className())
+        val chapter = WebChapter("Стихи", cleanedContent(found).html(), "https://poems.example/1", null).toBookChapter()
+        assertTrue(chapter.paragraphs.any { it.contains("Над тихой рекой") })
+        assertTrue(chapter.paragraphs.any { it.contains("Я слушаю долго") })
+        assertTrue(chapter.paragraphs.size >= 6)
+    }
+
+    @Test
+    fun aPaywallTeaserIsNotTakenForAChapter() {
+        val teaser = "Продолжение доступно после оформления подписки на сайте."
+        assertTrue(isPaywallText(teaser))
+        assertTrue(isPaywall(Jsoup.parse("<html><body><p>$teaser</p></body></html>")))
+        // A real chapter long enough to carry the word «подписка» is not a paywall.
+        val chapter = ("Герой вспоминал подписку на старую газету, " + "и это воспоминание тянулось долго. ".repeat(60))
+        assertFalse(isPaywallText(chapter))
+    }
+
+    @Test
     fun siteMirrorsCountAsTheSameSite() {
         assertEquals(
             "https://m.story.example/2",

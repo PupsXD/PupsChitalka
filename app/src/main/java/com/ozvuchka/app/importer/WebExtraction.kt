@@ -7,6 +7,7 @@ import java.nio.ByteBuffer
 import java.nio.charset.Charset
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
+import java.util.IdentityHashMap
 import java.util.Locale
 import org.jsoup.HttpStatusException
 import org.jsoup.UnsupportedMimeTypeException
@@ -16,10 +17,13 @@ import org.jsoup.nodes.Element
 /** The least text a found container must hold to count as a chapter. */
 internal const val MIN_CHAPTER_CHARS = 80
 
+/** A chapter of one solid paragraph is still a chapter; a shorter single block is a caption. */
+private const val MIN_SINGLE_BLOCK_CHARS = 300
+
 /**
- * Text containers of the known reader sites, in order of trust. The selectors are candidates:
- * each is checked for enough text, and a miss falls through to the generic chain below, so a
- * site redesign only costs quality, not the import.
+ * Text containers of the known reader sites. The selectors are candidates, not answers: every
+ * candidate goes through the same quality gate below, so a site redesign only costs quality,
+ * not the import.
  */
 private val hostRules: List<Pair<String, List<String>>> = listOf(
     "author.today" to listOf("div#content", "div.chapter-text", "div.text"),
@@ -43,31 +47,96 @@ internal val junkSelector =
         ".vote, .rating, .controls, .related"
 
 /**
- * Finds the chapter text on a parsed page: the site's own container when the host is known,
- * then the usual article wrappers, then containers scored by text against link text, then
- * Readability-style scoring of the parents of long paragraphs, and finally the page body
- * without its furniture. null leaves the typed EMPTY_CONTENT failure to report.
+ * Finds the chapter text on a parsed page by ranking every realistic candidate — the site's own
+ * containers, schema.org article bodies, article/main wrappers, the density and Readability
+ * winners, and the page body — through one quality gate: enough prose, not mostly links, and
+ * blocks a reader recognizes as text. The largest narrative wins, then the tightest wrapper that
+ * keeps at least [DESCENT_PERCENT] of it, so a page shell around the chapter is dropped without
+ * cutting its short replies, verse or footnotes. null leaves the typed EMPTY_CONTENT failure.
  */
 internal fun findContentElement(document: Document, host: String): Element? {
-    fun big(element: Element?): Element? = element?.takeIf { it.text().length >= MIN_CHAPTER_CHARS }
-    for (selector in hostRuleSelectors(host)) {
-        big(document.selectFirst(selector))?.let { return it }
+    val candidates = LinkedHashSet<Element>()
+    for (selector in hostRuleSelectors(host)) candidates.addAll(document.select(selector))
+    for (selector in articleSelectors) candidates.addAll(document.select(selector))
+    densityCandidate(document)?.let { candidates.add(it) }
+    readabilityCandidate(document)?.let { candidates.add(it) }
+    document.body()?.let { candidates.add(it) }
+
+    val scored = IdentityHashMap<Element, ChapterCandidate>()
+    fun candidateOf(element: Element): ChapterCandidate? {
+        scored[element]?.let { return it }
+        val fresh = scoreChapter(element) ?: return null
+        scored[element] = fresh
+        return fresh
     }
-    big(document.selectFirst("#arrticle"))?.let { return it }
-    big(document.selectFirst("#article"))?.let { return it }
-    big(document.selectFirst("#article-content"))?.let { return it }
-    big(document.select("article").maxByOrNull { it.text().length })?.let { return it }
-    big(document.select("main").maxByOrNull { it.text().length })?.let { return it }
-    return densityCandidate(document)
-        ?: readabilityCandidate(document)
-        // The last resort keeps a quality bar: a page that is mostly links (a menu, a TOC)
-        // must not import "successfully" as the whole body.
-        ?: document.body()?.takeIf { body ->
-            val text = body.text()
-            val linkText = body.select("a[href]").text().length
-            text.length >= MIN_CHAPTER_CHARS * 3 && text.length - linkText >= MIN_CHAPTER_CHARS &&
-                (text.length - linkText) * 2 >= text.length
-        }
+    val best = candidates.mapNotNull(::candidateOf).maxWithOrNull(chapterOrder) ?: return null
+    return descendToChapter(best, ::candidateOf).element
+}
+
+/** A candidate container with the numbers the quality gate and the ranking are built on. */
+private class ChapterCandidate(
+    val element: Element,
+    /** Characters of the blocks a chapter is made of: paragraphs, verse lines, list items, rows. */
+    val narrative: Int,
+    /** Characters of the container that did not become a block: stray labels, a shell. */
+    val leftover: Int,
+)
+
+/** More narrative wins; on a tie the container with less leftover shell. */
+private val chapterOrder = compareBy<ChapterCandidate>({ it.narrative }, { -it.leftover })
+
+/** How much of the parent's narrative a child must keep to be a tighter wrapper of the same chapter. */
+private const val DESCENT_PERCENT = 90
+
+/** Containers a chapter may be wrapped in; a paragraph is never a candidate on its own. */
+private val containerTags = setOf(
+    "body", "div", "section", "article", "main", "td", "th", "table", "tbody", "thead", "tr", "ul", "ol",
+)
+
+/** The schema.org and editorial wrappers that name the text of an article. */
+private val articleSelectors = listOf(
+    "#arrticle", "#article", "#article-content", "[itemprop=articleBody]", "article", "main",
+)
+
+/**
+ * The quality gate of one container: it must hold enough prose after the furniture is cleaned,
+ * keep most of its text out of links, and consist of blocks of real text rather than one label.
+ */
+private fun scoreChapter(element: Element): ChapterCandidate? {
+    if (element.tagName().lowercase(Locale.ROOT) !in containerTags) return null
+    val cleaned = cleanedContent(element)
+    val text = cleaned.text()
+    if (text.length < MIN_CHAPTER_CHARS) return null
+    val linkText = cleaned.select("a[href]").text().length
+    val net = text.length - linkText
+    // Half the text in links means navigation or a teaser wall, not a chapter.
+    if (net < MIN_CHAPTER_CHARS || net * 2 < text.length) return null
+    val blocks = htmlBlocks(cleaned)
+    val blockChars = blocks.sumOf { it.first.length }
+    val narrative = blockChars - linkText
+    if (narrative < MIN_CHAPTER_CHARS) return null
+    if (blocks.size == 1 && narrative < MIN_SINGLE_BLOCK_CHARS) return null
+    val leftover = text.length - blockChars
+    return ChapterCandidate(element, narrative, leftover.coerceAtLeast(0))
+}
+
+/**
+ * The tightest wrapper of the same narrative: while one child keeps at least [DESCENT_PERCENT]
+ * of its parent's text, that child is the chapter and the parent is the page shell around it.
+ */
+private fun descendToChapter(
+    start: ChapterCandidate,
+    candidateOf: (Element) -> ChapterCandidate?,
+): ChapterCandidate {
+    var best = start
+    while (true) {
+        val child = best.element.children()
+            .mapNotNull(candidateOf)
+            .maxWithOrNull(chapterOrder) ?: break
+        if (child.narrative * 100 < best.narrative * DESCENT_PERCENT) break
+        best = child
+    }
+    return best
 }
 
 /** Container selectors of the site's rule table for this host, empty when unknown. */
@@ -354,12 +423,18 @@ internal fun isLoginRedirect(document: Document, finalUrl: String): Boolean {
 }
 
 /** The chapter exists but sits behind a subscription or a one-off payment. */
-internal fun isPaywall(document: Document): Boolean {
-    val text = document.body()?.text()?.lowercase(Locale.ROOT).orEmpty()
-    if (text.length > 1_500) return false
-    return text.contains("платн") || text.contains("подписк") || text.contains("оформите") ||
-        text.contains("продолжение доступно после") || text.contains("buy chapter") ||
-        text.contains("premium access") || text.contains("покупк")
+internal fun isPaywall(document: Document): Boolean = isPaywallText(document.body()?.text().orEmpty())
+
+/**
+ * The same marker check on a piece of page text: a chapter's own words are longer than a teaser,
+ * so a full chapter that mentions a subscription is never taken for a paywall.
+ */
+internal fun isPaywallText(text: String): Boolean {
+    val lower = text.lowercase(Locale.ROOT)
+    if (lower.length > 1_500) return false
+    return lower.contains("платн") || lower.contains("подписк") || lower.contains("оформите") ||
+        lower.contains("продолжение доступно после") || lower.contains("buy chapter") ||
+        lower.contains("premium access") || lower.contains("покупк")
 }
 
 // ---------- Errors ----------

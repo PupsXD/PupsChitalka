@@ -27,11 +27,24 @@ enum class ImportReason {
     NON_HTML,
     EMPTY_CONTENT,
     NEXT_LINK_MISSING,
+
+    /** The page or the announced book file is bigger than the import may hold in memory. */
+    TOO_LARGE,
+
+    /** The book page announces no FB2 file this app may download. */
+    BOOK_FILE_MISSING,
+
+    /** The downloaded file is not the announced FB2 book: a web page, another format or a broken archive. */
+    BOOK_FORMAT,
 }
 
 data class ImportError(val reason: ImportReason, val hint: String, val retryable: Boolean) {
     companion object {
         fun of(reason: ImportReason): ImportError = ImportError(reason, reason.hint(), reason.retryable())
+
+        /** The same failure with the technical cause appended, for the cases a reader can act on. */
+        fun of(reason: ImportReason, detail: String?): ImportError =
+            if (detail.isNullOrBlank()) of(reason) else ImportError(reason, "${reason.hint()}: $detail", reason.retryable())
     }
 }
 
@@ -49,6 +62,9 @@ private fun ImportReason.hint(): String = when (this) {
     ImportReason.NON_HTML -> "По ссылке не текст главы, а другой файл"
     ImportReason.EMPTY_CONTENT -> "На странице не удалось найти текст главы"
     ImportReason.NEXT_LINK_MISSING -> "Следующая глава не найдена: у сайта нет ссылки «вперёд»"
+    ImportReason.TOO_LARGE -> "Страница или файл больше, чем приложение готово загрузить"
+    ImportReason.BOOK_FILE_MISSING -> "На странице книги нет файла FB2 для скачивания"
+    ImportReason.BOOK_FORMAT -> "Скачанный файл не похож на книгу FB2"
 }
 
 private fun ImportReason.retryable(): Boolean = when (this) {
@@ -65,14 +81,16 @@ internal fun classifyUrl(url: String): ImportError? {
 }
 
 /** Stages of one web import, reported to the interface as they pass. */
-enum class WebImportStage { CONNECTING, DOWNLOADING, EXTRACTING, SAVING, DONE, FAILED }
+enum class WebImportStage { CONNECTING, DOWNLOADING, EXTRACTING, PARSING, SAVING, DONE, FAILED }
 
-/** What the import sheet shows about a web chapter import. */
+/** What the import sheet shows about a web import. */
 data class WebImportUi(
     val stage: WebImportStage,
     val url: String,
     val site: String,
     val error: ImportError? = null,
+    /** The run downloads a whole book rather than one chapter: the sheet words its stages so. */
+    val wholeBook: Boolean = false,
 ) {
     /** A running import: the sheet shows progress and blocks another start. */
     val isActive: Boolean get() = stage != WebImportStage.DONE && stage != WebImportStage.FAILED
