@@ -13,6 +13,12 @@ internal class VoskFrontend(
     private val phonemeIds: Map<String, Int>,
     private val tokenizer: BertWordPiece,
     private val lookup: (String) -> String?,
+    /**
+     * Stress for a word [lookup] does not know, as «алфав+ит»; null when nothing knows it. It is asked
+     * only on a miss: the model's own dictionary is right about how a word sounds («что» as «што»), and a
+     * «+» would bypass it.
+     */
+    private val stressFallback: (String) -> String? = { null },
 ) {
     class Prepared(
         val tokenIds: LongArray,
@@ -60,8 +66,15 @@ internal class VoskFrontend(
                     punctuation = ArrayList()
                 }
                 else -> {
-                    val symbols = (lookup(piece) ?: convert(piece)).split(' ').filter { it.isNotEmpty() }
-                    for (symbol in symbols) phones += Phone(symbol, emptyList(), inQuote, word)
+                    // The model's dictionary knows how its words sound; only a word it lacks takes the
+                    // reader's stress, so a guess never overrides a pronunciation the model gets right.
+                    val known = lookup(piece)
+                    val spoken = when {
+                        known != null -> known
+                        '+' in piece -> convert(piece) // the reader marked the stress already
+                        else -> convert(stressFallback(piece) ?: piece)
+                    }
+                    for (symbol in spoken.split(' ').filter { it.isNotEmpty() }) phones += Phone(symbol, emptyList(), inQuote, word)
                     punctuation = ArrayList()
                     word++
                 }

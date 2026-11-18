@@ -6,9 +6,11 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.math.tanh
@@ -21,8 +23,8 @@ data class WordMark(val frame: Int, val start: Int, val end: Int)
 
 /**
  * Mono float audio as produced by every synthesizer, with word starts if the engine reports them.
- * [speedUp] above 1 asks to play it that much faster than [sampleRate], which raises its pitch: how
- * a voice without a pitch control sounds a tone.
+ * [speedUp] above 1 asks to play it that much faster than [sampleRate], which raises its pitch. Such a
+ * shift drags the formants along with it, so neural voices no longer ask for one: they take the pace alone.
  */
 class SynthesizedAudio(
     val samples: FloatArray,
@@ -171,6 +173,80 @@ internal object AudioShaping {
             val gain = i.toFloat() / length
             samples[i] *= gain
             samples[samples.size - 1 - i] *= gain
+        }
+    }
+}
+
+/**
+ * The narrator's presence: a high-pass that takes the rumble of the room out of the voice and a small
+ * shelf that lifts the consonants, so a voice from a small speaker sounds warm rather than muffled.
+ * Two RBJ biquads, applied before the loudness gain, so the soft limiter still sees the final level.
+ */
+internal object NarratorEq {
+    private const val RUMBLE_HZ = 75.0
+    private const val PRESENCE_HZ = 6_500.0
+    private const val PRESENCE_DB = 1.5
+    /** Butterworth: the flattest passband, no peak at the corner. */
+    private const val Q = 0.7071
+    /** Below this rate the presence shelf would sit at the edge of hearing, so only the high-pass runs. */
+    private const val PRESENCE_MIN_RATE = 16_000
+
+    fun apply(samples: FloatArray, sampleRate: Int) {
+        if (samples.isEmpty() || sampleRate <= 0) return
+        highPass(sampleRate).apply(samples)
+        if (sampleRate >= PRESENCE_MIN_RATE) presence(min(PRESENCE_HZ, sampleRate * 0.45), sampleRate).apply(samples)
+    }
+
+    private fun highPass(sampleRate: Int): Biquad {
+        val w0 = 2 * PI * RUMBLE_HZ / sampleRate
+        val cosine = cos(w0)
+        val alpha = sin(w0) / (2 * Q)
+        val a0 = 1 + alpha
+        return Biquad(
+            b0 = (1 + cosine) / 2 / a0,
+            b1 = -(1 + cosine) / a0,
+            b2 = (1 + cosine) / 2 / a0,
+            a1 = -2 * cosine / a0,
+            a2 = (1 - alpha) / a0,
+        )
+    }
+
+    /** A high shelf: flat below [hz], [PRESENCE_DB] louder above it. */
+    private fun presence(hz: Double, sampleRate: Int): Biquad {
+        val w0 = 2 * PI * hz / sampleRate
+        val cosine = cos(w0)
+        val amplitude = 10.0.pow(PRESENCE_DB / 40)
+        val alpha = sin(w0) / 2 * sqrt(2.0)
+        val edge = 2 * sqrt(amplitude) * alpha
+        val a0 = (amplitude + 1) - (amplitude - 1) * cosine + edge
+        return Biquad(
+            b0 = amplitude * ((amplitude + 1) + (amplitude - 1) * cosine + edge) / a0,
+            b1 = -2 * amplitude * ((amplitude - 1) + (amplitude + 1) * cosine) / a0,
+            b2 = amplitude * ((amplitude + 1) + (amplitude - 1) * cosine - edge) / a0,
+            a1 = 2 * ((amplitude - 1) - (amplitude + 1) * cosine) / a0,
+            a2 = ((amplitude + 1) - (amplitude - 1) * cosine - edge) / a0,
+        )
+    }
+
+    /** One section in transposed direct form II; coefficients are normalised by a0. */
+    private class Biquad(
+        private val b0: Double,
+        private val b1: Double,
+        private val b2: Double,
+        private val a1: Double,
+        private val a2: Double,
+    ) {
+        private var z1 = 0.0
+        private var z2 = 0.0
+
+        fun apply(samples: FloatArray) {
+            for (index in samples.indices) {
+                val x = samples[index].toDouble()
+                val y = b0 * x + z1
+                z1 = b1 * x - a1 * y + z2
+                z2 = b2 * x - a2 * y
+                samples[index] = y.toFloat()
+            }
         }
     }
 }

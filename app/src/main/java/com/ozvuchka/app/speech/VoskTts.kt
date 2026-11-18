@@ -9,6 +9,27 @@ import java.nio.FloatBuffer
 import java.nio.LongBuffer
 
 /**
+ * How much Vosk's voice and timing vary: [level] is the noise scale, [durationLevel] the one for the
+ * phoneme lengths. Narration stays even; a raised voice wavers more, as a real one does.
+ */
+internal data class VoskNoise(val level: Float, val durationLevel: Float) {
+    companion object {
+        private const val CALM_LEVEL = 0.55f
+        private const val CALM_DURATION_LEVEL = 0.65f
+        private const val EMOTIONAL_LEVEL = 0.75f
+        private const val EMOTIONAL_DURATION_LEVEL = 0.85f
+        private val EMOTIONAL_TONES = setOf(SpeechTone.EXCLAIM, SpeechTone.ANGRY, SpeechTone.JOY, SpeechTone.FEAR)
+
+        fun forLine(role: SpeechRole, tone: SpeechTone): VoskNoise =
+            if (role != SpeechRole.NARRATOR && tone in EMOTIONAL_TONES) {
+                VoskNoise(EMOTIONAL_LEVEL, EMOTIONAL_DURATION_LEVEL)
+            } else {
+                VoskNoise(CALM_LEVEL, CALM_DURATION_LEVEL)
+            }
+    }
+}
+
+/**
  * Vosk TTS 0.10 (Alpha Cephei, Apache 2.0): 57 Russian voices from one model. Text goes through
  * [VoskFrontend], ruBERT gives each word its context, and the acoustic model (Matcha-TTS decoder plus
  * Vocos vocoder) renders 22 050 Hz audio. Not thread-safe: the caller runs one sentence at a time.
@@ -17,7 +38,12 @@ import java.nio.LongBuffer
  * bert.onnx, and the acoustic model: model-5steps.onnx when present (half the decoder steps, see
  * tools/voices/vosk-fewer-steps.py), otherwise model.onnx as published.
  */
-internal class VoskTts(directory: File, threads: Int) : AutoCloseable {
+internal class VoskTts(
+    directory: File,
+    threads: Int,
+    /** Stress for a word the model's dictionary lacks; null when the lexicon does not know it either. */
+    private val stressFallback: (String) -> String? = { null },
+) : AutoCloseable {
     private val env = OrtEnvironment.getEnvironment()
     private val frontend: VoskFrontend
     private val bert: OrtSession
@@ -41,7 +67,7 @@ internal class VoskTts(directory: File, threads: Int) : AutoCloseable {
         if (!index.isFile) VoskDictionary.buildIndex(dictionaryFile, index)
         val dictionary = VoskDictionary.open(dictionaryFile, index)
         val tokenizer = File(directory, "vocab.txt").useLines { BertWordPiece.load(it.toList().asSequence()) }
-        frontend = VoskFrontend(ids, tokenizer, dictionary::find)
+        frontend = VoskFrontend(ids, tokenizer, dictionary::find, stressFallback)
         val options = OrtSession.SessionOptions().apply {
             setIntraOpNumThreads(threads)
             setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
@@ -53,6 +79,7 @@ internal class VoskTts(directory: File, threads: Int) : AutoCloseable {
     /**
      * Audio for [text]; [speed] above 1 speaks faster (the model shortens the sounds, pitch unchanged).
      * [noise] and [durationNoise] vary the voice and timing from run to run; 0 makes the output exact.
+     * See [VoskNoise] for how a line's role and tone choose them.
      */
     fun synthesize(
         text: String,

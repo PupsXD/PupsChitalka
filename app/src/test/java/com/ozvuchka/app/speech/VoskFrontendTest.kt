@@ -24,15 +24,32 @@ class VoskFrontendTest {
 
     private fun resource(name: String) = javaClass.getResource("/vosk/$name")!!.readText()
 
-    private fun frontend(): VoskFrontend {
-        val dictionaryFile = folder.newFile("dictionary").apply { writeText(resource("dictionary-sample.txt")) }
+    private val dictionary by lazy {
+        val file = folder.newFile("dictionary").apply { writeText(resource("dictionary-sample.txt")) }
         val index = File(folder.root, "dictionary.idx")
-        VoskDictionary.buildIndex(dictionaryFile, index)
-        val dictionary = VoskDictionary.open(dictionaryFile, index)
+        VoskDictionary.buildIndex(file, index)
+        VoskDictionary.open(file, index)
+    }
+
+    private fun frontend(stressFallback: (String) -> String? = { null }): VoskFrontend {
         val map = JSONObject(resource("config.json")).getJSONObject("phoneme_id_map")
         val ids = map.keys().asSequence().associateWith { map.getInt(it) }
-        return VoskFrontend(ids, BertWordPiece.load(resource("vocab.txt").lineSequence()), dictionary::find)
+        return VoskFrontend(ids, BertWordPiece.load(resource("vocab.txt").lineSequence()), dictionary::find, stressFallback)
     }
+
+    /** Phoneme symbols of [prepared], read back through the model's own id table. */
+    private fun symbols(prepared: VoskFrontend.Prepared): List<String> {
+        val map = JSONObject(resource("config.json")).getJSONObject("phoneme_id_map")
+        val names = map.keys().asSequence().associate { map.getInt(it) to it }
+        return prepared.phonemes.mapNotNull { names[it[0]] }
+    }
+
+    /** The phones of the words alone, without the sentence's own ^, space and $. */
+    private fun wordSymbols(prepared: VoskFrontend.Prepared): List<String> =
+        symbols(prepared).filter { it != "^" && it != " " && it != "$" }
+
+    /** The model's vowel symbols with a stress: the stressed vowel's symbol ends in «1». */
+    private val stressed = setOf("a1", "e1", "i1", "o1", "u1", "y1")
 
     @Test
     fun matchesThePythonFrontendSentenceBySentence() {
@@ -69,6 +86,29 @@ class VoskFrontendTest {
         assertEquals("z a1 m o0 k", VoskFrontend.convert("з+амок"))
         // a soft sign softens the consonant and disappears; «е» after it gets its «j»
         assertEquals("pj j e1 s", VoskFrontend.convert("пь+ес"))
+    }
+
+    @Test
+    fun onlyAWordTheModelLacksTakesTheReadersStress() {
+        val lexicon = RussianStressLexicon(File("src/main/assets/ru_stress.bin").readBytes())
+        val asked = ArrayList<String>()
+        val stressedFrontend = frontend { word -> asked += word; lexicon.find(word) }
+
+        // «алфавит» is absent from the model's dictionary and unambiguous in the lexicon: one stressed vowel.
+        assertEquals(0, wordSymbols(frontend().prepare("алфавит")).count { it in stressed })
+        val spoken = wordSymbols(stressedFrontend.prepare("алфавит"))
+        assertEquals(1, spoken.count { it in stressed })
+        assertTrue(asked.contains("алфавит"))
+
+        // A word the dictionary knows keeps the model's own pronunciation, and the lexicon is not asked.
+        asked.clear()
+        assertEquals("m o0 l ch a1 l".split(' '), wordSymbols(stressedFrontend.prepare("молчал")))
+        assertTrue("a known word must not reach the lexicon: $asked", asked.isEmpty())
+
+        // The reader's own «+» is never overwritten by the lexicon either.
+        asked.clear()
+        assertEquals("z a1 m o0 k".split(' '), wordSymbols(stressedFrontend.prepare("з+амок")))
+        assertTrue(asked.isEmpty())
     }
 
     @Test
