@@ -4,9 +4,10 @@
   python tools/voices/vosk-check-steps.py <vosk model dir> <kotlin model.onnx> <python model.onnx>
 
 Both are the same variant of the same graph: the Kotlin one is written by VoskDecoderStepsTest with
-VOSK_MODEL and VOSK_OUT set, the Python one by vosk-fewer-steps.py (--steps 5 --cfg-steps 5 by default,
---steps 8 --no-cfg for the variant that was measured and not adopted). Both models get the same sentence
-and voice without noise (scales 0, 1, 0), so they must give the same audio; it also prints node counts.
+VOSK_MODEL and VOSK_OUT set, the Python one by vosk-fewer-steps.py (--steps 5 by default, guidance on
+every kept step; --steps 8 --no-cfg for the variant that was measured and not adopted). Both models get
+the same sentence and voice without noise (scales 0, 1, 0), so they must give the same audio; it also
+prints node counts.
 """
 import sys
 

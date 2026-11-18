@@ -69,9 +69,11 @@ hand and prints the timings and that correlation. The app downloads the prepared
 [NGC404/sgspeech-vosk-tts-ru-0.10-prepared](https://huggingface.co/NGC404/sgspeech-vosk-tts-ru-0.10-prepared)
 (Apache 2.0) during install, checks its SHA-256, deletes the graph from the Alpha Cephei archive,
 rewrites the decoder itself (`VoskDecoderSteps.kt`; `max difference 0.0` against
-`vosk-fewer-steps.py` on the same graph) and lets ONNX Runtime write the `.ort` copy on the first start.
-A failed fetch or rewrite leaves `model.onnx` in place, so an install from before this change keeps
-working — it just starts slowly.
+`vosk-fewer-steps.py` on the same graph) and lets ONNX Runtime write the `.ort` copy on the first start,
+rebuilding it when the model file changes. A failed fetch leaves `model.onnx` as the acoustic model, cut
+to 5 steps; a failed rewrite keeps the prepared graph (`model-prepared.onnx`), which still loads in
+seconds. An install from before this change keeps working untouched; the model card offers to upgrade it
+by downloading `model-prepared.onnx` alone (226 MB) and rewriting the decoder in place.
 
 The decoder was re-measured on ten voices (28/47/49/2 plus 0, 5, 10, 20, 35, 56) with
 `tools/voices/vosk-compare-variants.py`, and again at noise 0, where the output is deterministic:

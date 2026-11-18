@@ -41,6 +41,7 @@ class RuVoiceUpdateTest {
         override fun preview(language: String, voice: VoiceChoice) = Unit
         override fun stopPreview() = Unit
         override fun download(model: SpeechModel) = Unit
+        override fun upgrade(model: SpeechModel) = Unit
         override fun cancelDownload(model: SpeechModel) = Unit
         override fun delete(model: SpeechModel) = Unit
         override fun setSpeed(speed: Float) = Unit

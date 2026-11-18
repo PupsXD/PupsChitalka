@@ -9,7 +9,8 @@ That is 20 estimator runs, about 95% of the synthesis time. This script can
   --cfg-steps 3   keep guidance only on the first three steps that are kept,
   --steps 5       keep every other step with dt = 0.2 (the kept steps already start at t = 0, 0.2, …),
   --steps 8       keep 8 of the 10 steps; a skipped step's dt goes to the step before it, so the
-                  trajectory still ends at t = 1 (0.1 · 10). 8 runs replace 5 · 2 = 10 with CFG.
+                  trajectory still ends at t = 1 (0.1 · 10). With guidance on every kept step that is
+                  16 estimator runs; --no-cfg makes it 8 instead of 5 · 2 = 10 with CFG.
 and then drops every node no output needs any more.
 
   python tools/voices/vosk-fewer-steps.py model.onnx out.onnx [--no-cfg | --cfg-steps K] [--steps N]

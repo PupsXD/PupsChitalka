@@ -12,8 +12,9 @@ import java.nio.channels.FileChannel
  *
  * As published, the flow-matching decoder runs 10 steps of dt = 0.1, each with two estimator passes
  * mixed by classifier-free guidance: 20 passes, about 95% of the synthesis time. [rewrite] keeps
- * [STEPS] of the 10 steps, the first [GUIDED_STEPS] of them with guidance, and gives a skipped step's
- * dt to the step before it, so the trajectory still ends at t = 1.
+ * [STEPS] of the 10 steps, all of them guided unless told otherwise, and gives a skipped step's dt to
+ * the step before it, so the trajectory still ends at t = 1. The knobs default the same way here,
+ * in tools/voices/vosk-fewer-steps.py and in vosk-prepare.py: guidance on every kept step.
  *
  * The defaults are the variant the PC stand picked (tools/voices/vosk-compare-variants.py, ten voices,
  * noise 0 and the model's own): 5 steps with guidance, 10 passes, the closest to the published model
@@ -31,9 +32,6 @@ internal object VoskDecoderSteps {
     /** Steps kept out of the 10 the model has: 5 passes with guidance instead of 20. */
     const val STEPS = 5
 
-    /** How many of the kept steps run the estimator twice for guidance: all of them. */
-    const val GUIDED_STEPS = 5
-
     private const val STEPS_IN_MODEL = 10
     private const val GRAPH = 7       // ModelProto.graph
     private const val NODE = 1        // GraphProto.node
@@ -49,9 +47,10 @@ internal object VoskDecoderSteps {
     /**
      * Writes a [steps]-step model to [target]; throws, leaving [source] as it is, when the layout is
      * not Vosk 0.10's. The first [cfgSteps] kept steps keep classifier-free guidance, the rest use the
-     * conditional velocity alone. Returns how many Constant nodes it added for the summed dt.
+     * conditional velocity alone; by default every kept step keeps it. Returns how many Constant nodes
+     * it added for the summed dt.
      */
-    fun rewrite(source: File, target: File, steps: Int = STEPS, cfgSteps: Int = GUIDED_STEPS): Int {
+    fun rewrite(source: File, target: File, steps: Int = STEPS, cfgSteps: Int = steps): Int {
         require(steps in 1..STEPS_IN_MODEL && cfgSteps in 0..steps) { "steps $steps, cfgSteps $cfgSteps" }
         var constantsAdded = 0
         RandomAccessFile(source, "r").use { file ->

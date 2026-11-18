@@ -65,6 +65,55 @@ class VoskDecoderStepsTest {
     }
 
     @Test
+    fun guidesEveryKeptStepWhenStepsAreGivenAlone() {
+        // cfgSteps defaults to steps, as --steps 8 does in vosk-fewer-steps.py and vosk-prepare.py:
+        // 8 kept steps, all guided, are 16 estimator runs.
+        val target = tempFile()
+        assertEquals(2, VoskDecoderSteps.rewrite(decoderGraph(), target, steps = 8))
+        val written = target.readBytes().toString(Charsets.ISO_8859_1)
+        for (step in listOf(0, 1, 2, 3, 5, 6, 7, 8)) {
+            assertTrue("conditional estimator $step kept", written.contains(velocity(step * 2)))
+            assertTrue("uncond estimator $step kept", written.contains(velocity(step * 2 + 1)))
+        }
+        for (step in listOf(4, 9)) {
+            assertTrue(!written.contains(velocity(step * 2)))
+            assertTrue(!written.contains(velocity(step * 2 + 1)))
+        }
+    }
+
+    @Test
+    fun keepsGuidanceOnTheFirstKeptStepsOnly() {
+        // 8 steps with 3 guided: the measured variant, 11 estimator runs.
+        val target = tempFile()
+        assertEquals(2, VoskDecoderSteps.rewrite(decoderGraph(), target, steps = 8, cfgSteps = 3))
+        val written = target.readBytes().toString(Charsets.ISO_8859_1)
+        for (step in listOf(0, 1, 2)) {
+            assertTrue("conditional estimator $step kept", written.contains(velocity(step * 2)))
+            assertTrue("uncond estimator $step kept", written.contains(velocity(step * 2 + 1)))
+        }
+        for (step in listOf(3, 5, 6, 7, 8)) {
+            assertTrue("conditional estimator $step kept", written.contains(velocity(step * 2)))
+            assertTrue("uncond estimator $step dropped", !written.contains(velocity(step * 2 + 1)))
+        }
+    }
+
+    @Test
+    fun rewiresConsecutiveSkippedSteps() {
+        // 4 steps keep 0, 2, 5, 7; steps 8 and 9 are dropped in a row, so the vocoder must read x_8,
+        // the x step 7 started its update from, rather than x_10 that no node writes any more.
+        val target = tempFile()
+        assertEquals(4, VoskDecoderSteps.rewrite(decoderGraph(), target, steps = 4))
+        val written = target.readBytes().toString(Charsets.ISO_8859_1)
+        val vocoder = node("vocoder", "Mul", listOf("x_8", "gain"), listOf("wav")).toString(Charsets.ISO_8859_1)
+        assertTrue(written.contains(vocoder))
+        for (step in listOf(0, 2, 5, 7)) assertTrue(written.contains(velocity(step * 2 + 1)))
+        for (step in listOf(1, 3, 4, 6, 8, 9)) {
+            assertTrue(!written.contains(velocity(step * 2)))
+            assertTrue(!written.contains(velocity(step * 2 + 1)))
+        }
+    }
+
+    @Test
     fun readsDtFromInitializers() {
         val target = tempFile()
         assertEquals(2, VoskDecoderSteps.rewrite(decoderGraph(constantsAsInitializers = true), target, steps = 8, cfgSteps = 0))

@@ -91,7 +91,9 @@ enum class SpeechModel(
                 sha256 = "0c476114d4fec7ff6bfdacef7d0d657b683da306c93d24711e48387f8e882cd0",
             ),
         ),
-        // The acoustic model is model-fast.onnx, or model.onnx if it could not be rewritten: VoskTts.isInstalled.
+        // The acoustic model is model-fast.onnx, model-prepared.onnx, model-5steps.onnx or model.onnx:
+        // VoskTts.isInstalled and VoskTts.acousticModel. An install from before the fast graph can be
+        // upgraded by downloading the prepared graph alone (SpeechModels.upgrade).
         requiredFiles = listOf("bert.onnx", "vocab.txt", "dictionary", "config.json", "dictionary.idx"),
     ),
     KOKORO_RU(
@@ -172,6 +174,8 @@ data class ModelInstallState(
     val completed: Long = 0,
     val total: Long = 0,
     val message: String? = null,
+    /** The download adds the fast graph to an install that already works, rather than installing anew. */
+    val upgrade: Boolean = false,
 ) {
     enum class Stage { QUEUED, DOWNLOADING, EXTRACTING, DONE, CANCELLED, FAILED }
 
@@ -206,6 +210,13 @@ object SpeechModels {
         return model.requiredFiles.all { File(directory, it).let { file -> file.isFile && file.length() > 0 } } &&
             (model != SpeechModel.VOSK || VoskTts.isInstalled(directory))
     }
+
+    /**
+     * Whether [model] can gain the fast graph by downloading model-prepared.onnx alone. Every Vosk
+     * install made before that graph is such a case; one already rewritten into model-fast.onnx is not.
+     */
+    fun isUpgradeable(context: Context, model: SpeechModel): Boolean =
+        model == SpeechModel.VOSK && voskInstallKind(directory(context, model)) == VoskInstallKind.LEGACY
 
     fun isBusy(model: SpeechModel): Boolean = states.value[model]?.stage in setOf(
         ModelInstallState.Stage.QUEUED, ModelInstallState.Stage.DOWNLOADING, ModelInstallState.Stage.EXTRACTING,
@@ -250,6 +261,44 @@ object SpeechModels {
         }
     }
 
+    /**
+     * Adds the fast graph to an install made before it: fetches model-prepared.onnx only, checks it
+     * against the same SHA-256 and rewrites the decoder in place. The old graph stays until the new
+     * one is written, and an install the user never upgrades keeps working as it is.
+     */
+    fun upgrade(context: Context, model: SpeechModel) {
+        val app = context.applicationContext
+        if (model != SpeechModel.VOSK || !isUpgradeable(app, model) || isBusy(model)) return
+        cancelled.remove(model)
+        publishUpgrade(model, ModelInstallState.Stage.QUEUED)
+        worker.execute {
+            if (model in cancelled) {
+                publishUpgrade(model, ModelInstallState.Stage.CANCELLED)
+                return@execute
+            }
+            activeRequest = model
+            try {
+                upgradeNow(app, model)
+                publishUpgrade(model, ModelInstallState.Stage.DONE)
+            } catch (_: InstallCancelled) {
+                publishUpgrade(model, ModelInstallState.Stage.CANCELLED, message = "Загрузка отменена")
+            } catch (error: Exception) {
+                if (model in cancelled) {
+                    publishUpgrade(model, ModelInstallState.Stage.CANCELLED, message = "Загрузка отменена")
+                } else {
+                    publishUpgrade(
+                        model, ModelInstallState.Stage.FAILED,
+                        message = "Не удалось ускорить запуск ${model.title}: ${error.message ?: "ошибка сети"}",
+                    )
+                }
+            } finally {
+                activeConnection.set(null)
+                activeModel = null
+                activeRequest = null
+            }
+        }
+    }
+
     /** Downloads [model] cannot work without. */
     private fun prerequisites(model: SpeechModel): List<SpeechModel> = when (model) {
         SpeechModel.SUPERTONIC_FULL -> listOf(SpeechModel.SUPERTONIC)
@@ -268,6 +317,7 @@ object SpeechModels {
         val directory = directory(context, model)
         val deleted = deleteOwned(root(context), directory)
         File(root(context), "${model.directoryName}.part").delete()
+        File(root(context), "${model.directoryName}.prepared").delete()
         mutableStates.value = mutableStates.value - model
         return deleted
     }
@@ -279,6 +329,14 @@ object SpeechModels {
     private fun publish(state: ModelInstallState) {
         mutableStates.value = mutableStates.value + (state.model to state)
     }
+
+    private fun publishUpgrade(
+        model: SpeechModel,
+        stage: ModelInstallState.Stage,
+        completed: Long = 0,
+        total: Long = 0,
+        message: String? = null,
+    ) = publish(ModelInstallState(model, stage, completed, total, message, upgrade = true))
 
     /** Stops when [model] itself or the download that asked for it was cancelled. */
     private fun checkCancelled(model: SpeechModel, request: SpeechModel = model) {
@@ -479,6 +537,61 @@ object SpeechModels {
             android.util.Log.w("SpeechModels", "Vosk decoder kept at 10 steps", error)
             faster.delete()
             File(faster.path + ".part").delete()
+        }
+    }
+
+    /**
+     * The in-place upgrade of an old Vosk install: model-prepared.onnx is downloaded and checked, the
+     * decoder is rewritten into model-fast.onnx, and only then are the graphs it supersedes removed.
+     * A rewrite that fails keeps the prepared graph as the acoustic model: it loads in seconds anyway.
+     */
+    private fun upgradeNow(context: Context, model: SpeechModel) {
+        val prepared = (model.source as? ModelSource.Zip)?.prepared
+            ?: error("у ${model.title} нет ускоренного графа")
+        val root = root(context)
+        val target = directory(context, model)
+        val download = File(root, "${model.directoryName}.prepared")
+        try {
+            val bytes = downloadResumable(
+                prepared.url, download, prepared.maxBytes, activeConnection,
+                checkCancelled = { checkCancelled(model) },
+            ) { done, total ->
+                publishUpgrade(
+                    model, ModelInstallState.Stage.DOWNLOADING, done, total,
+                    message = "Скачиваем ускоренный граф",
+                )
+            }
+            check(bytes > prepared.maxBytes / 2) { "ускоренный граф скачался не полностью" }
+            check(sha256Hex(download) == prepared.sha256) {
+                download.delete()
+                "ускоренный граф повреждён"
+            }
+            checkCancelled(model)
+            publishUpgrade(model, ModelInstallState.Stage.EXTRACTING, message = "Ускоряем модель")
+            val fast = File(target, VOSK_FAST_GRAPH)
+            try {
+                VoskDecoderSteps.rewrite(download, fast)
+            } catch (error: Exception) {
+                android.util.Log.w("SpeechModels", "Vosk decoder kept at 10 steps", error)
+                fast.delete()
+                File(fast.path + ".part").delete()
+                val fallback = File(target, "model-prepared.onnx")
+                OrtCache.forget(File(fallback.path + ".ort"), File(fallback.path + ".ort.stamp"))
+                fallback.delete()
+                check(download.renameTo(fallback)) { "Не удалось заменить граф модели" }
+            }
+            // The graph just written supersedes what the install had, its old .ort copy included.
+            val kept = if (fast.exists()) VOSK_FAST_GRAPH else "model-prepared.onnx"
+            listOf(VOSK_FAST_GRAPH, "model-prepared.onnx", "model-5steps.onnx", "model.onnx")
+                .filter { it != kept }
+                .forEach { name ->
+                    val old = File(target, name)
+                    old.delete()
+                    File(old.path + ".ort").delete()
+                    File(old.path + ".ort.stamp").delete()
+                }
+        } finally {
+            download.delete()
         }
     }
 

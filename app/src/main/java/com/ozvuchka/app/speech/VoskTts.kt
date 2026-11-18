@@ -41,7 +41,8 @@ internal data class VoskNoise(val level: Float, val durationLevel: Float) {
  * bert.onnx (or bert-int8.onnx), and the acoustic model — [acousticModel] picks model-fast.onnx (the
  * decoder cut and the shapes resolved at install time, see tools/voices/vosk-prepare.py),
  * model-prepared.onnx when the decoder could not be rewritten, the 5-step file of an older install, or
- * model.onnx as published. A prepared graph also gets ONNX Runtime's own optimized copy (`….ort`).
+ * model.onnx as published. A prepared graph also gets ONNX Runtime's own optimized copy (`….ort`),
+ * kept only while the model file it was built from is unchanged.
  */
 internal class VoskTts(
     directory: File,
@@ -81,21 +82,26 @@ internal class VoskTts(
      * The acoustic model, from ONNX Runtime's optimized copy when there is one. The copy loads in a
      * fraction of the time, but only a graph that had its shapes resolved ahead of time gains anything
      * from it (57 s → 2.6 s; the copy then takes 1.2 s), so it is written for prepared graphs only.
-     * Anything unexpected about the copy falls back to the .onnx, and the copy is written again.
+     * The copy is tied to the model file by [OrtCache]: a replaced model or a copy without a stamp is
+     * not loaded but rebuilt. Anything unexpected about the copy falls back to the .onnx.
      */
     private fun createAcoustic(model: File): OrtSession {
         val cache = File(model.path + ".ort")
-        if (cache.isFile) {
+        val stamp = File(model.path + ".ort.stamp")
+        if (OrtCache.isValid(model, cache, stamp)) {
             try {
                 return env.createSession(cache.path, options())
             } catch (error: Exception) {
                 android.util.Log.w("VoskTts", "optimized graph is not usable, loading the model", error)
-                cache.delete()
+                OrtCache.forget(cache, stamp)
             }
+        } else if (cache.exists() || stamp.exists()) {
+            // Built from another model or before stamps existed: it cannot be trusted.
+            OrtCache.forget(cache, stamp)
         }
         if (isPrepared(model)) {
             try {
-                return env.createSession(model.path, options(cache))
+                return env.createSession(model.path, options(cache)).also { OrtCache.remember(model, stamp) }
             } catch (error: Exception) {
                 android.util.Log.w("VoskTts", "optimized graph not written, loading the model again", error)
                 cache.delete()

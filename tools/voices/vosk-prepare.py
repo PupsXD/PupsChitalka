@@ -17,12 +17,13 @@ HuggingFace (NGC404/sgspeech-vosk-tts-ru-0.10-prepared, the same quant_pre_proce
 the decoder itself in VoskDecoderSteps.kt, and lets ONNX Runtime write the .ort copy on first start.
 This script is for the stand and for preparing a model by hand.
 
-  python tools/voices/vosk-prepare.py <vosk model dir> [--out <dir>] [--steps 5] [--cfg-steps 5]
+  python tools/voices/vosk-prepare.py <vosk model dir> [--out <dir>] [--steps 5] [--cfg-steps N]
                                      [--int8] [--ort] [--correlation]
 
-The defaults are what the app installs: 5 steps of which all keep the guidance. The stand measured
-that variant as the closest to the published model; 8 steps with no guidance are 17% faster and lose
-0.1–0.2 UTMOS, 8 steps with 3 guided are no faster and lose 0.05–0.09 (see vosk-compare-variants.py).
+The defaults are what the app installs: 5 steps, and --cfg-steps defaults to --steps, so every kept
+step keeps the guidance. The stand measured that variant as the closest to the published model; 8
+steps with no guidance are 17% faster and lose 0.1–0.2 UTMOS, 8 steps with 3 guided are no faster and
+lose 0.05–0.09 (see vosk-compare-variants.py).
 
 Needs: onnx, onnxruntime, numpy, vosk-tts. Writes nothing into <vosk model dir>.
 """
@@ -98,6 +99,7 @@ def frontend_inputs(model_dir, model_path, text=SENTENCE, speaker=28):
 
 
 def prepare(model_dir, out_dir, steps, cfg_steps, int8, want_ort, correlation):
+    cfg_steps = steps if cfg_steps is None else cfg_steps
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     original = Path(model_dir) / "model.onnx"
@@ -164,7 +166,8 @@ def main():
     parser.add_argument("model_dir", type=Path, help="vosk-model-tts-ru-0.10-multi as downloaded")
     parser.add_argument("--out", type=Path, default=None, help="where to write the prepared files (default: <model dir>/prepared)")
     parser.add_argument("--steps", type=int, default=5)
-    parser.add_argument("--cfg-steps", type=int, default=5, help="kept steps that still run guidance (default: all)")
+    parser.add_argument("--cfg-steps", type=int, default=None,
+                        help="kept steps that still run guidance (default: all kept steps, i.e. --steps)")
     parser.add_argument("--int8", action="store_true", help="also quantize bert.onnx")
     parser.add_argument("--ort", action="store_true", help="also write ONNX Runtime's optimized copy")
     parser.add_argument("--correlation", action="store_true", help="compare the audio with the original at noise 0 (loads all three graphs)")

@@ -581,6 +581,7 @@ private fun ModelCard(
 private fun ModelStatusRow(model: SpeechModel, suggested: Boolean, state: VoiceSettingsUi, actions: VoiceSettingsActions) {
     val install = state.installStates[model]
     val installed = model in state.installedModels
+    val upgradeable = model in state.upgradeableModels
     val busy = install?.stage in setOf(
         ModelInstallState.Stage.QUEUED, ModelInstallState.Stage.DOWNLOADING, ModelInstallState.Stage.EXTRACTING,
     )
@@ -590,14 +591,15 @@ private fun ModelStatusRow(model: SpeechModel, suggested: Boolean, state: VoiceS
             Column(Modifier.weight(1f)) {
                 Text(label, style = MaterialTheme.typography.bodyMedium)
                 val status = when {
-                    installed -> "Установлена"
+                    // A failed upgrade leaves the model installed; its error must still be readable.
+                    install?.stage == ModelInstallState.Stage.FAILED -> install.message ?: "Ошибка загрузки"
                     // A stage message («Скачиваем ускоренный граф», «Готовим голоса») wins over the generic
                     // label; the labels stay for stages that publish none.
                     busy && install?.message != null -> install.message!!
                     busy && install?.stage == ModelInstallState.Stage.QUEUED -> "В очереди"
                     busy && install?.stage == ModelInstallState.Stage.EXTRACTING -> "Распаковка…"
                     busy -> "Загрузка…"
-                    install?.stage == ModelInstallState.Stage.FAILED -> install.message ?: "Ошибка загрузки"
+                    installed -> "Установлена"
                     else -> if (suggested) "Не скачана" else "Необязательно"
                 }
                 Text(
@@ -618,6 +620,11 @@ private fun ModelStatusRow(model: SpeechModel, suggested: Boolean, state: VoiceS
                     Text("Скачать")
                 }
                 else -> OutlinedButton(onClick = { actions.download(model) }) { Text("Скачать") }
+            }
+        }
+        if (installed && upgradeable && !busy) {
+            OutlinedButton(onClick = { actions.upgrade(model) }, modifier = Modifier.fillMaxWidth()) {
+                Text("Ускорить запуск · 226 МБ")
             }
         }
         if (busy) {

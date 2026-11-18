@@ -225,6 +225,8 @@ data class VoiceSettingsUi(
     val supertonicSteps: Int,
     val preferFullModels: Boolean,
     val installedModels: Set<SpeechModel> = emptySet(),
+    /** Installed models that can gain a faster start from a small download (an old Vosk install). */
+    val upgradeableModels: Set<SpeechModel> = emptySet(),
     val installStates: Map<SpeechModel, ModelInstallState> = emptyMap(),
     /** Android TTS engines installed on the phone. */
     val systemEngines: List<SystemEngineInfo> = emptyList(),
@@ -256,6 +258,8 @@ interface VoiceSettingsActions : RuVoiceSetupActions {
     fun preview(language: String, voice: VoiceChoice)
     fun stopPreview()
     fun download(model: SpeechModel)
+    /** Adds what a small extra download brings to an installed model: Vosk's fast graph. */
+    fun upgrade(model: SpeechModel)
     fun cancelDownload(model: SpeechModel)
     fun delete(model: SpeechModel)
     fun setSpeed(speed: Float)
