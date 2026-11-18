@@ -70,6 +70,7 @@ import com.ozvuchka.app.speech.CastStore
 import com.ozvuchka.app.speech.DialogueMode
 import com.ozvuchka.app.speech.DialogueVoices
 import com.ozvuchka.app.speech.EmotionLevel
+import com.ozvuchka.app.speech.KokoroRu
 import com.ozvuchka.app.speech.ModelInstallState
 import com.ozvuchka.app.speech.NarrationController
 import com.ozvuchka.app.speech.NarrationPhase
@@ -513,6 +514,10 @@ class MainActivity : ComponentActivity() {
             SpeechModel.VOSK -> if (settings.russianVoice.engine != VoiceEngine.SYSTEM || !isUsable(settings.russianVoice)) {
                 updateSpeech { it.copy(russianVoice = VoiceChoice(VoiceEngine.VOSK, 28)) }
             }
+            // Same for the Russian Kokoro: a voice already chosen by hand is kept.
+            SpeechModel.KOKORO_RU -> if (settings.russianVoice.engine == VoiceEngine.SUPERTONIC) {
+                updateSpeech { it.copy(russianVoice = VoiceChoice(VoiceEngine.KOKORO_RU, KokoroRu.SVETA)) }
+            }
             else -> Unit
         }
         notice = "${model.title}: голос установлен"
@@ -625,6 +630,7 @@ class MainActivity : ComponentActivity() {
     private fun isUsable(voice: VoiceChoice): Boolean = when (voice.engine) {
         VoiceEngine.SUPERTONIC -> SpeechModel.SUPERTONIC in installedModels || SpeechModel.SUPERTONIC_FULL in installedModels
         VoiceEngine.KOKORO -> SpeechModel.KOKORO in installedModels || SpeechModel.KOKORO_FULL in installedModels
+        VoiceEngine.KOKORO_RU -> KokoroRu.speechModelFor(voice.speaker) in installedModels || SpeechModel.KOKORO_RU in installedModels
         VoiceEngine.VOSK -> SpeechModel.VOSK in installedModels
         VoiceEngine.SYSTEM -> voice.enginePackage in installedEngines
     }

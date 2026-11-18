@@ -53,6 +53,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.ozvuchka.app.speech.DialogueMode
 import com.ozvuchka.app.speech.EmotionLevel
+import com.ozvuchka.app.speech.KokoroRu
 import com.ozvuchka.app.speech.ModelInstallState
 import com.ozvuchka.app.speech.RoleVoice
 import com.ozvuchka.app.speech.RuVoiceUpdateState
@@ -235,6 +236,7 @@ private class EngineOption(
 private fun engineKey(voice: VoiceChoice): String = when (voice.engine) {
     VoiceEngine.SUPERTONIC -> "supertonic"
     VoiceEngine.KOKORO -> "kokoro"
+    VoiceEngine.KOKORO_RU -> "kokoroRu"
     VoiceEngine.VOSK -> "vosk"
     VoiceEngine.SYSTEM -> "system:${voice.enginePackage}"
 }
@@ -266,6 +268,20 @@ private fun engineOptions(state: VoiceSettingsUi, language: String): List<Engine
                 subtitle = if (vosk) "57 голосов: 33 мужских и 24 женских" else "Нужно скачать модель, ≈ 830 МБ",
                 installed = vosk,
                 choice = VoiceChoice(VoiceEngine.VOSK, 28),
+            ),
+        )
+        val kokoroRu = SpeechModel.KOKORO_RU in models
+        add(
+            EngineOption(
+                key = "kokoroRu",
+                title = "Kokoro RU · русский",
+                subtitle = when {
+                    kokoroRu && SpeechModel.KOKORO_RU_DIMA in models -> "Живая интонация, 3 голоса"
+                    kokoroRu -> "Живая интонация, Свэта и Маша"
+                    else -> "Нужно скачать модель, ≈ 330 МБ"
+                },
+                installed = kokoroRu,
+                choice = VoiceChoice(VoiceEngine.KOKORO_RU, KokoroRu.SVETA),
             ),
         )
     } else {
@@ -386,6 +402,21 @@ private fun EngineVoices(state: VoiceSettingsUi, language: String, selected: Voi
                 "и в замерах синтезирует в 2,5 раза быстрее компактной; компактная занимает меньше места.",
             models = listOf(SpeechModel.KOKORO_FULL, SpeechModel.KOKORO),
             presets = VoiceCatalog.kokoro,
+            language = language,
+            selected = selected,
+            state = state,
+            actions = actions,
+        )
+        VoiceEngine.KOKORO_RU -> ModelCard(
+            title = "Голоса Kokoro RU",
+            badge = "тест",
+            description = "Русская версия Kokoro на 82 млн параметров: живая интонация и мягкие переходы, " +
+                "ударения по словарю на 2 млн слов. Свэта и Маша — один файл модели, Дима — отдельный, " +
+                "скачивается вторым. Читает рассказчика; реплики можно оставить на RuVoice.",
+            models = listOf(SpeechModel.KOKORO_RU, SpeechModel.KOKORO_RU_DIMA),
+            presets = VoiceCatalog.kokoroRu.filter { preset ->
+                KokoroRu.speechModelFor(preset.choice.speaker) in state.installedModels
+            },
             language = language,
             selected = selected,
             state = state,
@@ -534,9 +565,9 @@ private fun ModelStatusRow(model: SpeechModel, suggested: Boolean, state: VoiceS
                 Text(label, style = MaterialTheme.typography.bodyMedium)
                 val status = when {
                     installed -> "Установлена"
-                    busy && install?.stage == ModelInstallState.Stage.EXTRACTING -> "Распаковка…"
+                    busy && install?.stage == ModelInstallState.Stage.EXTRACTING -> install.message ?: "Распаковка…"
                     busy && install?.stage == ModelInstallState.Stage.QUEUED -> "В очереди"
-                    busy -> "Загрузка…"
+                    busy -> install?.message ?: "Загрузка…"
                     install?.stage == ModelInstallState.Stage.FAILED -> install.message ?: "Ошибка загрузки"
                     else -> if (suggested) "Не скачана" else "Необязательно"
                 }
@@ -592,6 +623,16 @@ private fun characterVoices(state: VoiceSettingsUi, language: String, narrator: 
             }
             RoleVoice(it.choice, "${it.title} · ${it.description}", gender)
         }
+        VoiceEngine.KOKORO_RU -> VoiceCatalog.kokoroRu
+            .filter { KokoroRu.speechModelFor(it.choice.speaker) in state.installedModels }
+            .map {
+                val male = VoiceCatalog.kokoroRuIsMale(it.choice.speaker)
+                RoleVoice(
+                    it.choice,
+                    "${it.title} · ${if (male) "мужской" else "женский"}",
+                    if (male) SpeechRole.MALE else SpeechRole.FEMALE,
+                )
+            }
         VoiceEngine.VOSK -> VoiceCatalog.vosk.map {
             RoleVoice(it.choice, it.title, if (VoiceCatalog.voskIsMale(it.choice.speaker)) SpeechRole.MALE else SpeechRole.FEMALE)
         }

@@ -84,6 +84,34 @@ enum class SpeechModel(
         ),
         // The acoustic model is model-5steps.onnx, or model.onnx if it could not be rewritten: VoskTts.isInstalled.
         requiredFiles = listOf("bert.onnx", "vocab.txt", "dictionary", "config.json", "dictionary.idx"),
+    ),
+    KOKORO_RU(
+        directoryName = "kokoro-ru-sveta-masha",
+        title = "Kokoro RU · Свэта и Маша",
+        sizeLabel = "≈ 330 МБ",
+        source = ModelSource.Files(
+            baseUrl = "https://huggingface.co/zaakirio/kokoro-ru/resolve/main",
+            names = listOf(KokoroRu.BASE_MODEL, "voices/sveta.bin", "voices/masha.bin", KokoroRu.CONFIG) +
+                KokoroRu.espeakFiles.map { "${KokoroRu.ESPEAK_DIR}/$it" },
+            totalBytes = 340L * 1024 * 1024,
+        ),
+        requiredFiles = listOf(
+            KokoroRu.BASE_MODEL, KokoroRu.VOICES, KokoroRu.TOKENS, KokoroRu.CONFIG,
+        ) + KokoroRu.espeakFiles.map { "${KokoroRu.ESPEAK_DIR}/$it" },
+    ),
+    KOKORO_RU_DIMA(
+        directoryName = "kokoro-ru-dima",
+        title = "Kokoro RU · Дима",
+        sizeLabel = "≈ 330 МБ",
+        source = ModelSource.Files(
+            baseUrl = "https://huggingface.co/zaakirio/kokoro-ru/resolve/main",
+            names = listOf(KokoroRu.DIMA_MODEL, "voices/dima.bin"),
+            copiedFrom = "kokoro-ru-sveta-masha",
+            copiedNames = listOf(KokoroRu.CONFIG) + KokoroRu.espeakFiles.map { "${KokoroRu.ESPEAK_DIR}/$it" },
+            totalBytes = 340L * 1024 * 1024,
+        ),
+        requiredFiles = listOf(KokoroRu.DIMA_MODEL, KokoroRu.VOICES, KokoroRu.TOKENS, KokoroRu.CONFIG) +
+            KokoroRu.espeakFiles.map { "${KokoroRu.ESPEAK_DIR}/$it" },
     );
 
     /** Unquantized weights; the other variant of the same voice is the compact INT8 build. */
@@ -92,9 +120,14 @@ enum class SpeechModel(
     /** What sets this download apart from the other variant of the same voice, for the download row. */
     val variantTitle: String get() = when {
         this == VOSK -> "57 голосов"
+        this == KOKORO_RU -> "Свэта и Маша"
+        this == KOKORO_RU_DIMA -> "Дима"
         isFullPrecision -> "Полная точность"
         else -> "Компактная INT8"
     }
+
+    /** Both Russian Kokoro checkpoints become loadable files only after they are prepared. */
+    internal val isKokoroRu: Boolean get() = this == KOKORO_RU || this == KOKORO_RU_DIMA
 
     /** The Kokoro archives also carry Chinese dictionaries that an English voice never reads. */
     internal fun keepArchiveEntry(path: String): Boolean = when (this) {
@@ -112,8 +145,11 @@ internal sealed class ModelSource {
     class Files(
         val baseUrl: String,
         val names: List<String>,
-        val copiedFrom: String,
-        val copiedNames: List<String>,
+        /** A directory of an already installed model whose [copiedNames] are reused as they are. */
+        val copiedFrom: String? = null,
+        val copiedNames: List<String> = emptyList(),
+        /** Roughly how many bytes [names] weigh, for the progress bar. */
+        val totalBytes: Long = 400L * 1024 * 1024,
     ) : ModelSource()
 }
 
@@ -172,6 +208,10 @@ object SpeechModels {
             try {
                 if (model == SpeechModel.SUPERTONIC_FULL && !isInstalled(app, SpeechModel.SUPERTONIC)) {
                     installNow(app, SpeechModel.SUPERTONIC)
+                }
+                // Either Russian Kokoro download reuses the other's espeak-ng data.
+                if (model == SpeechModel.KOKORO_RU_DIMA && !isInstalled(app, SpeechModel.KOKORO_RU)) {
+                    installNow(app, SpeechModel.KOKORO_RU)
                 }
                 installNow(app, model)
                 publish(ModelInstallState(model, ModelInstallState.Stage.DONE))
@@ -247,27 +287,33 @@ object SpeechModels {
                     if (model == SpeechModel.VOSK) prepareVosk(model, staging)
                 }
                 is ModelSource.Files -> {
-                    val origin = File(root, source.copiedFrom)
-                    source.copiedNames.forEach { name ->
-                        File(origin, name).inputStream().use { input ->
-                            File(staging, name).outputStream().use { output -> input.copyTo(output) }
+                    source.copiedFrom?.let { from ->
+                        val origin = File(root, from)
+                        source.copiedNames.forEach { name ->
+                            val target = File(staging, name)
+                            target.parentFile?.mkdirs()
+                            File(origin, name).inputStream().use { input -> target.outputStream().use { input.copyTo(it) } }
                         }
                     }
                     var completed = 0L
                     source.names.forEach { name ->
                         checkCancelled(model)
                         val file = File(staging, name)
+                        file.parentFile?.mkdirs()
                         completed += download(
                             model, "${source.baseUrl}/$name?download=true", file,
-                            maxBytes = 400L * 1024 * 1024, progressTotal = 400_000_000L, offset = completed,
+                            maxBytes = 400L * 1024 * 1024, progressTotal = source.totalBytes, offset = completed,
                         )
                     }
+                    if (model.isKokoroRu) prepareKokoroRu(model, staging)
                 }
             }
             checkCancelled(model)
             check(model.requiredFiles.all { File(staging, it).length() > 0 }) { "Модель загружена не полностью" }
             if (target.exists()) check(deleteOwned(root, target)) { "Не удалось заменить повреждённую модель" }
             check(staging.renameTo(target)) { "Не удалось завершить установку" }
+            // A model installed as another's prerequisite (the base Kokoro RU before dima) is done too.
+            publish(ModelInstallState(model, ModelInstallState.Stage.DONE))
         } finally {
             if (staging.exists()) deleteOwned(root, staging)
         }
@@ -353,6 +399,13 @@ object SpeechModels {
             faster.delete()
             File(faster.path + ".part").delete()
         }
+    }
+
+    /** The style packs joined, the vocabulary and the ONNX metadata sherpa-onnx expects. */
+    private fun prepareKokoroRu(model: SpeechModel, staging: File) {
+        publish(ModelInstallState(model, ModelInstallState.Stage.EXTRACTING, message = "Готовим голоса"))
+        KokoroRu.prepare(staging, model)
+        checkCancelled(model)
     }
 
     private fun extractZip(model: SpeechModel, source: ModelSource.Zip, archive: File, staging: File) {

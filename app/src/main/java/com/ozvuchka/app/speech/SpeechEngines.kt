@@ -39,6 +39,46 @@ internal data class VoicePace(val speed: Float, val speedUp: Float) {
 }
 
 /**
+ * What one engine is asked for a line: the pace and how much faster than rendered the player plays it,
+ * the noise a voice varies itself by, and the pitch a system engine applies on its own. Engines that
+ * shape their own voice take no pitch: raising one there is the player's job, which would sound wrong.
+ */
+internal data class VoiceParams(
+    val speed: Float,
+    val speedUp: Float,
+    val noise: VoskNoise?,
+    val pitch: Float,
+)
+
+/**
+ * The settings a line is rendered with. A raised voice wavers more only while «Эмоции» are on:
+ * without them narration stays even, and the noise follows the switch rather than the line.
+ */
+internal fun voiceParams(
+    engine: VoiceEngine,
+    speed: Float,
+    prosody: Prosody,
+    emotions: EmotionLevel,
+    role: SpeechRole,
+    tone: SpeechTone,
+): VoiceParams {
+    val pace = VoicePace.of(speed, prosody)
+    return VoiceParams(
+        // Supertone's own default pace is 1.05; the reader's 1.0 means that pace.
+        speed = if (engine == VoiceEngine.SUPERTONIC) pace.speed * 1.05f else pace.speed,
+        speedUp = pace.speedUp,
+        noise = if (engine != VoiceEngine.VOSK) {
+            null
+        } else if (emotions == EmotionLevel.OFF) {
+            VoskNoise.CALM
+        } else {
+            VoskNoise.forLine(role, tone)
+        },
+        pitch = if (engine == VoiceEngine.SYSTEM) prosody.pitch else VoicePace.NATURAL_PITCH,
+    )
+}
+
+/**
  * Owns every synthesizer used during narration: in-process sherpa-onnx models and connections to
  * Android TTS engines such as RuVoice. One instance lives per process, so a model loaded when a
  * book is opened is ready when «Слушать» is pressed; models are released after a few idle
@@ -66,6 +106,7 @@ internal class SynthesisHub private constructor(context: Context) {
     fun isAvailable(voice: VoiceChoice, settings: SpeechSettings): Boolean = when (voice.engine) {
         VoiceEngine.SUPERTONIC -> supertonicModel(settings) != null
         VoiceEngine.KOKORO -> kokoroModel(settings) != null
+        VoiceEngine.KOKORO_RU -> kokoroRuModel(voice.speaker) != null
         VoiceEngine.VOSK -> SpeechModels.isInstalled(app, SpeechModel.VOSK)
         VoiceEngine.SYSTEM -> SystemVoices.isEngineInstalled(app, voice.enginePackage)
     }
@@ -80,7 +121,7 @@ internal class SynthesisHub private constructor(context: Context) {
         role: SpeechRole = SpeechRole.NARRATOR,
         tone: SpeechTone = SpeechTone.NEUTRAL,
     ): SynthesizedAudio {
-        val pace = VoicePace.of(settings.speed, prosody)
+        val params = voiceParams(voice.engine, settings.speed, prosody, settings.emotions, role, tone)
         return when (voice.engine) {
             VoiceEngine.SUPERTONIC -> {
                 val model = supertonicModel(settings)
@@ -89,12 +130,11 @@ internal class SynthesisHub private constructor(context: Context) {
                 if (spoken.isBlank()) return SynthesizedAudio(FloatArray(0), 44_100)
                 val config = GenerationConfig(
                     sid = voice.speaker.coerceIn(0, 9),
-                    // Supertone's own default pace is 1.05; the reader's 1.0 means that pace.
-                    speed = pace.speed * 1.05f,
+                    speed = params.speed,
                     numSteps = settings.supertonicSteps,
                     extra = mapOf("lang" to if (language == "en") "en" else "ru", "silence_duration" to "0.15"),
                 )
-                generate(model, spoken, config, speedUp = pace.speedUp)
+                generate(model, spoken, config, speedUp = params.speedUp)
             }
             VoiceEngine.KOKORO -> {
                 val model = kokoroModel(settings)
@@ -103,25 +143,38 @@ internal class SynthesisHub private constructor(context: Context) {
                 if (spoken.isBlank()) return SynthesizedAudio(FloatArray(0), 24_000)
                 val config = GenerationConfig(
                     sid = voice.speaker,
-                    speed = pace.speed,
+                    speed = params.speed,
                     extra = mapOf("lang" to VoiceCatalog.kokoroLanguage(voice.speaker)),
                 )
-                generate(model, spoken, config, speedUp = pace.speedUp)
+                generate(model, spoken, config, speedUp = params.speedUp)
+            }
+            VoiceEngine.KOKORO_RU -> {
+                val model = kokoroRuModel(voice.speaker)
+                    ?: throw VoiceUnavailableException("Голос Kokoro RU не загружен")
+                // The words carry StressStyle.DICTIONARY_ACUTE marks; espeak-ng reads them.
+                val spoken = SpeechNormalizer.normalize(text, "ru")
+                if (spoken.isBlank()) return SynthesizedAudio(FloatArray(0), KokoroRu.SAMPLE_RATE)
+                val config = GenerationConfig(
+                    sid = KokoroRu.localSpeaker(model, voice.speaker),
+                    speed = params.speed,
+                    extra = mapOf("lang" to "ru"),
+                )
+                generate(model, spoken, config, speedUp = params.speedUp)
             }
             VoiceEngine.VOSK -> {
                 val tts = voskTts() ?: throw VoiceUnavailableException("Голос Vosk не загружен")
                 // «+» before a vowel is the reader's own stress (StressStyle.MARKED) and passes through.
                 val spoken = SpeechNormalizer.normalize(text, "ru")
                 if (spoken.isBlank()) return SynthesizedAudio(FloatArray(0), tts.sampleRate)
-                val noise = VoskNoise.forLine(role, tone)
+                val noise = params.noise ?: VoskNoise.CALM
                 val samples = synchronized(tts) {
-                    tts.synthesize(spoken, voice.speaker, pace.speed, noise.level, noise.durationLevel)
+                    tts.synthesize(spoken, voice.speaker, params.speed, noise.level, noise.durationLevel)
                 }
-                SynthesizedAudio(samples, tts.sampleRate, speedUp = pace.speedUp)
+                SynthesizedAudio(samples, tts.sampleRate, speedUp = params.speedUp)
             }
             VoiceEngine.SYSTEM -> {
                 val client = systemClients.getOrPut(voice.enginePackage) { SystemTtsClient(app, voice.enginePackage) }
-                client.synthesize(text, voice.voiceName, language, pace.speed, prosody.pitch)
+                client.synthesize(text, voice.voiceName, language, params.speed, params.pitch)
             }
         }
     }
@@ -133,6 +186,7 @@ internal class SynthesisHub private constructor(context: Context) {
                 when (voice.engine) {
                     VoiceEngine.SUPERTONIC -> supertonicModel(settings)?.let { load(it) }
                     VoiceEngine.KOKORO -> kokoroModel(settings)?.let { load(it) }
+                    VoiceEngine.KOKORO_RU -> kokoroRuModel(voice.speaker)?.let { load(it) }
                     VoiceEngine.VOSK -> voskTts()
                     VoiceEngine.SYSTEM -> if (SystemVoices.isEngineInstalled(app, voice.enginePackage)) {
                         systemClients.getOrPut(voice.enginePackage) { SystemTtsClient(app, voice.enginePackage) }
@@ -179,6 +233,16 @@ internal class SynthesisHub private constructor(context: Context) {
         else -> null
     }
 
+    /**
+     * The Russian Kokoro checkpoint behind [voice]: dima is a model of its own, sveta and masha share
+     * one. A dima voice whose download is missing is read by the base checkpoint rather than not at all.
+     */
+    private fun kokoroRuModel(speaker: Int): SpeechModel? {
+        val wanted = KokoroRu.speechModelFor(speaker)
+        if (SpeechModels.isInstalled(app, wanted)) return wanted
+        return SpeechModel.KOKORO_RU.takeIf { SpeechModels.isInstalled(app, it) }
+    }
+
     /** Vosk loads for 15–55 s on the phone (ONNX Runtime prepares a graph of 15–29 thousand nodes), so it stays loaded. */
     private fun voskTts(): VoskTts? {
         vosk?.let { return it }
@@ -205,6 +269,8 @@ internal class SynthesisHub private constructor(context: Context) {
             SpeechModel.SUPERTONIC_FULL -> SpeechModel.SUPERTONIC
             SpeechModel.KOKORO -> SpeechModel.KOKORO_FULL
             SpeechModel.KOKORO_FULL -> SpeechModel.KOKORO
+            SpeechModel.KOKORO_RU -> SpeechModel.KOKORO_RU_DIMA
+            SpeechModel.KOKORO_RU_DIMA -> SpeechModel.KOKORO_RU
             SpeechModel.VOSK -> error(NOT_SHERPA)
         }
         models.remove(sibling)?.let { old -> synchronized(old) { old.release() } }
@@ -241,6 +307,24 @@ internal class SynthesisHub private constructor(context: Context) {
                             // A multilingual Kokoro model needs either a lexicon or a language;
                             // without both the native layer terminates the process.
                             lang = "en-us",
+                        ),
+                        numThreads = threads,
+                        provider = "cpu",
+                    ),
+                    maxNumSentences = 1,
+                )
+            }
+            SpeechModel.KOKORO_RU, SpeechModel.KOKORO_RU_DIMA -> {
+                OfflineTtsConfig(
+                    model = OfflineTtsModelConfig(
+                        kokoro = OfflineTtsKokoroModelConfig(
+                            model = File(directory, KokoroRu.modelFile(model)).absolutePath,
+                            voices = File(directory, KokoroRu.VOICES).absolutePath,
+                            tokens = File(directory, KokoroRu.TOKENS).absolutePath,
+                            dataDir = File(directory, KokoroRu.ESPEAK_DIR).absolutePath,
+                            // Russian phonemes come from espeak-ng; a multilingual Kokoro without a
+                            // language or a lexicon makes the native layer terminate the process.
+                            lang = "ru",
                         ),
                         numThreads = threads,
                         provider = "cpu",

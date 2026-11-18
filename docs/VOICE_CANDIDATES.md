@@ -147,3 +147,59 @@ The Russian-stress-tuned Qwen 1.7B checkpoint is not the immediate next test: it
 larger talker is unlikely to solve the measured latency bottleneck without a working
 accelerated runtime. Its possible pronunciation benefit is still worth revisiting
 after mobile generation speed is established.
+
+## November 2026: Russian Kokoro (zaakirio/kokoro-ru) as a downloadable engine
+
+A Russian fine-tune of Kokoro-82M, 24 kHz, three voices: sveta and masha share one checkpoint,
+dima has his own. It is the first Russian model here that sounds like the English Kokoro rather
+than like a formant synthesizer, and it is wired as a download in «Голоса и озвучка».
+
+**What the repository contains** (`https://huggingface.co/zaakirio/kokoro-ru`): `onnx/model.onnx`
+(fp32, 326 MB) plus `model_quantized.onnx` (138 MB), `model_fp16.onnx`, and the same three for dima;
+`voices/{sveta,masha,dima}.bin` — raw float32 style packs of 510 rows × 256; `config.json` with
+Kokoro's 114-symbol `vocab`; an `espeak-data` tree, including a `ru_dict` recompiled from
+espeak-ng master so that it honours the combining acute U+0301; and `ru_g2p.py`, the reference
+frontend.
+
+**Graph compatibility.** The ONNX export has the same layout as
+`onnx-community/Kokoro-82M-v1.0-ONNX` that sherpa-onnx already loads: inputs `input_ids` (int64),
+`style` (float32, 256), `speed` (float32), output `waveform`. Two things are missing from the file,
+and the app adds both during install:
+
+- the metadata sherpa-onnx reads — `sample_rate`, `version` (must be ≥ 2, otherwise the English
+  `PiperPhonemizeLexicon` is used and `lang` is ignored), `n_speakers`, `has_espeak`, `voice`,
+  `style_dim=510,1,256`. ONNX is protobuf, so the app appends field 14 (`metadata_props`) to the end
+  of the downloaded file instead of rewriting 326 MB (`KokoroOnnxMetadata`);
+- `tokens.txt`, built from `config.json` plus four aliases (`ɭ→l`, `ɵ→o`, `ʐ→ʒ`, `ʑ→ʒ`) for the
+  symbols espeak-ng emits for Russian but Kokoro never trained on — the same folding `ru_g2p.py`
+  does in `NORMALIZE`. Without them sherpa-onnx skips those phonemes ("Skip unknown phonemes").
+
+**Russian G2P.** `ru_g2p.py` runs RUAccent, marks stress as «+» before the vowel, converts it to
+U+0301, respells a few orthoepic exceptions and applies espeak-ng with the acute-aware `ru_dict`,
+then applies positional vowel reduction to the IPA. The app cannot run RUAccent or misaki on the
+phone, so it does the part that matters most and is already present: `ru_stress.bin` — the RUAccent
+dictionary of 949 837 unambiguous word forms — marks the words it knows with U+0301
+(`StressStyle.DICTIONARY_ACUTE`), and espeak-ng inside sherpa-onnx reads those marks through the
+model's own dictionary. Homographs the dictionary deliberately omits (за́мок/замо́к) keep espeak's
+rules. **Vowel reduction (akanye) is not applied:** espeak emits a and o apart where standard
+Russian merges them. That is the known quality gap of this integration.
+
+**Measured on the development PC** (Intel Xeon 2.1 GHz, 4 vCPUs, sherpa-onnx 1.13.8 wheel — exactly
+the AAR version the app ships — 4 threads):
+
+| Checkpoint | RTF | Notes |
+| --- | ---: | --- |
+| `onnx/model.onnx` fp32, sveta | 0.29–0.35 | the one the app downloads |
+| `onnx/model.onnx` fp32, masha | 0.35 | same file, second style pack |
+| `onnx/model_dima.onnx` fp32 | 0.31 | the male voice |
+| `onnx/model_quantized.onnx` q8 | 0.81–0.88 | 2.8× slower than fp32, as with English Kokoro INT8 |
+
+Intelligibility: faster-whisper `small` on the 51-word passage returns 11.8% WER, the errors being
+unstressed vowels («Осень» heard as «Осин») — the reduction gap above. Samples:
+`docs/samples/ru-kokoro-sveta.mp3`, `ru-kokoro-dima.mp3`.
+
+Not measured: the phone. Load time, memory (upstream reports 2.39 GB peak in Python; the ONNX
+session itself is smaller), long-chapter thermals and the FP32 download over mobile data are all
+open. The app routes Russian narrator lines to this engine and leaves dialogues to whatever the cast
+settings say; English Kokoro and this model never read each other's language.
+
