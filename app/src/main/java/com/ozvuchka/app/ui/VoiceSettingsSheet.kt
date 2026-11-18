@@ -52,7 +52,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.ozvuchka.app.speech.DialogueMode
+import com.ozvuchka.app.speech.DialogueVoices
 import com.ozvuchka.app.speech.EmotionLevel
+import com.ozvuchka.app.speech.KokoroRu
 import com.ozvuchka.app.speech.ModelInstallState
 import com.ozvuchka.app.speech.RoleVoice
 import com.ozvuchka.app.speech.RuVoiceUpdateState
@@ -112,6 +114,7 @@ fun VoiceSettingsSheet(
                 }
             }
             val selected = if (language == "en") state.englishVoice else state.russianVoice
+            val dialogue = if (language == "en") state.englishDialogue else state.russianDialogue
             item {
                 CurrentVoiceCard(
                     label = if (language == "en") state.englishVoiceLabel else state.russianVoiceLabel,
@@ -121,8 +124,8 @@ fun VoiceSettingsSheet(
                     actions = actions,
                 )
             }
-            item { EnginePicker(state, language, selected, actions) }
-            item { EngineVoices(state, language, selected, actions) }
+            item { EnginePicker(state, language, selected, dialogue, actions) }
+            item { EngineVoices(state, language, selected, dialogue, actions) }
             item { DialogueVoicesCard(state, language, selected, actions) }
             item { EmotionsCard(state, language, actions) }
             item {
@@ -235,6 +238,7 @@ private class EngineOption(
 private fun engineKey(voice: VoiceChoice): String = when (voice.engine) {
     VoiceEngine.SUPERTONIC -> "supertonic"
     VoiceEngine.KOKORO -> "kokoro"
+    VoiceEngine.KOKORO_RU -> "kokoroRu"
     VoiceEngine.VOSK -> "vosk"
     VoiceEngine.SYSTEM -> "system:${voice.enginePackage}"
 }
@@ -266,6 +270,20 @@ private fun engineOptions(state: VoiceSettingsUi, language: String): List<Engine
                 subtitle = if (vosk) "57 голосов: 33 мужских и 24 женских" else "Нужно скачать модель, ≈ 830 МБ",
                 installed = vosk,
                 choice = VoiceChoice(VoiceEngine.VOSK, 28),
+            ),
+        )
+        val kokoroRu = SpeechModel.KOKORO_RU in models
+        add(
+            EngineOption(
+                key = "kokoroRu",
+                title = "Kokoro RU · русский",
+                subtitle = when {
+                    kokoroRu && SpeechModel.KOKORO_RU_DIMA in models -> "Живая интонация, 3 голоса"
+                    kokoroRu -> "Живая интонация, Свэта и Маша"
+                    else -> "Нужно скачать модель, ≈ 330 МБ"
+                },
+                installed = kokoroRu,
+                choice = VoiceChoice(VoiceEngine.KOKORO_RU, KokoroRu.SVETA),
             ),
         )
     } else {
@@ -305,7 +323,13 @@ private fun engineOptions(state: VoiceSettingsUi, language: String): List<Engine
 }
 
 @Composable
-private fun EnginePicker(state: VoiceSettingsUi, language: String, selected: VoiceChoice, actions: VoiceSettingsActions) {
+private fun EnginePicker(
+    state: VoiceSettingsUi,
+    language: String,
+    selected: VoiceChoice,
+    dialogue: DialogueVoices,
+    actions: VoiceSettingsActions,
+) {
     SheetCard {
         CardTitle("Движок", null)
         val selectedKey = engineKey(selected)
@@ -315,11 +339,11 @@ private fun EnginePicker(state: VoiceSettingsUi, language: String, selected: Voi
                 when {
                     isSelected -> Unit
                     option.choice.enginePackage == VoiceCatalog.RUVOICE_PACKAGE && !option.installed -> {
-                        actions.selectVoice(language, option.choice)
+                        pickNarrator(state, language, dialogue, actions, option.choice)
                         actions.installRuVoice()
                     }
                     else -> {
-                        actions.selectVoice(language, option.choice)
+                        pickNarrator(state, language, dialogue, actions, option.choice)
                         if (option.choice.engine == VoiceEngine.SYSTEM) actions.loadEngineVoices(option.choice.enginePackage)
                     }
                 }
@@ -354,7 +378,13 @@ private fun EnginePicker(state: VoiceSettingsUi, language: String, selected: Voi
 
 /** Voices of the engine chosen for [language], with downloads for the built-in models. */
 @Composable
-private fun EngineVoices(state: VoiceSettingsUi, language: String, selected: VoiceChoice, actions: VoiceSettingsActions) {
+private fun EngineVoices(
+    state: VoiceSettingsUi,
+    language: String,
+    selected: VoiceChoice,
+    dialogue: DialogueVoices,
+    actions: VoiceSettingsActions,
+) {
     when (selected.engine) {
         VoiceEngine.SUPERTONIC -> ModelCard(
             title = "Голоса Supertonic 3",
@@ -364,6 +394,7 @@ private fun EngineVoices(state: VoiceSettingsUi, language: String, selected: Voi
             presets = VoiceCatalog.supertonic,
             language = language,
             selected = selected,
+            dialogue = dialogue,
             state = state,
             actions = actions,
             footer = {
@@ -388,6 +419,24 @@ private fun EngineVoices(state: VoiceSettingsUi, language: String, selected: Voi
             presets = VoiceCatalog.kokoro,
             language = language,
             selected = selected,
+            dialogue = dialogue,
+            state = state,
+            actions = actions,
+        )
+        VoiceEngine.KOKORO_RU -> ModelCard(
+            title = "Голоса Kokoro RU",
+            badge = "тест",
+            description = "Русская версия Kokoro на 82 млн параметров: живая интонация и мягкие переходы, " +
+                "ударения по словарю на 2 млн слов. Свэта и Маша — один файл модели, Дима — отдельный, " +
+                "каждый около 330 МБ. В памяти держится файл рассказчика, и роли читает он же: выбрать " +
+                "Диму для мужских ролей при рассказчике Свэте нельзя.",
+            models = listOf(SpeechModel.KOKORO_RU, SpeechModel.KOKORO_RU_DIMA),
+            presets = VoiceCatalog.kokoroRu.filter { preset ->
+                KokoroRu.speechModelFor(preset.choice.speaker) in state.installedModels
+            },
+            language = language,
+            selected = selected,
+            dialogue = dialogue,
             state = state,
             actions = actions,
         )
@@ -401,15 +450,22 @@ private fun EngineVoices(state: VoiceSettingsUi, language: String, selected: Voi
             presets = VoiceCatalog.vosk,
             language = language,
             selected = selected,
+            dialogue = dialogue,
             state = state,
             actions = actions,
         )
-        VoiceEngine.SYSTEM -> SystemEngineVoices(state, language, selected, actions)
+        VoiceEngine.SYSTEM -> SystemEngineVoices(state, language, selected, dialogue, actions)
     }
 }
 
 @Composable
-private fun SystemEngineVoices(state: VoiceSettingsUi, language: String, selected: VoiceChoice, actions: VoiceSettingsActions) {
+private fun SystemEngineVoices(
+    state: VoiceSettingsUi,
+    language: String,
+    selected: VoiceChoice,
+    dialogue: DialogueVoices,
+    actions: VoiceSettingsActions,
+) {
     val enginePackage = selected.enginePackage
     LaunchedEffect(enginePackage) { actions.loadEngineVoices(enginePackage) }
     val engine = state.systemEngines.firstOrNull { it.packageName == enginePackage }
@@ -445,7 +501,7 @@ private fun SystemEngineVoices(state: VoiceSettingsUi, language: String, selecte
             selected = selected == engineDefault,
             enabled = true,
             previewing = state.previewVoice == engineDefault,
-            onSelect = { actions.selectVoice(language, engineDefault) },
+            onSelect = { pickNarrator(state, language, dialogue, actions, engineDefault) },
             onPreview = { actions.preview(language, engineDefault) },
             onStop = actions::stopPreview,
         )
@@ -468,7 +524,7 @@ private fun SystemEngineVoices(state: VoiceSettingsUi, language: String, selecte
                     selected = selected == choice,
                     enabled = !voice.notInstalled,
                     previewing = state.previewVoice == choice,
-                    onSelect = { actions.selectVoice(language, choice) },
+                    onSelect = { pickNarrator(state, language, dialogue, actions, choice) },
                     onPreview = { actions.preview(language, choice) },
                     onStop = actions::stopPreview,
                 )
@@ -490,6 +546,7 @@ private fun ModelCard(
     presets: List<VoicePreset>,
     language: String,
     selected: VoiceChoice,
+    dialogue: DialogueVoices,
     state: VoiceSettingsUi,
     actions: VoiceSettingsActions,
     footer: (@Composable () -> Unit)? = null,
@@ -510,7 +567,7 @@ private fun ModelCard(
                     enabled = true,
                     recommended = preset.recommended,
                     previewing = state.previewVoice == preset.choice,
-                    onSelect = { actions.selectVoice(language, preset.choice) },
+                    onSelect = { pickNarrator(state, language, dialogue, actions, preset.choice) },
                     onPreview = { actions.preview(language, preset.choice) },
                     onStop = actions::stopPreview,
                 )
@@ -534,9 +591,9 @@ private fun ModelStatusRow(model: SpeechModel, suggested: Boolean, state: VoiceS
                 Text(label, style = MaterialTheme.typography.bodyMedium)
                 val status = when {
                     installed -> "Установлена"
-                    busy && install?.stage == ModelInstallState.Stage.EXTRACTING -> "Распаковка…"
+                    busy && install?.stage == ModelInstallState.Stage.EXTRACTING -> install.message ?: "Распаковка…"
                     busy && install?.stage == ModelInstallState.Stage.QUEUED -> "В очереди"
-                    busy -> "Загрузка…"
+                    busy -> install?.message ?: "Загрузка…"
                     install?.stage == ModelInstallState.Stage.FAILED -> install.message ?: "Ошибка загрузки"
                     else -> if (suggested) "Не скачана" else "Необязательно"
                 }
@@ -578,8 +635,17 @@ private fun ModelStatusRow(model: SpeechModel, suggested: Boolean, state: VoiceS
     }
 }
 
-/** Character voices come from the narrator's engine, so a scene never jumps between synthesizers. */
-private fun characterVoices(state: VoiceSettingsUi, language: String, narrator: VoiceChoice): List<RoleVoice> =
+/**
+ * Character voices come from the narrator's engine, so a scene never jumps between synthesizers.
+ * Under Kokoro RU the list is the narrator's checkpoint ([forNarrator] widens it back to every
+ * installed voice, for the narrator's own picker).
+ */
+private fun characterVoices(
+    state: VoiceSettingsUi,
+    language: String,
+    narrator: VoiceChoice,
+    forNarrator: Boolean = false,
+): List<RoleVoice> =
     when (narrator.engine) {
         VoiceEngine.SUPERTONIC -> VoiceCatalog.supertonic.map {
             RoleVoice(it.choice, it.title, if (it.choice.speaker < 5) SpeechRole.FEMALE else SpeechRole.MALE)
@@ -591,6 +657,21 @@ private fun characterVoices(state: VoiceSettingsUi, language: String, narrator: 
                 else -> null
             }
             RoleVoice(it.choice, "${it.title} · ${it.description}", gender)
+        }
+        VoiceEngine.KOKORO_RU -> {
+            val presets = if (forNarrator) {
+                VoiceCatalog.kokoroRu.filter { KokoroRu.speechModelFor(it.choice.speaker) in state.installedModels }
+            } else {
+                VoiceCatalog.kokoroRuRoleVoices(narrator.speaker, state.installedModels)
+            }
+            presets.map {
+                val male = VoiceCatalog.kokoroRuIsMale(it.choice.speaker)
+                RoleVoice(
+                    it.choice,
+                    "${it.title} · ${if (male) "мужской" else "женский"}",
+                    if (male) SpeechRole.MALE else SpeechRole.FEMALE,
+                )
+            }
         }
         VoiceEngine.VOSK -> VoiceCatalog.vosk.map {
             RoleVoice(it.choice, it.title, if (VoiceCatalog.voskIsMale(it.choice.speaker)) SpeechRole.MALE else SpeechRole.FEMALE)
@@ -614,6 +695,25 @@ private fun engineDefaultVoice(state: VoiceSettingsUi, language: String, engineP
 private fun heardNarrator(state: VoiceSettingsUi, language: String, narrator: VoiceChoice): VoiceChoice {
     if (narrator.engine != VoiceEngine.SYSTEM || narrator.voiceName.isNotEmpty()) return narrator
     return engineDefaultVoice(state, language, narrator.enginePackage)?.let { narrator.copy(voiceName = it.name) } ?: narrator
+}
+
+/**
+ * Makes [choice] the narrator and re-picks the dialogue roles from the NEW narrator's voices on the
+ * same pass: roles carry the old engine, and a scene must not jump between synthesizers. Every
+ * narrator change in this sheet goes through here — the engine cards, the voice lists and the
+ * picker would otherwise leave a role on the previous engine's voice.
+ */
+private fun pickNarrator(
+    state: VoiceSettingsUi,
+    language: String,
+    dialogue: DialogueVoices,
+    actions: VoiceSettingsActions,
+    choice: VoiceChoice,
+) {
+    actions.selectVoice(language, choice)
+    // A new narrator should not take a character's voice: those move on,
+    // and the roles are re-picked from the NEW narrator's options.
+    actions.setDialogue(language, dialogue.withDistinctVoices(characterVoices(state, language, choice), heardNarrator(state, language, choice)))
 }
 
 @Composable
@@ -687,8 +787,12 @@ private fun DialogueVoicesCard(state: VoiceSettingsUi, language: String, narrato
                     color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.weight(1f),
                 )
-                TextButton(onClick = { actions.setDialogue(language, dialogue.withDistinctVoices(options, heard)) }) {
-                    Text("Развести")
+                // One voice is all the narrator's engine offers (a lone Dima checkpoint): re-picking
+                // cannot spread the roles apart, so the button would do nothing. The warning stays.
+                if (options.size > 1) {
+                    TextButton(onClick = { actions.setDialogue(language, dialogue.withDistinctVoices(options, heard)) }) {
+                        Text("Развести")
+                    }
                 }
             }
         }
@@ -724,11 +828,14 @@ private fun DialogueVoicesCard(state: VoiceSettingsUi, language: String, narrato
             "female" -> dialogue.female
             else -> dialogue.single
         }
-        // The narrator may also stay with the engine's own default voice.
-        val pickable = if (slot == "narrator" && narrator.engine == VoiceEngine.SYSTEM) {
-            listOf(RoleVoice(VoiceChoice(VoiceEngine.SYSTEM, enginePackage = narrator.enginePackage), "По умолчанию", null)) + options
-        } else {
-            options
+        // The narrator may also stay with the engine's own default voice; under a Kokoro RU narrator
+        // the other checkpoint is offered too, because choosing it is what switches the one file a
+        // narration keeps in memory.
+        val pickable = when {
+            slot != "narrator" -> options
+            narrator.engine == VoiceEngine.SYSTEM ->
+                listOf(RoleVoice(VoiceChoice(VoiceEngine.SYSTEM, enginePackage = narrator.enginePackage), "По умолчанию", null)) + options
+            else -> characterVoices(state, language, narrator, forNarrator = true)
         }
         /** Where a voice is already heard, so the reader sees which choices would sound alike. */
         fun usedBy(choice: VoiceChoice): String? = when {
@@ -768,11 +875,7 @@ private fun DialogueVoicesCard(state: VoiceSettingsUi, language: String, narrato
                             previewing = state.previewVoice == option.choice,
                             onSelect = {
                                 when (slot) {
-                                    "narrator" -> {
-                                        actions.selectVoice(language, option.choice)
-                                        // A new narrator should not take a character's voice: those move on.
-                                        actions.setDialogue(language, dialogue.withDistinctVoices(options, heardNarrator(state, language, option.choice)))
-                                    }
+                                    "narrator" -> pickNarrator(state, language, dialogue, actions, option.choice)
                                     "male" -> actions.setDialogue(language, dialogue.copy(male = option.choice))
                                     "female" -> actions.setDialogue(language, dialogue.copy(female = option.choice))
                                     else -> actions.setDialogue(language, dialogue.copy(single = option.choice))

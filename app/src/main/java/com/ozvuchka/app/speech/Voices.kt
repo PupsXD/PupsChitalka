@@ -2,10 +2,10 @@ package com.ozvuchka.app.speech
 
 import android.content.Context
 
-enum class VoiceEngine { SUPERTONIC, KOKORO, SYSTEM, VOSK }
+enum class VoiceEngine { SUPERTONIC, KOKORO, KOKORO_RU, SYSTEM, VOSK }
 
 /**
- * A voice as stored in preferences: `supertonic:3`, `kokoro:3`, `vosk:28` or
+ * A voice as stored in preferences: `supertonic:3`, `kokoro:3`, `kokoroRu:2`, `vosk:28` or
  * `system:<engine package>:<voice name>`.
  */
 data class VoiceChoice(
@@ -17,6 +17,7 @@ data class VoiceChoice(
     fun encode(): String = when (engine) {
         VoiceEngine.SUPERTONIC -> "supertonic:$speaker"
         VoiceEngine.KOKORO -> "kokoro:$speaker"
+        VoiceEngine.KOKORO_RU -> "kokoroRu:$speaker"
         VoiceEngine.VOSK -> "vosk:$speaker"
         VoiceEngine.SYSTEM -> "system:$enginePackage:$voiceName"
     }
@@ -28,6 +29,9 @@ data class VoiceChoice(
             return when (parts[0]) {
                 "supertonic" -> parts.getOrNull(1)?.toIntOrNull()?.let { VoiceChoice(VoiceEngine.SUPERTONIC, it.coerceIn(0, 9)) }
                 "kokoro" -> parts.getOrNull(1)?.toIntOrNull()?.let { VoiceChoice(VoiceEngine.KOKORO, it.coerceAtLeast(0)) }
+                "kokoroRu" -> parts.getOrNull(1)?.toIntOrNull()?.let {
+                    VoiceChoice(VoiceEngine.KOKORO_RU, it.coerceIn(0, VoiceCatalog.KOKORO_RU_SPEAKERS - 1))
+                }
                 "vosk" -> parts.getOrNull(1)?.toIntOrNull()?.let { VoiceChoice(VoiceEngine.VOSK, it.coerceIn(0, VoiceCatalog.VOSK_SPEAKERS - 1)) }
                 "system" -> if (parts.size == 3 && parts[1].isNotBlank()) {
                     VoiceChoice(VoiceEngine.SYSTEM, enginePackage = parts[1], voiceName = parts[2])
@@ -80,6 +84,28 @@ object VoiceCatalog {
     /** British Kokoro voices are trained on en-gb phonemes. */
     fun kokoroLanguage(speaker: Int): String = if (speaker in 20..27) "en-gb" else "en-us"
 
+    const val KOKORO_RU_SPEAKERS = KokoroRu.SPEAKERS
+
+    /** The three Russian Kokoro voices; sveta is the flagship of the model. */
+    val kokoroRu: List<VoicePreset> = listOf(
+        VoicePreset(VoiceChoice(VoiceEngine.KOKORO_RU, KokoroRu.SVETA), "Свэта", "Русский · женский · чище всех", recommended = true),
+        VoicePreset(VoiceChoice(VoiceEngine.KOKORO_RU, KokoroRu.MASHA), "Маша", "Русский · женский · мягче"),
+        VoicePreset(VoiceChoice(VoiceEngine.KOKORO_RU, KokoroRu.DIMA), "Дима", "Русский · мужской"),
+    )
+
+    fun kokoroRuIsMale(speaker: Int): Boolean = KokoroRu.isMale(speaker)
+
+    /**
+     * The Kokoro RU voices that can read characters' lines under a narrator of [narratorSpeaker]: the
+     * ones its checkpoint reads. The other download is a second 326 MB model in memory, so a dialogue
+     * never mixes Sveta's file with dima's — dima is offered when he is the narrator, not as a role.
+     */
+    fun kokoroRuRoleVoices(narratorSpeaker: Int, installed: Set<SpeechModel>): List<VoicePreset> {
+        val checkpoint = KokoroRu.checkpointFor(narratorSpeaker)
+        if (checkpoint !in installed) return emptyList()
+        return kokoroRu.filter { KokoroRu.checkpointFor(it.choice.speaker) == checkpoint }
+    }
+
     const val VOSK_SPEAKERS = 57
 
     /**
@@ -111,10 +137,11 @@ object VoiceCatalog {
         }
 
     fun presetTitle(choice: VoiceChoice): String? =
-        (supertonic + kokoro + vosk).firstOrNull { it.choice == choice }?.let {
+        (supertonic + kokoro + kokoroRu + vosk).firstOrNull { it.choice == choice }?.let {
             when (choice.engine) {
                 VoiceEngine.SUPERTONIC -> "Supertonic · ${it.title}"
                 VoiceEngine.KOKORO -> "Kokoro · ${it.title}"
+                VoiceEngine.KOKORO_RU -> "Kokoro RU · ${it.title}"
                 VoiceEngine.VOSK -> "Vosk · ${it.title}"
                 VoiceEngine.SYSTEM -> it.title
             }
