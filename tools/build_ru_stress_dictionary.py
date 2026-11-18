@@ -22,7 +22,9 @@ HASHES = (
     "c4ee777bbbab87f9eac838f370ad92974e079d02b21903e480c54b5f0c8c60d1",
 )
 VOWELS = set("аеёиоуыэюя")
-MAX_LETTERS = 9
+# Word forms longer than this are compounds and names that RUAccent spells out anyway; 9 letters left
+# out thousands of ordinary long words («препятствие», «возвращение», «электричество»).
+MAX_LETTERS = 24
 
 
 def read_source(path: Path, expected_hash: str):

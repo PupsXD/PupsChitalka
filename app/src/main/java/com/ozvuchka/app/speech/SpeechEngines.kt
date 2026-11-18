@@ -25,6 +25,20 @@ import java.util.concurrent.TimeUnit
 class VoiceUnavailableException(message: String) : IllegalStateException(message)
 
 /**
+ * How a line is said: the pace the synthesizer is asked for and how much faster than rendered the player
+ * plays it. [speedUp] stays 1 for a voice without a pitch control: speeding up a slowed-down rendering
+ * raises the pitch together with the formants, and «Стой!» comes out as a chipmunk. Such a voice takes
+ * the tone's pace alone, and the player adds its loudness.
+ */
+internal data class VoicePace(val speed: Float, val speedUp: Float) {
+    companion object {
+        const val NATURAL_PITCH = 1f
+
+        fun of(baseSpeed: Float, prosody: Prosody) = VoicePace(baseSpeed * prosody.rate, NATURAL_PITCH)
+    }
+}
+
+/**
  * Owns every synthesizer used during narration: in-process sherpa-onnx models and connections to
  * Android TTS engines such as RuVoice. One instance lives per process, so a model loaded when a
  * book is opened is ready when «Слушать» is pressed; models are released after a few idle
@@ -56,18 +70,17 @@ internal class SynthesisHub private constructor(context: Context) {
         VoiceEngine.SYSTEM -> SystemVoices.isEngineInstalled(app, voice.enginePackage)
     }
 
-    /** Renders [text]; [prosody] is the line's tone: its pace and pitch come from here, its loudness from the player. */
+    /** Renders [text]; [prosody] is the line's tone: its pace comes from here, its loudness from the player. */
     fun synthesize(
         voice: VoiceChoice,
         text: String,
         language: String,
         settings: SpeechSettings,
         prosody: Prosody = Prosody.NEUTRAL,
+        role: SpeechRole = SpeechRole.NARRATOR,
+        tone: SpeechTone = SpeechTone.NEUTRAL,
     ): SynthesizedAudio {
-        val speed = settings.speed * prosody.rate
-        // Supertonic, Kokoro and Vosk cannot change pitch: they speak slower by as much, and the player plays
-        // the sound that much faster, which brings the pace back and raises the voice.
-        val modelSpeed = speed / prosody.pitch
+        val pace = VoicePace.of(settings.speed, prosody)
         return when (voice.engine) {
             VoiceEngine.SUPERTONIC -> {
                 val model = supertonicModel(settings)
@@ -77,11 +90,11 @@ internal class SynthesisHub private constructor(context: Context) {
                 val config = GenerationConfig(
                     sid = voice.speaker.coerceIn(0, 9),
                     // Supertone's own default pace is 1.05; the reader's 1.0 means that pace.
-                    speed = modelSpeed * 1.05f,
+                    speed = pace.speed * 1.05f,
                     numSteps = settings.supertonicSteps,
                     extra = mapOf("lang" to if (language == "en") "en" else "ru", "silence_duration" to "0.15"),
                 )
-                generate(model, spoken, config, speedUp = prosody.pitch)
+                generate(model, spoken, config, speedUp = pace.speedUp)
             }
             VoiceEngine.KOKORO -> {
                 val model = kokoroModel(settings)
@@ -90,22 +103,25 @@ internal class SynthesisHub private constructor(context: Context) {
                 if (spoken.isBlank()) return SynthesizedAudio(FloatArray(0), 24_000)
                 val config = GenerationConfig(
                     sid = voice.speaker,
-                    speed = modelSpeed,
+                    speed = pace.speed,
                     extra = mapOf("lang" to VoiceCatalog.kokoroLanguage(voice.speaker)),
                 )
-                generate(model, spoken, config, speedUp = prosody.pitch)
+                generate(model, spoken, config, speedUp = pace.speedUp)
             }
             VoiceEngine.VOSK -> {
                 val tts = voskTts() ?: throw VoiceUnavailableException("Голос Vosk не загружен")
                 // «+» before a vowel is the reader's own stress (StressStyle.MARKED) and passes through.
                 val spoken = SpeechNormalizer.normalize(text, "ru")
                 if (spoken.isBlank()) return SynthesizedAudio(FloatArray(0), tts.sampleRate)
-                val samples = synchronized(tts) { tts.synthesize(spoken, voice.speaker, modelSpeed) }
-                SynthesizedAudio(samples, tts.sampleRate, speedUp = prosody.pitch)
+                val noise = VoskNoise.forLine(role, tone)
+                val samples = synchronized(tts) {
+                    tts.synthesize(spoken, voice.speaker, pace.speed, noise.level, noise.durationLevel)
+                }
+                SynthesizedAudio(samples, tts.sampleRate, speedUp = pace.speedUp)
             }
             VoiceEngine.SYSTEM -> {
                 val client = systemClients.getOrPut(voice.enginePackage) { SystemTtsClient(app, voice.enginePackage) }
-                client.synthesize(text, voice.voiceName, language, speed, prosody.pitch)
+                client.synthesize(text, voice.voiceName, language, pace.speed, prosody.pitch)
             }
         }
     }
@@ -168,7 +184,9 @@ internal class SynthesisHub private constructor(context: Context) {
         vosk?.let { return it }
         if (!SpeechModels.isInstalled(app, SpeechModel.VOSK)) return null
         return synchronized(modelLock) {
-            vosk ?: VoskTts(SpeechModels.directory(app, SpeechModel.VOSK), threads).also { vosk = it }
+            vosk ?: VoskTts(SpeechModels.directory(app, SpeechModel.VOSK), threads) { word ->
+                RussianStressLexicon.find(app, word)
+            }.also { vosk = it }
         }
     }
 

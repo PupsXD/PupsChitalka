@@ -369,7 +369,7 @@ internal class NarrationPlayer(
             var rewrite = pronunciations.apply(segment.text, stressStyleFor(voice))
             val prosody = settings.prosodyFor(segment)
             val audio = try {
-                hub.synthesize(voice, rewrite.text, segment.language, settings, prosody)
+                hub.synthesize(voice, rewrite.text, segment.language, settings, prosody, segment.role, segment.tone)
             } catch (error: Exception) {
                 if (cancelled) return null
                 val fallback = fallbackVoice(voice) ?: throw error
@@ -378,7 +378,7 @@ internal class NarrationPlayer(
                 listener.onVoiceFallback(id, "${error.message ?: "Голос недоступен"}. Читает встроенный голос.")
                 voice = fallback
                 rewrite = pronunciations.apply(segment.text, stressStyleFor(fallback))
-                hub.synthesize(fallback, rewrite.text, segment.language, settings, prosody)
+                hub.synthesize(fallback, rewrite.text, segment.language, settings, prosody, segment.role, segment.tone)
             }
             if (cancelled) return null
             val rate = synchronized(lock) {
@@ -391,9 +391,11 @@ internal class NarrationPlayer(
             if (samples.isNotEmpty()) {
                 // The voice keeps its usual loudness; a shout or a whisper is louder or quieter than that.
                 val gain = loudness.gainFor(voice.encode(), AudioShaping.speechRms(samples, audio.sampleRate)) * prosody.gain
-                // Played faster than it was rendered, a sound rises in pitch: the tone of a voice without a pitch control.
+                // Played faster than it was rendered, a sound rises in pitch; neural voices keep it at 1.
                 val sourceRate = (audio.sampleRate * audio.speedUp).roundToInt()
                 samples = Resampler.resample(samples, sourceRate, rate)
+                // Presence before the loudness gain: the soft limiter then sees the signal the listener hears.
+                NarratorEq.apply(samples, rate)
                 AudioShaping.applyGain(samples, gain)
                 AudioShaping.fadeEdges(samples, rate)
                 if (audio.words.isNotEmpty()) {
