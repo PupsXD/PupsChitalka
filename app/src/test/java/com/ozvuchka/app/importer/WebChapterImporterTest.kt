@@ -70,6 +70,56 @@ class WebChapterImporterTest {
         assertTrue(!text.contains("evil") && !text.contains("Купи слона"))
     }
 
+    // ---------- Litmir chapters ----------
+
+    private val litmirUrl = "https://litmir.club/br/?b=149221&p=2"
+
+    @Test
+    fun litmirSitesReadTheirBookTextContainer() {
+        for (site in listOf("litmir.club", "litmir.me", "litmir.net")) {
+            for (host in listOf(site, "www.$site")) {
+                assertEquals(
+                    "правила для $host",
+                    listOf("div.BookText div.page_text", "div.page_text"),
+                    hostRuleSelectors(host),
+                )
+            }
+        }
+        val document = Jsoup.parse(fixture("litmir-chapter.html"), litmirUrl)
+        val found = findContentElement(document, "litmir.club")!!
+        // The chapter itself, not the outer div that carries the whole page.
+        assertEquals("page_text", found.className())
+    }
+
+    @Test
+    fun litmirChapterDropsTheSiteFurnitureAndKeepsItsFootnotes() {
+        val document = Jsoup.parse(fixture("litmir-chapter.html"), litmirUrl)
+        val article = findContentElement(document, "litmir.club")!!
+        val content = chapterContent(document, article)
+        val text = content.text()
+        assertTrue(text.contains("Билли обратил внимание на одного из парней"))
+        assertTrue(text.contains("Таксономист как по характеру"))
+        // The footnote sits beside the chapter container but belongs to the chapter.
+        assertTrue(text.contains("Примечания"))
+        assertTrue(text.contains("Организация из вселенной «Стар Трека»"))
+        for (junk in listOf("Войти на сайт", "ЖАНРЫ", "Стр.2", "Следующая страница", "Оглавление")) {
+            assertFalse("в главу попало: $junk", text.contains(junk))
+        }
+        val chapter = WebChapter("x", content.html(), litmirUrl, null).toBookChapter()
+        assertTrue(chapter.paragraphs.first().startsWith("Билли обратил внимание"))
+        assertTrue(chapter.paragraphs.contains("Примечания"))
+        assertTrue(chapter.paragraphs.any { it.contains("Стар Трека") })
+    }
+
+    @Test
+    fun litmirTitleAndNextPageComeFromTheStructuredMetadata() {
+        val document = Jsoup.parse(fixture("litmir-chapter.html"), litmirUrl)
+        val article = findContentElement(document, "litmir.club")!!
+        // document.title() and og:title are the site's «Читать ... - Страница 2» line.
+        assertEquals("Стр.2 | Кракен", WebChapterImporter.extractTitle(document, article))
+        assertEquals("https://litmir.club/br/?b=149221&p=3", extractNextUrl(document, litmirUrl))
+    }
+
     // ---------- Paragraphs without duplication ----------
 
     @Test

@@ -103,7 +103,7 @@ object WebChapterImporter {
                     else -> ImportError.of(ImportReason.EMPTY_CONTENT)
                 },
             )
-        val content = cleanedContent(article)
+        val content = chapterContent(document, article)
         if (content.text().length < MIN_CHAPTER_CHARS) {
             return@withContext ImportResult.Failure(
                 when {
@@ -225,7 +225,7 @@ object WebChapterImporter {
         return url.substring(0, schemeEnd + 3) + url.substring(schemeEnd + 3).substringBefore('/')
     }
 
-    private fun extractTitle(document: Document, article: org.jsoup.nodes.Element): String {
+    internal fun extractTitle(document: Document, article: org.jsoup.nodes.Element): String {
         val heading = article.closest(".story")?.selectFirst("h1")
             ?: article.selectFirst("h1")
             ?: document.selectFirst("h1[itemprop=name]")
@@ -239,11 +239,32 @@ object WebChapterImporter {
             return "$headingText | $bookTitle"
         }
         return headingText.ifBlank {
+            breadcrumbTitle(document)
+        }.ifBlank {
             document.selectFirst("meta[property=og:title]")?.attr("content")?.trim().orEmpty()
         }.ifBlank {
             document.title().trim()
         }.ifBlank {
             "Глава"
+        }
+    }
+
+    /**
+     * The title from the page's schema.org breadcrumbs: the last two crumbs name the chapter
+     * and the book, while the first repeats the site's own name and is dropped. Reader sites
+     * put the whole «Читать ... - Страница N - библиотека» line into og:title, so the crumbs
+     * come before it. A page without crumbs gives an empty string and falls through.
+     */
+    private fun breadcrumbTitle(document: Document): String {
+        val siteName = document.selectFirst("meta[property=og:site_name]")
+            ?.attr("content")?.let(::normalizeText).orEmpty()
+        val crumbs = document.select("[itemtype*=BreadcrumbList] [itemprop=name]")
+            .map { normalizeText(it.text()) }
+            .filter { it.isNotEmpty() && !it.equals(siteName, ignoreCase = true) }
+        return when {
+            crumbs.size >= 2 -> "${crumbs.last()} | ${crumbs[crumbs.size - 2]}"
+            crumbs.size == 1 -> crumbs.single()
+            else -> ""
         }
     }
 }

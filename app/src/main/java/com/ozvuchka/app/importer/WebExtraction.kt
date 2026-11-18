@@ -26,6 +26,9 @@ private val hostRules: List<Pair<String, List<String>>> = listOf(
     "ranobehub.org" to listOf("div.marked-content", "#chapter-text", "div.text"),
     "litnet.com" to listOf("div.chapter-text", "div#chapterContent", "div.js-read-page-content"),
     "litnet.ru" to listOf("div.chapter-text", "div#chapterContent", "div.js-read-page-content"),
+    "litmir.club" to listOf("div.BookText div.page_text", "div.page_text"),
+    "litmir.me" to listOf("div.BookText div.page_text", "div.page_text"),
+    "litmir.net" to listOf("div.BookText div.page_text", "div.page_text"),
     "ficbook.net" to listOf("div#chapter_container", "div.ch_text", "div.chapter-text"),
     "jaomix.ru" to listOf("div.entry-content", "div.chapter-content", "article"),
     "royalroad.com" to listOf("div.chapter-content", "div.chapter-inner"),
@@ -123,6 +126,27 @@ private fun readabilityCandidate(document: Document): Element? {
 internal fun cleanedContent(article: Element): Element {
     val content = article.clone()
     content.select(junkSelector).remove()
+    return content
+}
+
+/** Footnotes a reader site keeps beside the chapter container rather than inside it. */
+private const val NOTES_SELECTOR = "div.page_notes"
+
+/**
+ * The chapter as it goes into the book: the found container cleaned of the page furniture,
+ * plus the footnotes the site keeps outside it, under their own «Примечания» line. The page
+ * itself stays untouched for the title and next-link lookups.
+ */
+internal fun chapterContent(document: Document, article: Element): Element {
+    val content = cleanedContent(article)
+    // Notes already inside the container came with the chapter; only a copy beside it is added.
+    if (content.selectFirst(NOTES_SELECTOR) != null) return content
+    val notes = document.selectFirst(NOTES_SELECTOR)?.clone() ?: return content
+    // The back link is the site's navigation, not part of the note.
+    notes.select("a.fb2-note-back").remove()
+    if (notes.text().isBlank()) return content
+    content.appendElement("p").text("Примечания")
+    content.appendChild(notes)
     return content
 }
 
