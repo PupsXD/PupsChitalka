@@ -97,13 +97,17 @@ object WebBookImporter {
             ?: return@withContext WebBookResult.Failure(ImportError.of(ImportReason.BOOK_FILE_MISSING))
 
         onStage(WebImportStage.DOWNLOADING)
-        val file = when (val fetched = WebFetch.fetch(fileUrl, MAX_BOOK_BYTES)) {
+        val file = when (val fetched = WebFetch.fetch(
+            fileUrl,
+            allowUrl = { allowsWebRedirect(bookPage.url, it) },
+            maxBodyBytes = MAX_BOOK_BYTES,
+        )) {
             is WebFetch.FetchResult.Ok -> fetched.response
             is WebFetch.FetchResult.Failed -> return@withContext WebBookResult.Failure(fetched.error)
         }
         val finalUrl = canonicalWebUrl(file.url().toString())
             ?: return@withContext WebBookResult.Failure(ImportError.of(ImportReason.BOOK_FILE_MISSING))
-        if (!sameSite(bookPage.url, finalUrl)) {
+        if (!allowsWebRedirect(bookPage.url, finalUrl)) {
             return@withContext WebBookResult.Failure(
                 ImportError.of(ImportReason.BOOK_FILE_MISSING, "файл отдаёт другой сайт"),
             )
@@ -155,7 +159,7 @@ object WebBookImporter {
 
     /** Fetches [url] as an HTML page; a book file or a challenge answer becomes a typed failure. */
     private suspend fun loadPage(url: String): PageResult {
-        val response = when (val fetched = WebFetch.fetch(url)) {
+        val response = when (val fetched = WebFetch.fetch(url, allowUrl = { allowsWebRedirect(url, it) })) {
             is WebFetch.FetchResult.Ok -> fetched.response
             is WebFetch.FetchResult.Failed -> return PageResult.Failed(fetched.error)
         }
@@ -278,9 +282,5 @@ object WebBookImporter {
         .filter(String::isNotEmpty)
         .toSet()
 
-    private fun sameSite(first: String, second: String): Boolean {
-        val firstHost = runCatching { URI(first).host }.getOrNull() ?: return false
-        val secondHost = runCatching { URI(second).host }.getOrNull() ?: return false
-        return siteOf(firstHost) == siteOf(secondHost)
-    }
+    private fun sameSite(first: String, second: String): Boolean = allowsWebRedirect(first, second)
 }

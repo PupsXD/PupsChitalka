@@ -50,7 +50,7 @@ object WebChapterImporter {
         // poisoned cookie from an earlier attempt cannot answer for this one.
         clearWebSession()
         onStage(WebImportStage.DOWNLOADING)
-        val response = when (val fetched = WebFetch.fetch(requestedUrl)) {
+        val response = when (val fetched = WebFetch.fetch(requestedUrl, allowUrl = { allowsWebRedirect(requestedUrl, it) })) {
             is WebFetch.FetchResult.Ok -> fetched.response
             is WebFetch.FetchResult.Failed -> return@withContext ImportResult.Failure(fetched.error)
         }

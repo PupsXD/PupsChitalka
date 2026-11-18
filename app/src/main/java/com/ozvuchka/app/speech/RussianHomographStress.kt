@@ -12,18 +12,18 @@ package com.ozvuchka.app.speech
  * on purpose, because the dictionary knows one reading of these words.
  */
 internal object RussianHomographStress {
-    /** Readings and the vowel each one stresses, per written form. */
+    /** Stress is an ordinal among vowels, not a character offset that can land on a consonant. */
     private class Reading(val firstVowel: Int, val lastVowel: Int)
 
     private val readings: Map<String, Reading> = mapOf(
         // за́мок (castle) against замо́к (lock)
-        "замок" to Reading(1, 3), "замка" to Reading(1, 3), "замку" to Reading(1, 3),
-        "замком" to Reading(1, 4), "замке" to Reading(1, 4),
+        "замок" to Reading(0, 1), "замка" to Reading(0, 1), "замку" to Reading(0, 1),
+        "замком" to Reading(0, 1), "замке" to Reading(0, 1),
         // сто́ит / сто́ят (cost, worth) against стои́т / стоя́т (stand)
-        "стоит" to Reading(2, 3), "стоят" to Reading(2, 3),
+        "стоит" to Reading(0, 1), "стоят" to Reading(0, 1),
         // му́ка (torment) against мука́ (flour)
-        "мука" to Reading(1, 3), "муки" to Reading(1, 3), "муке" to Reading(1, 3),
-        "муку" to Reading(1, 3), "мукой" to Reading(1, 4),
+        "мука" to Reading(0, 1), "муки" to Reading(0, 1), "муке" to Reading(0, 1),
+        "муку" to Reading(0, 1), "мукой" to Reading(0, 1),
     )
 
     private val castleMarkers = setOf(
@@ -80,8 +80,8 @@ internal object RussianHomographStress {
         return builder.toString()
     }
 
-    private fun stressedVowel(word: String, reading: Reading, previous: String?, next: String?): Int? =
-        when (word) {
+    private fun stressedVowel(word: String, reading: Reading, previous: String?, next: String?): Int? {
+        val ordinal = when (word) {
             "замок", "замка", "замку", "замком", "замке" -> when {
                 matches(previous, castleMarkers) || matches(next, castleMarkers) -> reading.firstVowel
                 matches(previous, lockMarkers) || matches(next, lockMarkers) -> reading.lastVowel
@@ -101,6 +101,10 @@ internal object RussianHomographStress {
             }
             else -> null
         }
+        return ordinal?.let { index -> word.indices.filter { word[it] in VOWELS }.getOrNull(index) }
+    }
+
+    private val VOWELS = setOf('а', 'я', 'о', 'ё', 'у', 'ю', 'э', 'е', 'и', 'ы')
 
     private fun matches(word: String?, markers: Set<String>): Boolean =
         word != null && markers.any { word.startsWith(it) }

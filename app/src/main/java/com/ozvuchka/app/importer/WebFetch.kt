@@ -23,6 +23,7 @@ internal object WebFetch {
     /** jsoup applies its timeout to both connecting and reading; retries read with more slack. */
     private const val CONNECT_TIMEOUT_MS = 10_000
     private const val READ_TIMEOUT_MS = 20_000
+    private const val MAX_REDIRECTS = 5
     const val MAX_BODY_BYTES = 8_000_000
     private const val ATTEMPTS = 3
 
@@ -43,7 +44,54 @@ internal object WebFetch {
      * [maxBodyBytes] bounds what the response may hold; a bigger body fails instead of being
      * read into memory.
      */
-    suspend fun fetch(url: String, maxBodyBytes: Int = MAX_BODY_BYTES): FetchResult {
+    internal data class RedirectHop<T>(val statusCode: Int, val location: String?, val value: T)
+
+    internal sealed interface RedirectResult<out T> {
+        data class Complete<T>(val url: String, val value: T) : RedirectResult<T>
+        data class Rejected(val error: ImportError) : RedirectResult<Nothing>
+    }
+
+    /** The redirect runner is kept separate so tests can verify the transport boundary with stubs. */
+    internal fun <T> requestWithRedirects(
+        startUrl: String,
+        allowUrl: (String) -> Boolean,
+        request: (String) -> RedirectHop<T>,
+        maxRedirects: Int = MAX_REDIRECTS,
+    ): RedirectResult<T> {
+        var current = canonicalWebUrl(startUrl)
+            ?: return RedirectResult.Rejected(ImportError.of(ImportReason.BAD_URL))
+        val visited = linkedSetOf<String>()
+        var redirects = 0
+        while (true) {
+            if (!allowUrl(current) || !visited.add(current)) {
+                return RedirectResult.Rejected(ImportError.of(ImportReason.BAD_URL, "redirect rejected"))
+            }
+            val hop = request(current)
+            if (hop.statusCode !in 300..399 || hop.statusCode == 304) {
+                return RedirectResult.Complete(current, hop.value)
+            }
+            if (redirects >= maxRedirects) {
+                return RedirectResult.Rejected(ImportError.of(ImportReason.BAD_URL, "too many redirects"))
+            }
+            val location = hop.location?.takeIf(String::isNotBlank)
+                ?: return RedirectResult.Rejected(ImportError.of(ImportReason.BAD_URL, "missing redirect location"))
+            val next = runCatching { java.net.URI(current).resolve(location).toString() }
+                .getOrNull()?.let(::canonicalWebUrl)
+                ?: return RedirectResult.Rejected(ImportError.of(ImportReason.BAD_URL, "invalid redirect location"))
+            // Validate before the next transport call; a disallowed URL never reaches request().
+            if (!allowUrl(next)) {
+                return RedirectResult.Rejected(ImportError.of(ImportReason.BAD_URL, "redirect target rejected"))
+            }
+            current = next
+            redirects++
+        }
+    }
+
+    suspend fun fetch(
+        url: String,
+        allowUrl: (String) -> Boolean,
+        maxBodyBytes: Int = MAX_BODY_BYTES,
+    ): FetchResult {
         val host = runCatching { java.net.URI(url).host }.getOrNull().orEmpty()
         val site = siteOf(host) ?: host
         var attempt = 0
@@ -52,22 +100,32 @@ internal object WebFetch {
             if (attempt > 0) delay(750L * attempt)
             try {
                 val timeout = if (attempt == 0) CONNECT_TIMEOUT_MS else READ_TIMEOUT_MS
-                val response = Jsoup.connect(url)
-                    .userAgent(USER_AGENT)
-                    .header("Accept", ACCEPT)
-                    .header("Accept-Language", ACCEPT_LANGUAGE)
-                    .referrer(originOf(url))
-                    .cookies(sessionCookies[site] ?: emptyMap())
-                    .timeout(timeout)
-                    .maxBodySize(maxBodyBytes)
-                    .followRedirects(true)
-                    .ignoreContentType(true)
-                    // Error answers arrive as responses, so a challenge page can be read.
-                    .ignoreHttpErrors(true)
-                    .execute()
-                response.cookies().forEach { (name, value) ->
-                    sessionCookies.getOrPut(site) { ConcurrentHashMap() }[name] = value
+                val redirected = requestWithRedirects(url, allowUrl, request = { target ->
+                    val response = Jsoup.connect(target)
+                        .userAgent(USER_AGENT)
+                        .header("Accept", ACCEPT)
+                        .header("Accept-Language", ACCEPT_LANGUAGE)
+                        .referrer(originOf(target))
+                        .cookies(sessionCookies[site] ?: emptyMap())
+                        .timeout(timeout)
+                        .maxBodySize(maxBodyBytes)
+                        .followRedirects(false)
+                        .ignoreContentType(true)
+                        // Error answers arrive as responses, so a challenge page can be read.
+                        .ignoreHttpErrors(true)
+                        .execute()
+                    response.cookies().forEach { (name, value) ->
+                        sessionCookies.getOrPut(site) { ConcurrentHashMap() }[name] = value
+                    }
+                    RedirectHop(response.statusCode(), response.header("Location"), response)
+                })
+                val response = when (redirected) {
+                    is RedirectResult.Complete -> redirected.value
+                    is RedirectResult.Rejected -> return FetchResult.Failed(redirected.error)
                 }
+                val finalUrl = canonicalWebUrl(response.url().toString())
+                    ?: return FetchResult.Failed(ImportError.of(ImportReason.BAD_URL))
+                if (!allowUrl(finalUrl)) return FetchResult.Failed(ImportError.of(ImportReason.BAD_URL))
                 if (response.statusCode() >= 400) {
                     val error = statusErrorOf(
                         response.statusCode(),

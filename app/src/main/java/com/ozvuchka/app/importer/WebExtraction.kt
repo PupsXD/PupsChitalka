@@ -237,6 +237,28 @@ internal fun siteOf(host: String): String? {
     return if (lastTwo in multiPartSuffixes) lastThree else lastTwo
 }
 
+/** Redirects stay on the originating HTTPS site; Litmir's three declared domains are one site. */
+internal fun allowsWebRedirect(origin: String, target: String): Boolean {
+    val from = runCatching { java.net.URI(canonicalWebUrl(origin) ?: return false) }.getOrNull() ?: return false
+    val to = runCatching { java.net.URI(canonicalWebUrl(target) ?: return false) }.getOrNull() ?: return false
+    if (from.scheme != "https" || to.scheme != "https") return false
+    fun family(host: String): String = when (host.lowercase(Locale.ROOT).removePrefix("www.").removePrefix("m.")) {
+        "litmir.club", "litmir.me", "litmir.net" -> "litmir"
+        else -> siteOf(host) ?: host.lowercase(Locale.ROOT).removePrefix("www.").removePrefix("m.")
+    }
+    if (family(from.host ?: return false) != family(to.host ?: return false)) return false
+
+    // A reader/book-page redirect must keep its explicit book id when both URLs are book pages.
+    fun bookPage(uri: java.net.URI) = uri.path == "/br/" || uri.path == "/bd/"
+    if (bookPage(from) && bookPage(to)) {
+        fun bookId(uri: java.net.URI): String? = Regex("(?:^|&)b=([^&]+)")
+            .find(uri.rawQuery.orEmpty())?.groupValues?.get(1)
+        val originalId = bookId(from)
+        if (originalId != null && bookId(to) != originalId) return false
+    }
+    return true
+}
+
 /** Words that mark a table-of-contents or other non-chapter link. */
 private val notNextText = Regex(
     "(?iu)(содержан|оглавлен|список глав|все главы|назад|на главную|table of contents|contents|toc)",
@@ -252,12 +274,17 @@ private val nextText = Regex("(?iu)(следующ|next|дальше|далее|
 internal fun extractNextUrl(document: Document, sourceUrl: String): String? {
     val host = runCatching { canonicalWebUrl(sourceUrl)?.let { URI(it).host } }.getOrNull() ?: return null
 
+    var explicitWrongBook = false
     fun accept(element: Element?): String? {
         val href = element?.absUrl("href").orEmpty()
         if (href.isEmpty()) return null
         val nextUrl = canonicalWebUrl(href) ?: return null
         val nextHost = runCatching { URI(nextUrl).host }.getOrNull() ?: return null
         if (siteOf(nextHost) != siteOf(host) || nextUrl == sourceUrl) return null
+        if (!allowsWebRedirect(sourceUrl, nextUrl)) {
+            explicitWrongBook = true
+            return null
+        }
         val label = element!!.text()
         if (notNextText.containsMatchIn(label) || notNextText.containsMatchIn(nextUrl)) return null
         // TOC pagination walks /page/N; a chapter link does not.
@@ -270,13 +297,17 @@ internal fun extractNextUrl(document: Document, sourceUrl: String): String? {
         // A bare number or a pager glyph names a table-of-contents page, not a chapter.
         .filterNot { it.text().trim().matches(numericLabel) }
     for (element in byClass) accept(element)?.let { return it }
-    accept(document.selectFirst("link[rel=next][href]"))?.let { return it }
+    document.selectFirst("link[rel=next][href]")?.let { link ->
+        accept(link)?.let { return it }
+    }
     for (element in document.select("a[href]")) {
         val label = element.text()
         if (label.length > 60 || notNextText.containsMatchIn(label)) continue
-        if (nextText.containsMatchIn(label)) accept(element)?.let { return it }
+        if (nextText.containsMatchIn(label)) {
+            accept(element)?.let { return it }
+        }
     }
-    return runCatching { numericIncrementNext(sourceUrl) }.getOrNull()
+    return if (explicitWrongBook) null else runCatching { numericIncrementNext(sourceUrl) }.getOrNull()
 }
 
 /** «2», «1 / 5», «»» — a pager's label, never a chapter link's. */

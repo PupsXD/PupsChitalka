@@ -139,6 +139,23 @@ class VoskFrontendTest {
     }
 
     @Test
+    fun inflectedHomographsReachTheRightPhonesWithoutBreakingBertRows() {
+        val map = JSONObject(resource("config.json")).getJSONObject("phoneme_id_map")
+        val ids = map.keys().asSequence().associateWith { map.getInt(it) }
+        val frontend = VoskFrontend(ids, BertWordPiece.load(resource("vocab.txt").lineSequence()), { null })
+
+        val castleForm = frontend.prepare(RussianHomographStress.apply("\u0414\u0432\u0435\u0440\u044c \u0437\u0430\u043c\u043a\u0430."))
+        assertTrue(wordSymbols(castleForm).toString(), wordSymbols(castleForm).contains("a1"))
+        assertTrue(castleForm.bertRows.all { it in castleForm.wordTokens.indices })
+        assertEquals(castleForm.phonemes.size, castleForm.bertRows.size)
+
+        val flourForm = frontend.prepare(RussianHomographStress.apply("\u041f\u0448\u0435\u043d\u0438\u0447\u043d\u043e\u0439 \u043c\u0443\u043a\u043e\u0439."))
+        assertTrue(wordSymbols(flourForm).toString(), wordSymbols(flourForm).contains("o1"))
+        assertTrue(flourForm.bertRows.all { it in flourForm.wordTokens.indices })
+        assertEquals(flourForm.phonemes.size, flourForm.bertRows.size)
+    }
+
+    @Test
     fun dictionaryKeepsTheMostProbableVariantAndTheFirstOnATie() {
         val text = folder.newFile("small").apply {
             writeText(
