@@ -8,19 +8,34 @@ import java.nio.ByteOrder
 import java.nio.channels.FileChannel
 
 /**
- * Halves the work of Vosk TTS 0.10's acoustic model on the phone: its flow-matching decoder runs 10
- * Euler steps of dt = 0.1, each with two estimator passes mixed by classifier-free guidance; this keeps
- * steps 0, 2, 4, 6, 8 with dt = 0.2 and lets ONNX Runtime skip the rest. A port of
- * tools/voices/vosk-fewer-steps.py --steps 5. Measured on a Galaxy S24 Ultra: load 55 s → 14–18 s,
- * RTF 0.82 → 0.37–0.46; UTMOS on four voices 3.32 → 3.29.
+ * Rewrites Vosk TTS 0.10's acoustic model so it runs fewer, larger Euler steps.
+ *
+ * As published, the flow-matching decoder runs 10 steps of dt = 0.1, each with two estimator passes
+ * mixed by classifier-free guidance: 20 passes, about 95% of the synthesis time. [rewrite] keeps
+ * [STEPS] of the 10 steps, all of them guided unless told otherwise, and gives a skipped step's dt to
+ * the step before it, so the trajectory still ends at t = 1. The knobs default the same way here,
+ * in tools/voices/vosk-fewer-steps.py and in vosk-prepare.py: guidance on every kept step.
+ *
+ * The defaults are the variant the PC stand picked (tools/voices/vosk-compare-variants.py, ten voices,
+ * noise 0 and the model's own): 5 steps with guidance, 10 passes, the closest to the published model
+ * by UTMOS. Measured alternatives on the same model, of which neither is faster and as close:
+ * 8 steps of which 3 guided (11 passes, UTMOS −0.05…−0.09, log-mel 21% closer to the original) and
+ * 8 steps without guidance (8 passes, 17% faster, UTMOS −0.10…−0.22, twice as far). See the PUP-003
+ * report in docs/VOICE_CANDIDATES.md.
  *
  * The .onnx file is protobuf. Only the node list changes, so nodes are parsed, a few inputs rewired,
- * five Constant nodes added and unneeded nodes left out; everything else, the 230 MB of weights
- * included, is copied byte for byte.
+ * a couple of Constant nodes added and unneeded nodes and weights left out; everything else is copied
+ * byte for byte. Accepts the model as published and the same graph after onnxruntime's
+ * quant_pre_process, which stores the dt constants as initializers instead of Constant nodes.
  */
 internal object VoskDecoderSteps {
+    /** Steps kept out of the 10 the model has: 5 passes with guidance instead of 20. */
+    const val STEPS = 5
+
+    private const val STEPS_IN_MODEL = 10
     private const val GRAPH = 7       // ModelProto.graph
     private const val NODE = 1        // GraphProto.node
+    private const val INITIALIZER = 5 // GraphProto.initializer
     private const val GRAPH_OUTPUT = 12
     private val VELOCITY = Regex("/matcha/decoder/estimator(?:_(\\d+))?/Mul_1_output_0")
 
@@ -29,8 +44,15 @@ internal object VoskDecoderSteps {
         var changed = false
     }
 
-    /** Writes the 5-step model to [target]; throws, leaving [source] as it is, when the layout is not Vosk 0.10's. */
-    fun halve(source: File, target: File) {
+    /**
+     * Writes a [steps]-step model to [target]; throws, leaving [source] as it is, when the layout is
+     * not Vosk 0.10's. The first [cfgSteps] kept steps keep classifier-free guidance, the rest use the
+     * conditional velocity alone; by default every kept step keeps it. Returns how many Constant nodes
+     * it added for the summed dt.
+     */
+    fun rewrite(source: File, target: File, steps: Int = STEPS, cfgSteps: Int = steps): Int {
+        require(steps in 1..STEPS_IN_MODEL && cfgSteps in 0..steps) { "steps $steps, cfgSteps $cfgSteps" }
+        var constantsAdded = 0
         RandomAccessFile(source, "r").use { file ->
             val bytes = file.channel.map(FileChannel.MapMode.READ_ONLY, 0, file.length())
             val model = fields(bytes, 0, bytes.limit())
@@ -40,8 +62,12 @@ internal object VoskDecoderSteps {
             val nodes = nodeFields.map { parseNode(bytes, it.valueStart, it.end) }
             val outputs = graph.filter { it.number == GRAPH_OUTPUT }
                 .map { output -> string(bytes, fields(bytes, output.valueStart, output.end).first { it.number == 1 }) }
-            val added = rewire(nodes, outputs)
+            val scalars = initializerScalars(bytes, graph)
+            val added = rewire(nodes, outputs, scalars, steps, cfgSteps)
+            constantsAdded = added.size
             val kept = needed(nodes + added.map { it.first }, outputs)
+            val used = HashSet<String>()
+            kept.forEach { node -> used += node.inputs }
 
             // The new graph as pieces: bytes built here, or ranges copied straight from the source file.
             val pieces = ArrayList<Any>()
@@ -55,6 +81,9 @@ internal object VoskDecoderSteps {
                         if (node !in kept) continue
                         if (node.changed) buffered.writeField(NODE, encodeNode(bytes, node)) else buffered.writeRaw(bytes, field.start, field.end)
                     }
+                    // The weights of the steps that are gone: several MB each, dropped whole.
+                    field.number == INITIALIZER && field.wireType == 2 && initializerName(bytes, field)?.let { it !in used } == true ->
+                        continue
                     field.end - field.start > 1 shl 16 -> { // a weight tensor: copied without passing through memory
                         pieces += buffered.toByteArray()
                         buffered.reset()
@@ -88,15 +117,24 @@ internal object VoskDecoderSteps {
                 check(partial.renameTo(target)) { "cannot write ${target.name}" }
             }
         }
+        return constantsAdded
     }
 
     /** The decoder edits; returns the new Constant nodes with their encodings. */
-    private fun rewire(nodes: List<Node>, graphOutputs: List<String>): List<Pair<Node, ByteArray>> {
+    private fun rewire(
+        nodes: List<Node>,
+        graphOutputs: List<String>,
+        initializers: Map<String, Float>,
+        steps: Int,
+        cfgSteps: Int,
+    ): List<Pair<Node, ByteArray>> {
         val consumers = HashMap<String, MutableList<Node>>()
         nodes.forEach { node -> node.inputs.forEach { consumers.getOrPut(it) { ArrayList() } += node } }
         val constants = nodes.filter { it.opType == "Constant" }.associateBy { it.outputs.single() }
-        class Step(val index: Int, val scaled: Node, val update: Node, val dt: String)
-        val steps = nodes.filter { it.opType == "Sub" && it.name.startsWith("/matcha/decoder/Sub") }.mapNotNull { sub ->
+        class Step(val index: Int, val velocity: String, val mix: String, val scaled: Node, val update: Node, val dt: String) {
+            val dtValue: Float? get() = constants[dt]?.scalar ?: initializers[dt]
+        }
+        val stepsFound = nodes.filter { it.opType == "Sub" && it.name.startsWith("/matcha/decoder/Sub") }.mapNotNull { sub ->
             val cond = VELOCITY.matchEntire(sub.inputs[0]) ?: return@mapNotNull null
             VELOCITY.matchEntire(sub.inputs[1]) ?: return@mapNotNull null
             val weight = consumers[sub.outputs[0]]?.singleOrNull() ?: return@mapNotNull null
@@ -104,20 +142,20 @@ internal object VoskDecoderSteps {
             val scaled = consumers[mix.outputs[0]]?.singleOrNull() ?: return@mapNotNull null
             val update = consumers[scaled.outputs[0]]?.singleOrNull() ?: return@mapNotNull null
             val dt = scaled.inputs.first { it != mix.outputs[0] }
-            Step((cond.groupValues[1].ifEmpty { "0" }.toInt()) / 2, scaled, update, dt)
+            Step((cond.groupValues[1].ifEmpty { "0" }.toInt()) / 2, sub.inputs[0], mix.outputs[0], scaled, update, dt)
         }.sortedBy { it.index }
-        check(steps.map { it.index } == (0 until 10).toList()) { "unexpected decoder: steps ${steps.map { it.index }}" }
-        check(steps.all { kotlin.math.abs((constants[it.dt]?.scalar ?: 0f) - 0.1f) < 1e-5f }) { "unexpected decoder: dt is not 0.1" }
+        check(stepsFound.map { it.index } == (0 until STEPS_IN_MODEL).toList()) { "unexpected decoder: steps ${stepsFound.map { it.index }}" }
+        check(stepsFound.all { kotlin.math.abs((it.dtValue ?: 0f) - 0.1f) < 1e-5f }) { "unexpected decoder: dt is not 0.1" }
+
+        // Kept steps are spread over the ten: for 8 that is 0,1,2,3,5,6,7,8 and the last one covers 8→10.
+        val kept = (0 until steps).map { it * STEPS_IN_MODEL / steps }.toSet()
+        check(kept.size == steps) { "unexpected step selection: $kept" }
 
         val added = ArrayList<Pair<Node, ByteArray>>()
-        for (step in steps) {
-            if (step.index % 2 == 0) {
-                val name = "${step.dt}_x2"
-                val encoded = constantNode(name, 0.2f)
-                added += Node(-1, -1, ArrayList(), listOf(name), name, "Constant", 0.2f) to encoded
-                step.scaled.inputs[step.scaled.inputs.indexOf(step.dt)] = name
-                step.scaled.changed = true
-            } else {
+        val addedNames = HashSet<String>()
+        for (step in stepsFound) {
+            if (step.index !in kept) {
+                // Whoever read this step's x now reads the x the step started from.
                 val skipped = step.update.outputs[0]
                 check(skipped !in graphOutputs) { "the last step cannot be skipped" }
                 val previous = step.update.inputs.first { it != step.scaled.outputs[0] }
@@ -125,7 +163,30 @@ internal object VoskDecoderSteps {
                     for (i in node.inputs.indices) if (node.inputs[i] == skipped) node.inputs[i] = previous
                     node.changed = true
                 }
+                continue
             }
+            // A kept step that covers several original steps integrates with the summed dt.
+            val following = (kept.filter { it > step.index }.minOrNull() ?: STEPS_IN_MODEL)
+            val multiplier = following - step.index
+            if (multiplier != 1) {
+                // Some steps share one dt constant, so this node may already be there: same name, same value.
+                val name = "${step.dt}_x$multiplier"
+                if (addedNames.add(name)) {
+                    val value = 0.1f * multiplier
+                    added += Node(-1, -1, ArrayList(), listOf(name), name, "Constant", value) to constantNode(name, value)
+                }
+                step.scaled.inputs[step.scaled.inputs.indexOf(step.dt)] = name
+                step.scaled.changed = true
+            }
+        }
+
+        // Guidance only where it was asked for; elsewhere the conditional velocity is used as it is.
+        var guided = 0
+        for (step in stepsFound) {
+            if (step.index !in kept) continue
+            if (guided++ < cfgSteps) continue
+            step.scaled.inputs[step.scaled.inputs.indexOf(step.mix)] = step.velocity
+            step.scaled.changed = true
         }
         return added
     }
@@ -190,6 +251,34 @@ internal object VoskDecoderSteps {
     private fun string(bytes: ByteBuffer, field: Field): String = copy(bytes, field.valueStart, field.end).decodeToString()
 
     private fun copy(bytes: ByteBuffer, from: Int, to: Int): ByteArray = ByteArray(to - from).also { slice(bytes, from, to).get(it) }
+
+    /** The name of an initializer's tensor, or null when the message is not one. */
+    private fun initializerName(bytes: ByteBuffer, initializer: Field): String? =
+        fields(bytes, initializer.valueStart, initializer.end).firstOrNull { it.number == 8 }?.let { string(bytes, it) }
+
+    /** Float32 scalars among the graph initializers: quant_pre_process turns the dt constants into these. */
+    private fun initializerScalars(bytes: ByteBuffer, graph: List<Field>): Map<String, Float> {
+        val result = HashMap<String, Float>()
+        for (field in graph) {
+            if (field.number != INITIALIZER || field.wireType != 2) continue
+            var name: String? = null
+            var value: Float? = null
+            for (tensor in fields(bytes, field.valueStart, field.end)) {
+                when {
+                    tensor.number == 8 -> name = string(bytes, tensor)
+                    // raw_data (9) or one packed float_data (4), either way four bytes of a float32 scalar
+                    tensor.number == 9 && tensor.end - tensor.valueStart == 4 ->
+                        value = slice(bytes, tensor.valueStart, tensor.end).order(ByteOrder.LITTLE_ENDIAN).float
+                    tensor.number == 4 && tensor.wireType == 2 && tensor.end - tensor.valueStart == 4 ->
+                        value = slice(bytes, tensor.valueStart, tensor.end).order(ByteOrder.LITTLE_ENDIAN).float
+                    tensor.number == 4 && tensor.wireType == 5 ->
+                        value = slice(bytes, tensor.valueStart, tensor.end).order(ByteOrder.LITTLE_ENDIAN).float
+                }
+            }
+            if (name != null && value != null) result[name] = value
+        }
+        return result
+    }
 
     private fun parseNode(bytes: ByteBuffer, from: Int, to: Int): Node {
         val inputs = ArrayList<String>()

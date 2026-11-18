@@ -160,6 +160,7 @@ class MainActivity : ComponentActivity() {
     private var speech by mutableStateOf<SpeechSettings?>(null)
     private var modelStates by mutableStateOf<Map<SpeechModel, ModelInstallState>>(emptyMap())
     private var installedModels by mutableStateOf<Set<SpeechModel>>(emptySet())
+    private var upgradeableModels by mutableStateOf<Set<SpeechModel>>(emptySet())
     private var systemEngines by mutableStateOf<List<SystemEngineInfo>>(emptyList())
     private val installedEngines: Set<String> get() = systemEngines.mapTo(HashSet()) { it.packageName }
     /** The engines were looked up at least once, so a missing RuVoice is really missing. */
@@ -260,7 +261,15 @@ class MainActivity : ComponentActivity() {
                 modelStates = states
                 if (finished.isNotEmpty()) {
                     refreshInstalledModels()
-                    finished.keys.forEach(::onModelInstalled)
+                    val upgraded = finished.filterValues { it.upgrade }.keys
+                    if (upgraded.isNotEmpty()) {
+                        // The chosen voice stays chosen: an upgrade only replaces the slow graph under it.
+                        notice = "${SpeechModel.VOSK.title}: запуск ускорен"
+                        lifecycleScope.launch(Dispatchers.IO) {
+                            SynthesisHub.shared(this@MainActivity).releaseIfIdle()
+                        }
+                    }
+                    finished.keys.filterNot { it in upgraded }.forEach(::onModelInstalled)
                 }
             }
         }
@@ -349,6 +358,7 @@ class MainActivity : ComponentActivity() {
                                     supertonicSteps = settings.supertonicSteps,
                                     preferFullModels = settings.preferFullModels,
                                     installedModels = installedModels,
+                                    upgradeableModels = upgradeableModels,
                                     installStates = modelStates,
                                     russianVoiceLabel = voiceLabel(settings.russianVoice),
                                     englishVoiceLabel = voiceLabel(settings.englishVoice),
@@ -483,6 +493,7 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshInstalledModels() {
         installedModels = SpeechModel.entries.filter { SpeechModels.isInstalled(this, it) }.toSet()
+        upgradeableModels = SpeechModel.entries.filter { SpeechModels.isUpgradeable(this, it) }.toSet()
     }
 
     private fun refreshEngines() {
@@ -931,6 +942,7 @@ class MainActivity : ComponentActivity() {
         }
 
         override fun download(model: SpeechModel) = SpeechModels.install(this@MainActivity, model)
+        override fun upgrade(model: SpeechModel) = SpeechModels.upgrade(this@MainActivity, model)
         override fun cancelDownload(model: SpeechModel) = SpeechModels.cancel(model)
 
         override fun delete(model: SpeechModel) {

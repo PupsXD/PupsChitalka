@@ -17,8 +17,9 @@ import kotlin.math.sqrt
 /**
  * The Kotlin Vosk engine on the phone, end to end, against vosk-tts in Python. Needs the model in
  * the app's speech_models/vosk-model-tts-ru-0.10-multi and bench/ref-28.f32: what Python's frontend
- * and its 5-step decoder (tools/voices/vosk-fewer-steps.py --steps 5) give for [SENTENCE], voice 28,
- * without noise (scales 0, 1, 0). With model.onnx present the decoder is first rewritten on the phone.
+ * and its 5-step guided decoder (`tools/voices/vosk-fewer-steps.py --steps 5 --cfg-steps 5`) give for
+ * [SENTENCE], voice 28, without noise (scales 0, 1, 0). With model.onnx present the decoder is first
+ * rewritten on the phone.
  *   adb shell am instrument -w -e class com.ozvuchka.app.speech.VoskTtsDeviceTest com.ozvuchka.app.dev.test/androidx.test.runner.AndroidJUnitRunner
  */
 @RunWith(AndroidJUnit4::class)
@@ -40,7 +41,7 @@ class VoskTtsDeviceTest {
         if (original.isFile) {
             // What installing does: the 5-step decoder written on the phone, replacing any copy from a PC.
             val started = System.nanoTime()
-            VoskDecoderSteps.halve(original, File(dir, "model-5steps.onnx"))
+            VoskDecoderSteps.rewrite(original, File(dir, "model-5steps.onnx"))
             report("decoder rewritten on the phone: ${ms(started)} ms")
         }
         var started = System.nanoTime()

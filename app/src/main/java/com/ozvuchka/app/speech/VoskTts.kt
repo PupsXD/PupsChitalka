@@ -38,12 +38,15 @@ internal data class VoskNoise(val level: Float, val durationLevel: Float) {
  * Vocos vocoder) renders 22 050 Hz audio. Not thread-safe: the caller runs one sentence at a time.
  *
  * Files in [directory]: config.json, vocab.txt, dictionary (+ dictionary.idx, built on first use),
- * bert.onnx, and the acoustic model: model-5steps.onnx when present (half the decoder steps, see
- * tools/voices/vosk-fewer-steps.py), otherwise model.onnx as published.
+ * bert.onnx (or bert-int8.onnx), and the acoustic model — [acousticModel] picks model-fast.onnx (the
+ * decoder cut and the shapes resolved at install time, see tools/voices/vosk-prepare.py),
+ * model-prepared.onnx when the decoder could not be rewritten, the 5-step file of an older install, or
+ * model.onnx as published. A prepared graph also gets ONNX Runtime's own optimized copy (`….ort`),
+ * kept only while the model file it was built from is unchanged.
  */
 internal class VoskTts(
     directory: File,
-    threads: Int,
+    private val threads: Int,
     /** Stress for a word the model's dictionary lacks; null when the lexicon does not know it either. */
     private val stressFallback: (String) -> String? = { null },
 ) : AutoCloseable {
@@ -71,12 +74,53 @@ internal class VoskTts(
         val dictionary = VoskDictionary.open(dictionaryFile, index)
         val tokenizer = File(directory, "vocab.txt").useLines { BertWordPiece.load(it.toList().asSequence()) }
         frontend = VoskFrontend(ids, tokenizer, dictionary::find, stressFallback)
-        val options = OrtSession.SessionOptions().apply {
-            setIntraOpNumThreads(threads)
-            setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+        bert = env.createSession(bertModel(directory).path, options())
+        acoustic = createAcoustic(acousticModel(directory))
+    }
+
+    /**
+     * The acoustic model, from ONNX Runtime's optimized copy when there is one. The copy loads in a
+     * fraction of the time, but only a graph that had its shapes resolved ahead of time gains anything
+     * from it (57 s → 2.6 s; the copy then takes 1.2 s), so it is written for prepared graphs only.
+     * The copy is tied to the model file by [OrtCache]: a replaced model or a copy without a stamp is
+     * not loaded but rebuilt. Anything unexpected about the copy falls back to the .onnx.
+     */
+    private fun createAcoustic(model: File): OrtSession {
+        val cache = File(model.path + ".ort")
+        val stamp = File(model.path + ".ort.stamp")
+        if (OrtCache.isValid(model, cache, stamp)) {
+            try {
+                return env.createSession(cache.path, options())
+            } catch (error: Exception) {
+                android.util.Log.w("VoskTts", "optimized graph is not usable, loading the model", error)
+                OrtCache.forget(cache, stamp)
+            }
+        } else if (cache.exists() || stamp.exists()) {
+            // Built from another model or before stamps existed: it cannot be trusted.
+            OrtCache.forget(cache, stamp)
         }
-        bert = env.createSession(File(directory, "bert.onnx").path, options)
-        acoustic = env.createSession(acousticModel(directory).path, options)
+        if (isPrepared(model)) {
+            try {
+                return env.createSession(model.path, options(cache)).also { OrtCache.remember(model, stamp) }
+            } catch (error: Exception) {
+                android.util.Log.w("VoskTts", "optimized graph not written, loading the model again", error)
+                cache.delete()
+            }
+        }
+        return env.createSession(model.path, options())
+    }
+
+    private fun options(cache: File? = null): OrtSession.SessionOptions = OrtSession.SessionOptions().apply {
+        setIntraOpNumThreads(threads)
+        setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+        if (cache != null) {
+            // Saving needs the same options at load time; when the runtime cannot, the model is still usable.
+            try {
+                setOptimizedModelFilePath(cache.path)
+            } catch (error: Exception) {
+                android.util.Log.w("VoskTts", "optimized graph cannot be saved", error)
+            }
+        }
     }
 
     /**
@@ -155,8 +199,20 @@ internal class VoskTts(
         private const val HIDDEN = 768
         val REQUIRED = listOf("config.json", "vocab.txt", "dictionary", "bert.onnx")
 
+        /** The acoustic model to load, best first; a fresh install has model-fast.onnx, an old one model-5steps.onnx. */
         fun acousticModel(directory: File): File =
-            File(directory, "model-5steps.onnx").takeIf { it.isFile } ?: File(directory, "model.onnx")
+            MODELS.map { File(directory, it) }.firstOrNull { it.isFile } ?: File(directory, MODELS.last())
+
+        private val MODELS = listOf(
+            "model-fast.onnx", "model-prepared.onnx", "model-5steps.onnx", "model.onnx",
+        )
+
+        /** Whether [model] is a graph whose shapes were resolved at install time, the only kind the .ort copy helps. */
+        fun isPrepared(model: File): Boolean = model.name == "model-fast.onnx" || model.name == "model-prepared.onnx"
+
+        /** ruBERT, quantized to INT8 when that file was put next to it (halves the memory it needs, see the PUP-003 report). */
+        fun bertModel(directory: File): File =
+            File(directory, "bert-int8.onnx").takeIf { it.isFile } ?: File(directory, "bert.onnx")
 
         fun isInstalled(directory: File): Boolean =
             REQUIRED.all { File(directory, it).length() > 0 } && acousticModel(directory).length() > 0

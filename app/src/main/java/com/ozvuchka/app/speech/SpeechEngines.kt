@@ -251,7 +251,10 @@ internal class SynthesisHub private constructor(context: Context) {
         return KokoroRu.speakerIn(checkpoint, speaker)?.let { checkpoint to it }
     }
 
-    /** Vosk loads for 15–55 s on the phone (ONNX Runtime prepares a graph of 15–29 thousand nodes), so it stays loaded. */
+    /**
+     * Vosk stays loaded between chapters: its two graphs hold about a gigabyte, and loading them costs
+     * seconds (minutes for a model installed before model-fast.onnx, see VoskTts.createAcoustic).
+     */
     private fun voskTts(): VoskTts? {
         vosk?.let { return it }
         if (!SpeechModels.isInstalled(app, SpeechModel.VOSK)) return null

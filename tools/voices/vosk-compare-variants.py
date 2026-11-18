@@ -2,10 +2,15 @@
 """Renders the test passage with variants of Vosk's acoustic model (see vosk-fewer-steps.py) and
 measures each: load time, RTF on this PC, UTMOS and Whisper CER; writes mp3s and variants.json.
 
-  python tools/voices/vosk-compare-variants.py <vosk model dir> <variants dir> <out dir> [speaker ids]
+  python tools/voices/vosk-compare-variants.py <vosk model dir> <variants dir> <out dir> [speaker ids] [--noise N]
 
 Speaker ids default to 28 and 47 (men) and 49 and 2 (women), the best by UTMOS in the 0.10 model.
+--noise N fixes the model's noise scales instead of taking them from config.json: at 0 the output is
+deterministic, so two runs of the same variant agree and the numbers of different variants differ only
+by the decoder. Without it every render is a fresh draw, and UTMOS of one and the same variant moves by
+about ±0.1 between runs.
 """
+import argparse
 import importlib.util
 import json
 import subprocess
@@ -28,7 +33,7 @@ def load_module(name):
     return module
 
 
-def main(model_dir, variants_dir, out_dir, speakers="28,47,49,2"):
+def main(model_dir, variants_dir, out_dir, speakers="28,47,49,2", noise=None):
     render = load_module("render-ru-voices")
     analyze = load_module("analyze-ru-voices")
     out = Path(out_dir)
@@ -49,7 +54,8 @@ def main(model_dir, variants_dir, out_dir, speakers="28,47,49,2"):
         synth.synth_audio("Прогрев.", speaker_id=0)
         for sid in map(int, speakers.split(",")):
             started = time.perf_counter()
-            chunks = [synth.synth_audio(s, speaker_id=sid).astype(np.float32) / 32768.0 for s in render.sentences(render.PASSAGE)]
+            chunks = [synth.synth_audio(s, speaker_id=sid, noise_level=noise, duration_noise_level=noise).astype(np.float32) / 32768.0
+                      for s in render.sentences(render.PASSAGE)]
             spent = time.perf_counter() - started
             audio = render.join(chunks, 22050)
             key = f"{variant.stem}-{sid:02d}"
@@ -70,4 +76,12 @@ def main(model_dir, variants_dir, out_dir, speakers="28,47,49,2"):
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:])
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("model_dir")
+    parser.add_argument("variants_dir")
+    parser.add_argument("out_dir")
+    parser.add_argument("speakers", nargs="?", default="28,47,49,2")
+    parser.add_argument("--noise", type=float, default=None,
+                        help="noise scales for the synthesizer instead of config.json; 0 makes the output deterministic")
+    args = parser.parse_args()
+    main(args.model_dir, args.variants_dir, args.out_dir, args.speakers, args.noise)

@@ -49,26 +49,65 @@ Vosk TTS therefore became a second Russian engine, marked as a test. As publishe
 phone: on the Galaxy S24 Ultra the acoustic model loads for 45–55 s and synthesizes at RTF 0.78–0.82.
 96.5% of the time goes to its Matcha-TTS decoder, which the ONNX file unrolls into 20 estimator runs:
 10 Euler steps of dt = 0.1, each with a conditional and an unconditional pass mixed by classifier-free
-guidance (`v = v_cond + 0.5 * (v_cond - v_uncond)`). Keeping every other step with dt = 0.2 halves the
-work; dropping the guidance halves it again but costs quality:
+guidance (`v = v_cond + 0.5 * (v_cond - v_uncond)`).
 
-| Decoder | Graph nodes | UTMOS, mean of 4 voices | Load on the S24 Ultra | RTF on the S24 Ultra, 4 threads |
-| --- | ---: | ---: | ---: | ---: |
-| 10 steps, guidance (as published) | 29,224 | 3.32 | 45–55 s | 0.78–0.82 |
-| **5 steps, guidance (what the app installs)** | 15,789 | 3.29 | 14–18 s | 0.33–0.46 |
-| 10 steps, no guidance | 14,514 | 3.14 | not measured | not measured |
-| 5 steps, no guidance | 8,434 | 3.04 | 5.6 s | 0.24 |
+Since PUP-003 the start is short. The 45–55 s was the graph's dynamic shapes, which ONNX Runtime
+resolved again on every load — and a cached `.ort` copy of the published graph did not help, as this
+project measured before (86 s). `quant_pre_process` from `onnxruntime.quantization` resolves them once,
+and ONNX Runtime's own optimized copy of *that* graph loads in about a second:
 
-The app rewrites the downloaded model on the phone (`VoskDecoderSteps.kt`, 8.6 s; its output is
-bit-identical to `tools/voices/vosk-fewer-steps.py --steps 5`). Installing from the app on the S24
-Ultra took about three and a half minutes over Wi-Fi: 834 MB in 170 s, then unpacking, the dictionary
-index and the rewrite. The text frontend is a Kotlin port of
-vosk-tts 0.3.61, checked sentence by sentence against the Python code (`VoskFrontendTest`), and the
-whole engine against Python on the phone with the model's noise switched off: the same number of
-samples, correlation 1.00000 (`VoskTtsDeviceTest`). Saving ONNX Runtime's optimized graph did not help:
-it loaded slower (86 s on the PC) and ran slower. Six threads were slower than four (RTF 0.86 against
-0.78). ruBERT, 654 MB of the download, costs 20–50 ms a sentence; the price of Vosk is memory, about
-1.2 GB while reading.
+| Graph | Load on the PC, 4 threads | Note |
+| --- | ---: | --- |
+| `model.onnx` as published | 57.0 s | 29,224 nodes, 235 MB |
+| after `quant_pre_process` | 2.6 s | 14,864 nodes, 226 MB |
+| … with the decoder cut to 5 steps (`model-fast.onnx`) | 1.7 s | 8,170 nodes, 212 MB |
+| … and ONNX Runtime's `.ort` copy next to it | **1.0–1.2 s** | +211 MB on disk, written on first start |
+
+The weights are untouched: at noise 0 the prepared graph's audio correlates 0.99999989 with the
+published one (max difference 8.8·10⁻⁶). `tools/voices/vosk-prepare.py` does all of this to a model by
+hand and prints the timings and that correlation. The app downloads the prepared graph from
+[NGC404/sgspeech-vosk-tts-ru-0.10-prepared](https://huggingface.co/NGC404/sgspeech-vosk-tts-ru-0.10-prepared)
+(Apache 2.0) during install, checks its SHA-256, deletes the graph from the Alpha Cephei archive,
+rewrites the decoder itself (`VoskDecoderSteps.kt`; `max difference 0.0` against
+`vosk-fewer-steps.py` on the same graph) and lets ONNX Runtime write the `.ort` copy on the first start,
+rebuilding it when the model file changes. A failed fetch leaves `model.onnx` as the acoustic model, cut
+to 5 steps; a failed rewrite keeps the prepared graph (`model-prepared.onnx`), which still loads in
+seconds. An install from before this change keeps working untouched; the model card offers to upgrade it
+by downloading `model-prepared.onnx` alone (226 MB) and rewriting the decoder in place.
+
+The decoder was re-measured on ten voices (28/47/49/2 plus 0, 5, 10, 20, 35, 56) with
+`tools/voices/vosk-compare-variants.py`, and again at noise 0, where the output is deterministic:
+
+| Decoder | Estimator runs | RTF, 10 voices | UTMOS, voices 28/47/49/2 | UTMOS, 10 voices | UTMOS at noise 0 | log-mel to the original |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10 steps, guidance (as published) | 20 | 0.313 | 3.18 | 2.89 | 2.635 | — |
+| **5 steps, guidance (what the app installs)** | 10 | **0.171** | **3.23** | **2.88** | **2.655** | 0.56 dB |
+| 8 steps, guidance on the first 3 | 11 | 0.176 | 3.13 | 2.87 | 2.545 | 0.44 dB |
+| 8 steps, no guidance | 8 | 0.141 | 2.96 | 2.71 | 2.538 | 1.01 dB |
+
+Whisper large-v3-turbo hears the whole passage correctly in every variant (CER 0.0%), so intelligibility
+does not separate them; UTMOS and the distance to the original do. Eight estimator runs without guidance
+are 17% faster than the ten guided ones, as counted, but cost 0.1–0.2 UTMOS — the guidance, not the step
+size, is what keeps the voice close to the target. Eight steps guided on the first three are 21% closer
+to the original by log-mel, yet 0.05–0.09 lower by UTMOS and slightly slower than today's ten passes.
+Both 8-step variants therefore exist in `vosk-fewer-steps.py --steps 8 [--no-cfg | --cfg-steps 3]` and in
+`VoskDecoderSteps.rewrite(steps, cfgSteps)`, and neither is what the app installs: it keeps 5 guided
+steps. UTMOS of one and the same variant moves by ±0.1 between runs at the model's own noise (3.33 and
+3.45 for one voice), which is why the noise-0 column exists; those values repeat exactly.
+
+INT8 ruBERT (dynamic quantization, `vosk-prepare.py --int8`): 624 MB → 156 MB, load 0.85 → 0.47 s and
+39 → 10 ms a sentence on the PC. On the stand it scores UTMOS 2.74 against 2.66 and CER 0.0%, and its
+audio sits 2.5 dB away from the FP32 run — the phoneme durations move, so it is another take rather than
+a degraded one. The app uses `bert-int8.onnx` when that file lies next to `bert.onnx`; it does not
+download it, because nothing hosts it yet, so the ~480 MB of memory it would save stay on the table.
+
+The text frontend is a Kotlin port of vosk-tts 0.3.61, checked sentence by sentence against the Python
+code (`VoskFrontendTest`), and the whole engine against Python on the phone with the model's noise
+switched off: the same number of samples, correlation 1.00000 (`VoskTtsDeviceTest`). Six threads were
+slower than four (RTF 0.86 against 0.78). ruBERT, 654 MB of the download, costs 20–50 ms a sentence; the
+price of Vosk is memory, about 1.2 GB while reading. Installing on the S24 Ultra took about three and a
+half minutes over Wi-Fi for the older 834 MB download; the prepared graph adds 226 MB to it, and the
+`.ort` copy another 211 MB on disk.
 
 Not measured: reading for an hour (heat, throttling), phones weaker than the S24 Ultra, and stress in
 homographs, where Vosk takes the most frequent variant without looking at the context. The model's
